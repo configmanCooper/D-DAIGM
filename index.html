@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AETHERTABLE — a 2D D&D 5e simulator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23181410'/%3E%3Cpath d='M16 3l11 6.5v13L16 29 5 22.5v-13z' fill='none' stroke='%23c99a3a' stroke-width='2'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<!-- The whole app renders inside here. If a boot step throws, app.js replaces
+     this with a readable error panel rather than leaving a white screen. -->
+<div id="app">
+
+  <header id="topbar">
+    <span class="brand">AETHERTABLE</span>
+    <span class="brand-sub" id="campaign-title">no session</span>
+    <span class="spacer"></span>
+    <span id="turn-indicator" class="turn-indicator" aria-live="polite"></span>
+    <span id="ai-status" class="ai-status" role="status">checking…</span>
+    <button class="chip" id="btn-undo" title="Undo the last committed turn" disabled>↶ Undo</button>
+    <button class="chip" id="btn-redo" title="Redo" disabled>↷ Redo</button>
+    <button class="chip" id="btn-save" title="Save this session to this browser">Save</button>
+    <button class="chip" id="btn-export" title="Write this session to a file on disk">Export</button>
+    <button class="chip" id="btn-new" title="Start a new session">New</button>
+  </header>
+
+  <main id="main">
+
+    <!-- ------------------------------------------------- LEFT: the party -->
+    <section id="party-col" aria-label="Party">
+      <h2 class="col-head">Party <span id="death-policy-badge" class="death-badge" hidden></span></h2>
+      <div id="party-list"></div>
+    </section>
+
+    <!-- ---------------------------------------------- CENTRE: log / battle -->
+    <section id="centre-col" aria-label="Play area">
+
+      <!-- Narrative play. Hidden while a battle map is showing. -->
+      <div id="narrative-view">
+        <div id="log" class="log" role="log" aria-live="polite" aria-label="Narrative log"></div>
+
+        <div id="composer">
+          <div id="actionbar" role="group" aria-label="Available actions"></div>
+          <form id="say-form" autocomplete="off">
+            <label class="sr-only" for="say">What do you do?</label>
+            <input id="say" name="say" placeholder="Describe what you do, or say something in character…" autocomplete="off">
+            <button id="say-btn" type="submit">Act</button>
+          </form>
+          <div id="say-hint" class="hint" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <!-- Combat takes over the centre. A canvas grid plus a screen-reader
+           table mirror that carries the identical state. -->
+      <div id="battle-view" hidden></div>
+    </section>
+
+    <!-- --------------------------------------------- RIGHT: context panel -->
+    <section id="context-col" aria-label="Character context">
+      <div id="context-tabs" role="tablist" aria-label="Context panels">
+        <button role="tab" id="tab-sheet" aria-controls="pane-sheet" data-tab="sheet" aria-selected="true">Sheet</button>
+        <button role="tab" id="tab-inventory" aria-controls="pane-inventory" data-tab="inventory" aria-selected="false">Inventory</button>
+        <button role="tab" id="tab-journal" aria-controls="pane-journal" data-tab="journal" aria-selected="false">Journal</button>
+        <button role="tab" id="tab-watch" aria-controls="pane-watch" data-tab="watch" aria-selected="false">AI seats</button>
+      </div>
+      <div class="pane on" id="pane-sheet" role="tabpanel" aria-labelledby="tab-sheet" tabindex="0"></div>
+      <div class="pane" id="pane-inventory" role="tabpanel" aria-labelledby="tab-inventory" tabindex="0" hidden></div>
+      <div class="pane" id="pane-journal" role="tabpanel" aria-labelledby="tab-journal" tabindex="0" hidden></div>
+      <div class="pane" id="pane-watch" role="tabpanel" aria-labelledby="tab-watch" tabindex="0" hidden></div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ------------------------------------------------------- SETUP WIZARD -->
+<!-- Built and driven by js/ui/setup.js. Static so the model <select> below can
+     be checked without running the page: its first option is always local. -->
+<div class="modal" id="modal-setup" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+  <div class="box" id="setup-box">
+    <h1 id="setup-title">AETHERTABLE</h1>
+    <p class="sub">A tabletop the whole way down: the engine rolls every die, the model only
+      finds the words. Up to four seats, each a person or a model. Nothing the party has not
+      learned ever reaches the page.</p>
+
+    <div class="setup-step" id="setup-step-campaign">
+      <h2>1 · Choose a campaign</h2>
+      <div class="grid2" id="campaign-list"></div>
+    </div>
+
+    <div class="setup-step" id="setup-step-dm">
+      <h2>2 · The Dungeon Master</h2>
+      <div class="fieldrow">
+        <label for="dm-model">DM voice</label>
+        <!-- The local model is the default in every code path. The first option
+             here is local by construction, and a test asserts it. -->
+        <select id="dm-model" class="model-select" data-role="dm">
+          <optgroup label="Local — private, fast, the default">
+            <option value="llama3.2:3b">Local · llama3.2:3b (balanced)</option>
+            <option value="qwen3.5:4b">Local · qwen3.5:4b (best in character)</option>
+            <option value="qwen3:1.7b">Local · qwen3:1.7b (fastest)</option>
+            <option value="">Offline · no model, templated narration</option>
+          </optgroup>
+          <optgroup label="GitHub Copilot CLI — better prose, slower, uses credits" id="dm-copilot-group">
+            <option value="copilot:claude-sonnet-5">Copilot · Claude Sonnet 5</option>
+            <option value="copilot:claude-opus-5">Copilot · Claude Opus 5</option>
+            <option value="copilot:gpt-5.6-sol">Copilot · GPT-5.6 Sol</option>
+            <option value="copilot:gpt-5.4">Copilot · GPT-5.4</option>
+            <option value="copilot:gemini-3.1-pro-preview">Copilot · Gemini 3.1 Pro</option>
+          </optgroup>
+        </select>
+      </div>
+      <div class="fieldrow">
+        <label for="dm-tone">Tone</label>
+        <select id="dm-tone">
+          <option value="heroic">Heroic</option>
+          <option value="grim">Grim</option>
+          <option value="wondrous">Wondrous</option>
+          <option value="gritty">Gritty</option>
+        </select>
+        <label for="dm-difficulty">Difficulty</label>
+        <select id="dm-difficulty">
+          <option value="relaxed">Relaxed</option>
+          <option value="standard" selected>Standard</option>
+          <option value="deadly">Deadly</option>
+        </select>
+      </div>
+      <div class="fieldrow">
+        <label for="dm-limits">Content limits</label>
+        <input id="dm-limits" placeholder="Optional. e.g. no graphic torture, no harm to children">
+      </div>
+      <div class="fieldrow fieldrow-stack">
+        <label id="dm-death-label">When someone dies</label>
+        <!-- The four campaign death policies are rendered from
+             DND.Mortality.POLICIES so their blurbs stay the single source of
+             truth. Standard is selected by default. -->
+        <div id="dm-death-list" class="death-policies" role="radiogroup" aria-labelledby="dm-death-label"></div>
+      </div>
+    </div>
+
+    <div class="setup-step" id="setup-step-seats">
+      <h2>3 · The seats</h2>
+      <p class="hint">One to four. Each is a person typing, or a model choosing from the moves the
+        engine says are legal. Give any seat a pregenerated hero, or build one.</p>
+      <div id="seat-list"></div>
+      <button class="chip" id="btn-add-seat" type="button">+ Add a seat</button>
+    </div>
+
+    <div class="setup-step" id="setup-char-step" hidden>
+      <h2 id="setup-char-title">Build a character</h2>
+      <div id="setup-char-body"></div>
+    </div>
+
+    <div id="setup-validation" class="validation" role="status" aria-live="polite"></div>
+    <div class="setup-foot">
+      <button class="wide" id="btn-begin" type="button" disabled>Begin</button>
+    </div>
+  </div>
+</div>
+
+<!-- A boot / runtime error surfaces here rather than as a blank page. -->
+<div id="fatal" class="fatal" hidden role="alert"></div>
+
+<!-- =====================================================================
+     Scripts in strict dependency order:
+       rng  ->  data  ->  engine  ->  gen  ->  ai  ->  game  ->  ui
+     Some optional modules do not exist yet (quest, loot, world, memory,
+     npc, worldgen, names). Their tags carry onerror handlers so a 404
+     degrades to a console note instead of a white screen; every consumer
+     guards for a missing DND.<Module>.
+     ===================================================================== -->
+
+<script src="js/rng.js"></script>
+
+<!-- data (SRD 5.1) -->
+<script src="js/data/srd_license.js"></script>
+<script src="js/data/srd_rules.js"></script>
+<script src="js/data/srd_races.js"></script>
+<script src="js/data/srd_classes.js"></script>
+<script src="js/data/srd_items.js"></script>
+<script src="js/data/srd_spells.js"></script>
+<script src="js/data/srd_monsters.js"></script>
+
+<!-- engine: dependencies before dependents. dice<-effects/rules; events;
+     state needs rng+events; dispatch needs command+events+state; combat needs
+     dice+events+rules+effects+dispatch. -->
+<script src="js/engine/dice.js"></script>
+<script src="js/engine/command.js"></script>
+<script src="js/engine/events.js"></script>
+<script src="js/engine/effects.js"></script>
+<script src="js/engine/knowledge.js"></script>
+<script src="js/engine/character.js"></script>
+<script src="js/engine/rules.js"></script>
+<script src="js/engine/state.js"></script>
+<script src="js/engine/dispatch.js"></script>
+<!-- interaction registers the social/exploration/item/spell/improvised
+     resolvers; without it those families have no legal moves. -->
+<script src="js/engine/interaction.js"></script>
+<script src="js/engine/combat.js" onerror="window.__dndMissing=(window.__dndMissing||[]).concat('engine/combat.js')"></script>
+<script src="js/engine/levelup.js"></script>
+<script src="js/engine/mortality.js"></script>
+<script src="js/engine/save.js"></script>
+
+<!-- gen: art before the domain generators; tokens composes portrait+creature -->
+<script src="js/gen/art.js"></script>
+<script src="js/gen/portrait.js"></script>
+<script src="js/gen/creature.js"></script>
+<script src="js/gen/icon.js"></script>
+<script src="js/gen/scene.js"></script>
+<script src="js/gen/tokens.js"></script>
+<script src="js/gen/worldgen.js"></script>
+<script src="js/gen/chargen.js"></script>
+
+<!-- ai: backend first, then schema/prompt/offline, then the agents -->
+<script src="js/ai/backend.js"></script>
+<script src="js/ai/schema.js"></script>
+<script src="js/ai/prompt.js"></script>
+<script src="js/ai/offline.js"></script>
+<script src="js/ai/referee.js"></script>
+<script src="js/ai/narrator.js"></script>
+<script src="js/ai/backstory.js"></script>
+<script src="js/ai/player_agent.js"></script>
+
+<!-- the orchestrator every panel subscribes to -->
+<script src="campaigns/shen_cooper.js"></script>
+<script src="campaigns/shen_cooper_bible.js"></script>
+<script src="campaigns/shen_continuation.js"></script>
+<script src="js/game.js"></script>
+
+<!-- campaign seeds (optional; setup falls back to built-in definitions) -->
+
+<!-- ui: panels first, app last so it can wire them all together -->
+<script src="js/ui/party.js"></script>
+<script src="js/ui/sheet.js"></script>
+<script src="js/ui/inventory.js"></script>
+<script src="js/ui/journal.js"></script>
+<script src="js/ui/log.js"></script>
+<script src="js/ui/battle.js"></script>
+<script src="js/ui/watch.js"></script>
+<script src="js/ui/levelup.js"></script>
+<script src="js/ui/setup.js"></script>
+<script src="js/ui/app.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AETHERTABLE — procedural art preview</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    background: #14141a; color: #e8e4da; font-family: 'Segoe UI', system-ui, sans-serif;
+    margin: 0; padding: 24px 32px 64px;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  p.sub { color: #9a9aa8; margin-top: 0; }
+  h2 {
+    margin-top: 40px; border-bottom: 1px solid #333; padding-bottom: 6px;
+    font-size: 1.05rem; color: #d9c15a;
+  }
+  .grid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+  .cell {
+    background: #1c1c24; border: 1px solid #2c2c36; border-radius: 6px;
+    padding: 6px; text-align: center; font-size: 11px; color: #b8b8c4;
+  }
+  .cell canvas { display: block; border-radius: 4px; background: #000; }
+  .cell .label { margin-top: 4px; line-height: 1.3; }
+  .controls { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; margin: 10px 0 16px; }
+  .controls label { font-size: 12px; color: #b8b8c4; display: flex; flex-direction: column; gap: 4px; }
+  select, input[type="text"], input[type="range"] { background: #24242e; color: #e8e4da; border: 1px solid #3a3a46; border-radius: 4px; padding: 4px 6px; }
+  #sceneMain { border: 1px solid #3a3a46; border-radius: 6px; }
+  .note { color: #7a7a86; font-size: 12px; max-width: 70ch; }
+  #status { position: sticky; top: 0; background: #14141a; padding: 6px 0; font-size: 12px; color: #9a9aa8; z-index: 5; }
+  #status.ok { color: #4fae5a; }
+  #status.err { color: #e05a4a; }
+</style>
+</head>
+<body>
+  <h1>AETHERTABLE — procedural 2D art preview</h1>
+  <p class="sub">Zero image assets. Everything below is drawn live on &lt;canvas&gt; from seeded genomes. Open this file directly — no server required.</p>
+  <div id="status">loading modules…</div>
+
+  <div class="controls">
+    <label>Seed
+      <input type="text" id="seedInput" value="shen-cooper">
+    </label>
+    <label>Mood (portraits)
+      <input type="range" id="moodInput" min="-1" max="1" step="0.1" value="0">
+    </label>
+    <button id="reroll">Reroll</button>
+  </div>
+
+  <h2>Portraits — all 9 races × 12 classes</h2>
+  <p class="note">Layer order: backdrop → vignette → shoulders/armour (by class) → head (by race) → hair → eyes/brow/mouth (mood-driven) → race features → class emblem.</p>
+  <div class="grid" id="portraitGrid"></div>
+
+  <h2>Creatures — all 15 silhouettes × 6 size classes</h2>
+  <p class="note">Silhouette-first bilateral symmetry: one archetype-weighted half-body mass, mirrored and smoothed, two-tone shaded. No feature layers here so the base body shape itself is comparable across archetypes.</p>
+  <div class="grid" id="creatureGrid"></div>
+
+  <h2>Creatures — feature layers</h2>
+  <p class="note">The same beast/medium base with a single feature layer added each time: horns, wings, tail, carapace, tentacles, claws, mandibles, glow, manyEyes, skeletal.</p>
+  <div class="grid" id="featureGrid"></div>
+
+  <h2>Creatures — boss pass</h2>
+  <p class="note">Same silhouettes with <code>opts.boss</code>: larger, richer palette, an aura, and a doubled feature pass.</p>
+  <div class="grid" id="bossGrid"></div>
+
+  <h2>Item icons — all 29 iconShapes × rarity</h2>
+  <div class="grid" id="iconGrid"></div>
+
+  <h2>Scenes — explorer</h2>
+  <div class="controls">
+    <label>Biome
+      <select id="biomeSelect"></select>
+    </label>
+    <label>Time of day
+      <select id="timeSelect"></select>
+    </label>
+    <label>Weather
+      <select id="weatherSelect"></select>
+    </label>
+  </div>
+  <canvas id="sceneMain" width="640" height="360"></canvas>
+
+  <h2>Scenes — curated set (incl. the Glass Fen)</h2>
+  <div class="grid" id="sceneGrid"></div>
+
+  <h2>Battle tokens — every allegiance</h2>
+  <div class="grid" id="tokenGrid"></div>
+
+  <!-- Plain <script> tags only — this must open from file:// with no build
+       step and no module CORS issues. Load order matters: rng before art,
+       art before the domain modules, domain modules before tokens (which
+       composes Portrait + Creature). SRD data is optional and loaded last;
+       every module has built-in fallback defaults if it 404s. -->
+  <script src="../js/rng.js"></script>
+  <script src="../js/gen/art.js"></script>
+  <script src="../js/gen/portrait.js"></script>
+  <script src="../js/gen/creature.js"></script>
+  <script src="../js/gen/icon.js"></script>
+  <script src="../js/gen/scene.js"></script>
+  <script src="../js/gen/tokens.js"></script>
+  <script src="../js/data/srd_races.js" onerror="console.warn('srd_races.js not found — using Portrait built-in fallback data')"></script>
+  <script src="../js/data/srd_classes.js" onerror="console.warn('srd_classes.js not found — using Portrait built-in fallback data')"></script>
+  <script src="../js/data/srd_monsters.js" onerror="console.warn('srd_monsters.js not found — using Creature built-in fallback data')"></script>
+  <script src="../js/data/srd_items.js" onerror="console.warn('srd_items.js not found — using Icon built-in fallback data')"></script>
+
+  <script>
+  (function () {
+    'use strict';
+
+    function setStatus(msg, cls) {
+      var el = document.getElementById('status');
+      el.textContent = msg;
+      el.className = cls || '';
+    }
+
+    function canvasCell(container, w, h, label) {
+      var cell = document.createElement('div');
+      cell.className = 'cell';
+      var canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      cell.appendChild(canvas);
+      var lab = document.createElement('div');
+      lab.className = 'label';
+      lab.textContent = label;
+      cell.appendChild(lab);
+      container.appendChild(cell);
+      return canvas.getContext('2d');
+    }
+
+    function seedInputValue() { return document.getElementById('seedInput').value || 'preview'; }
+    function moodInputValue() { return parseFloat(document.getElementById('moodInput').value || '0'); }
+
+    function buildAll() {
+      var seed = seedInputValue();
+      var mood = moodInputValue();
+
+      /* wire up injected SRD data, if it loaded */
+      if (window.DND && DND.Data) {
+        if (DND.Portrait && (DND.Data.RACES || DND.Data.CLASSES)) DND.Portrait.setData({ RACES: DND.Data.RACES, CLASSES: DND.Data.CLASSES });
+        if (DND.Creature && DND.Data.MONSTERS) DND.Creature.setData({ MONSTERS: DND.Data.MONSTERS });
+        if (DND.Icon && DND.Data.ITEMS) DND.Icon.setData({ ITEMS: DND.Data.ITEMS });
+      }
+
+      /* ---------------------------------------------------------- portraits -- */
+      var portraitGrid = document.getElementById('portraitGrid');
+      portraitGrid.innerHTML = '';
+      DND.Portrait.RACE_ORDER.forEach(function (raceId) {
+        DND.Portrait.CLASS_ORDER.forEach(function (classId) {
+          var ctx = canvasCell(portraitGrid, 96, 96, raceId + ' / ' + classId);
+          var gm = DND.Portrait.genomeForCharacter(seed + ':' + raceId + ':' + classId, { raceId: raceId, classId: classId });
+          DND.Portrait.drawPortrait(ctx, gm, 96, 96, { mood: mood });
+        });
+      });
+
+      /* ---------------------------------------------------------- creatures -- */
+      var creatureGrid = document.getElementById('creatureGrid');
+      creatureGrid.innerHTML = '';
+      DND.Creature.SILHOUETTES.forEach(function (sil) {
+        DND.Creature.SIZE_ORDER.forEach(function (size) {
+          var ctx = canvasCell(creatureGrid, 96, 96, sil + ' / ' + size);
+          /* no forced features here — this row is about the silhouette-first
+             body shape itself; a separate row below shows feature layering */
+          var gm = DND.Creature.genomeForMonster(seed + ':' + sil + ':' + size, { visual: { silhouette: sil, size: size } });
+          DND.Creature.drawCreature(ctx, gm, 96, 96, {});
+        });
+      });
+
+      var featureGrid = document.getElementById('featureGrid');
+      featureGrid.innerHTML = '';
+      var allFeatures = ['horns', 'wings', 'tail', 'carapace', 'tentacles', 'claws', 'mandibles', 'glow', 'manyEyes', 'skeletal'];
+      allFeatures.forEach(function (feat) {
+        var ctx = canvasCell(featureGrid, 96, 96, 'beast + ' + feat);
+        var gm = DND.Creature.genomeForMonster(seed + ':feat:' + feat, { visual: { silhouette: 'beast', size: 'medium', features: [feat] } });
+        DND.Creature.drawCreature(ctx, gm, 96, 96, {});
+      });
+
+      /* a realistic feature count per archetype (2-3), not every feature at
+         once — stacking all 10 on one body buries the silhouette under
+         "skeletal" ribs and "manyEyes" dots, which is a worst case, not
+         representative of how monster data actually populates features[] */
+      var bossFeatures = {
+        humanoid: ['claws'], beast: ['claws', 'tail'], dragon: ['wings', 'horns', 'tail'],
+        ooze: ['glow'], undead: ['skeletal', 'glow'], aberration: ['tentacles', 'manyEyes'],
+        construct: ['carapace'], elemental: ['glow'], plant: ['tentacles'],
+        swarm: ['manyEyes'], giant: ['claws', 'horns'], fiend: ['horns', 'wings', 'tail'],
+        celestial: ['wings', 'glow'], fey: ['glow'], monstrosity: ['tentacles', 'mandibles', 'manyEyes'],
+      };
+      var bossGrid = document.getElementById('bossGrid');
+      bossGrid.innerHTML = '';
+      DND.Creature.SILHOUETTES.forEach(function (sil) {
+        var ctx = canvasCell(bossGrid, 128, 128, sil + ' (boss)');
+        var gm = DND.Creature.genomeForMonster(seed + ':boss:' + sil, { visual: { silhouette: sil, size: 'huge', features: bossFeatures[sil] || [] } });
+        DND.Creature.drawCreature(ctx, gm, 128, 128, { boss: true });
+      });
+
+      /* -------------------------------------------------------------- icons -- */
+      var iconGrid = document.getElementById('iconGrid');
+      iconGrid.innerHTML = '';
+      var rarities = Object.keys(DND.Art.RARITY_COLORS);
+      DND.Icon.ICON_SHAPES.forEach(function (shape, i) {
+        var rarity = rarities[i % rarities.length];
+        var glow = rarity === 'legendary' || rarity === 'artifact' || rarity === 'very rare';
+        var ctx = canvasCell(iconGrid, 64, 64, shape + ' (' + rarity + ')');
+        var gm = DND.Icon.genomeForItem(seed + ':' + shape, { visual: { iconShape: shape, glow: glow }, rarity: rarity });
+        DND.Icon.drawIcon(ctx, gm, 64, {});
+      });
+
+      /* -------------------------------------------------------------- scenes -- */
+      var biomeSelect = document.getElementById('biomeSelect');
+      var timeSelect = document.getElementById('timeSelect');
+      var weatherSelect = document.getElementById('weatherSelect');
+      [biomeSelect, timeSelect, weatherSelect].forEach(function (sel) { sel.innerHTML = ''; });
+      DND.Scene.BIOMES.forEach(function (b) { var o = document.createElement('option'); o.value = b; o.textContent = b; biomeSelect.appendChild(o); });
+      DND.Scene.TIMES_OF_DAY.forEach(function (tm) { var o = document.createElement('option'); o.value = tm; o.textContent = tm; timeSelect.appendChild(o); });
+      DND.Scene.WEATHERS.forEach(function (wx) { var o = document.createElement('option'); o.value = wx; o.textContent = wx; weatherSelect.appendChild(o); });
+      biomeSelect.value = 'marsh'; timeSelect.value = 'dusk'; weatherSelect.value = 'fog';
+
+      function renderMainScene() {
+        var canvas = document.getElementById('sceneMain');
+        var ctx = canvas.getContext('2d');
+        var opts = { biome: biomeSelect.value, timeOfDay: timeSelect.value, weather: weatherSelect.value };
+        var gm = DND.Scene.genomeForScene(seed + ':' + opts.biome + ':' + opts.timeOfDay + ':' + opts.weather, opts);
+        DND.Scene.drawScene(ctx, gm, canvas.width, canvas.height, {});
+      }
+      [biomeSelect, timeSelect, weatherSelect].forEach(function (sel) { sel.onchange = renderMainScene; });
+      renderMainScene();
+
+      var curated = [
+        { biome: 'marsh', timeOfDay: 'dusk', weather: 'fog', label: 'the Glass Fen' },
+        { biome: 'abbey', timeOfDay: 'morning', weather: 'clear', label: 'abbey, morning' },
+        { biome: 'chapel', timeOfDay: 'dusk', weather: 'clear', label: 'chapel, dusk' },
+        { biome: 'forest', timeOfDay: 'noon', weather: 'clear', label: 'forest, noon' },
+        { biome: 'mountain', timeOfDay: 'dawn', weather: 'snow', label: 'mountain, dawn snow' },
+        { biome: 'town', timeOfDay: 'night', weather: 'rain', label: 'town, rainy night' },
+        { biome: 'keep', timeOfDay: 'dusk', weather: 'storm', label: 'keep, storm' },
+        { biome: 'dungeon', timeOfDay: 'night', weather: 'clear', label: 'dungeon' },
+        { biome: 'crypt', timeOfDay: 'night', weather: 'fog', label: 'crypt, fog' },
+        { biome: 'plains', timeOfDay: 'afternoon', weather: 'clear', label: 'plains, afternoon' },
+        { biome: 'coast', timeOfDay: 'morning', weather: 'clear', label: 'coast, morning' },
+        { biome: 'interior', timeOfDay: 'noon', weather: 'clear', label: 'interior' },
+      ];
+      var sceneGrid = document.getElementById('sceneGrid');
+      sceneGrid.innerHTML = '';
+      curated.forEach(function (spec) {
+        var ctx = canvasCell(sceneGrid, 160, 100, spec.label);
+        var gm = DND.Scene.genomeForScene(seed + ':curated:' + spec.biome + spec.timeOfDay + spec.weather, spec);
+        DND.Scene.drawScene(ctx, gm, 160, 100, {});
+      });
+
+      /* -------------------------------------------------------------- tokens -- */
+      var tokenGrid = document.getElementById('tokenGrid');
+      tokenGrid.innerHTML = '';
+      DND.Tokens.ALLEGIANCES.forEach(function (allegiance) {
+        var ctxP = canvasCell(tokenGrid, 64, 64, 'portrait / ' + allegiance);
+        var gmP = DND.Tokens.genomeForToken(seed + ':tok:' + allegiance, { kind: 'portrait', raceId: 'human', classId: 'fighter', allegiance: allegiance });
+        DND.Tokens.drawToken(ctxP, gmP, 64, { allegiance: allegiance, hp: { current: 7, max: 10 } });
+
+        var ctxC = canvasCell(tokenGrid, 64, 64, 'creature / ' + allegiance);
+        var gmC = DND.Tokens.genomeForToken(seed + ':tokc:' + allegiance, { kind: 'creature', visual: { silhouette: 'beast', size: 'medium' }, allegiance: allegiance });
+        DND.Tokens.drawToken(ctxC, gmC, 64, { allegiance: allegiance, hp: { current: 4, max: 10 } });
+      });
+      var ctxDead = canvasCell(tokenGrid, 64, 64, 'dead');
+      DND.Tokens.drawToken(ctxDead, DND.Tokens.genomeForToken(seed + ':dead', { kind: 'portrait', raceId: 'elf', classId: 'wizard', allegiance: 'party' }), 64, { allegiance: 'party', dead: true, hp: { current: 0, max: 10 } });
+      var ctxCond = canvasCell(tokenGrid, 64, 64, 'conditions');
+      DND.Tokens.drawToken(ctxCond, DND.Tokens.genomeForToken(seed + ':cond', { kind: 'portrait', raceId: 'gnome', classId: 'druid', allegiance: 'ally' }), 64, { allegiance: 'ally', conditions: ['poisoned', 'prone', 'stunned'], hp: { current: 5, max: 10 } });
+    }
+
+    document.getElementById('reroll').onclick = buildAll;
+    document.getElementById('moodInput').oninput = buildAll;
+
+    try {
+      if (!window.DND || !DND.Art || !DND.Portrait || !DND.Creature || !DND.Icon || !DND.Scene || !DND.Tokens) {
+        throw new Error('one or more gen modules failed to load — check the script tags above resolve relative to tools/');
+      }
+      buildAll();
+      setStatus('rendered OK — ' + Portrait_RACE_x_CLASS() + ' portraits, ' + Creature_COMBOS() + ' creatures, ' +
+        DND.Icon.ICON_SHAPES.length + ' icon shapes, ' + (Scene_COMBOS()) + ' scene combinations available.', 'ok');
+    } catch (e) {
+      setStatus('FAILED to render: ' + e.message, 'err');
+      throw e;
+    }
+
+    function Portrait_RACE_x_CLASS() { return DND.Portrait.RACE_ORDER.length * DND.Portrait.CLASS_ORDER.length; }
+    function Creature_COMBOS() { return DND.Creature.SILHOUETTES.length * DND.Creature.SIZE_ORDER.length; }
+    function Scene_COMBOS() { return DND.Scene.BIOMES.length * DND.Scene.TIMES_OF_DAY.length * DND.Scene.WEATHERS.length; }
+  })();
+  </script>
+</body>
+</html>

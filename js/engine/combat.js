@@ -1,0 +1,1370 @@
+/*
+ * combat.js — the stateful turn loop, and the geometry the UI is forbidden to
+ * re-implement.
+ *
+ * Everything here obeys the one law of this engine: a resolver reads a state
+ * snapshot, rolls from `state.rng`, and returns an EventBatch. It never mutates
+ * state — `dispatch()` commits the batch, atomically, after the dice are cast.
+ * That is why an AI seat and a human clicking a button cannot do different
+ * things: they both arrive as a GameCommand and leave as the same committed
+ * events.
+ *
+ * The geometry functions (line of sight, cover, area templates, movement cost)
+ * are pure and exported for the UI to import directly. When the sibling project
+ * let the interface draw its own cover lines while the engine computed its own,
+ * the picture and the maths disagreed and players were told they were safe
+ * while the die said otherwise. So the picture and the maths are the same code.
+ */
+(function (global) {
+  'use strict';
+
+  var Dice = (global.DND && global.DND.Dice) ||
+    (typeof require !== 'undefined' ? require('./dice.js') : null);
+  var Events = (global.DND && global.DND.Events) ||
+    (typeof require !== 'undefined' ? require('./events.js') : null);
+  var Rules = (global.DND && global.DND.Rules) ||
+    (typeof require !== 'undefined' ? require('./rules.js') : null);
+  var Effects = (global.DND && global.DND.Effects) ||
+    (typeof require !== 'undefined' ? require('./effects.js') : null);
+  var Dispatch = (global.DND && global.DND.Dispatch) ||
+    (typeof require !== 'undefined' ? require('./dispatch.js') : null);
+  var Command = (global.DND && global.DND.Command) ||
+    (typeof require !== 'undefined' ? require('./command.js') : null);
+
+  var CELL = 5;   // one grid square is five feet, everywhere, no exceptions
+
+  function actor(state, id) { return (state.actors && state.actors[id]) || null; }
+
+  /* ============================================================ geometry ===
+     All positions are square coordinates: integer {x, y}, one unit per 5 ft.
+     A square's CENTRE in feet is ((x + 0.5) * 5, (y + 0.5) * 5); a grid
+     INTERSECTION (where AoE templates are anchored) is (x * 5, y * 5). Keeping
+     the two straight is most of what makes area effects reproducible. */
+
+  function centreFt(sq) { return { x: (sq.x + 0.5) * CELL, y: (sq.y + 0.5) * CELL }; }
+
+  function euclidFt(a, b) {
+    var dx = a.x - b.x, dy = a.y - b.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  /* Chebyshev movement (the PHB default we have committed to): every step,
+     orthogonal or diagonal, costs 5 ft. Chosen over the optional 5-10-5 rule
+     because it is the one the reference module uses and because it keeps
+     movement cost, reach and opportunity-attack ranges all measured the same
+     way — a diagonal that is 5 ft for movement but 7.5 ft for reach is exactly
+     the sort of inconsistency that breeds combat bugs. */
+  function chebyshevSquares(a, b) {
+    return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+  }
+  function chebyshevFt(a, b) { return chebyshevSquares(a, b) * CELL; }
+
+  /* Squares covered by a spherical burst centred on a grid intersection. A
+     square is in the area if its centre is within the radius — the standard
+     grid ruling. */
+  function squaresInSphere(centreIntersection, radiusFt) {
+    var c = { x: centreIntersection.x * CELL, y: centreIntersection.y * CELL };
+    var reach = Math.ceil(radiusFt / CELL) + 1;
+    var out = [];
+    for (var x = centreIntersection.x - reach; x < centreIntersection.x + reach; x++) {
+      for (var y = centreIntersection.y - reach; y < centreIntersection.y + reach; y++) {
+        var ctr = centreFt({ x: x, y: y });
+        if (euclidFt(ctr, c) <= radiusFt + 1e-9) out.push({ x: x, y: y });
+      }
+    }
+    return out;
+  }
+
+  /* Squares covered by a cone whose point is at a grid intersection. 5e cones
+     are as wide at any point as they are far from the origin, which is a
+     half-angle whose tangent is 1/2. `dir` is a unit-ish vector giving the
+     axis; a corner-origin cone down the +x axis uses {x:1,y:0}. */
+  function squaresInCone(originIntersection, dir, lengthFt) {
+    var o = { x: originIntersection.x * CELL, y: originIntersection.y * CELL };
+    var len = Math.sqrt(dir.x * dir.x + dir.y * dir.y) || 1;
+    var ux = dir.x / len, uy = dir.y / len;
+    var halfTan = 0.5;                    // width == distance  ->  half-width == distance/2
+    var reach = Math.ceil(lengthFt / CELL) + 1;
+    var out = [];
+    for (var x = originIntersection.x - reach; x < originIntersection.x + reach; x++) {
+      for (var y = originIntersection.y - reach; y < originIntersection.y + reach; y++) {
+        var ctr = centreFt({ x: x, y: y });
+        var vx = ctr.x - o.x, vy = ctr.y - o.y;
+        var along = vx * ux + vy * uy;                 // projection onto the axis
+        if (along <= 0 || along > lengthFt + 1e-9) continue;
+        var perp = Math.abs(vx * uy - vy * ux);        // distance off the axis
+        if (perp <= along * halfTan + 1e-9) out.push({ x: x, y: y });
+      }
+    }
+    return out;
+  }
+
+  /* ------------------------------------------------------- movement cost --- */
+
+  /* Cost in feet to walk a path (a list of squares, step by step). Entering a
+     difficult-terrain square costs double; `difficult(sq)` reports it. Uses
+     Chebyshev, so a diagonal step is the same 5 ft as an orthogonal one. */
+  function pathCost(path, opts) {
+    opts = opts || {};
+    var difficult = opts.difficult || function () { return false; };
+    var cost = 0;
+    for (var i = 1; i < path.length; i++) {
+      var step = chebyshevSquares(path[i - 1], path[i]);
+      if (step > 1) return { cost: Infinity, illegal: true, at: i };   // teleport, not a walk
+      var per = CELL * (difficult(path[i]) ? 2 : 1);
+      cost += per;
+    }
+    return { cost: cost, illegal: false };
+  }
+
+  /* ------------------------------------------------- opportunity attacks --- */
+
+  /* An opportunity attack is provoked by LEAVING an enemy's reach on foot. It
+     is NOT provoked by moving around while staying in reach, and NOT provoked
+     at all if the mover took the Disengage action. */
+  function provokesOpportunity(from, to, enemyPos, opts) {
+    opts = opts || {};
+    if (opts.disengage) return false;
+    var reach = opts.reachFt || CELL;
+    var wasInReach = chebyshevFt(from, enemyPos) <= reach;
+    var nowInReach = chebyshevFt(to, enemyPos) <= reach;
+    return wasInReach && !nowInReach;
+  }
+
+  /* --------------------------------------------------- line of sight/cover -
+     Cover is decided corner to corner: from the attacker's best corner, draw a
+     line to each of the target square's four corners. Count how many are
+     blocked by an obstacle. Two blocked is half cover, three is three-quarters,
+     four is total (and the target cannot be targeted directly at all). The UI
+     imports this so the drawn lines and the applied bonus are the same fact. */
+
+  function corners(sq) {
+    return [
+      { x: sq.x * CELL, y: sq.y * CELL },
+      { x: (sq.x + 1) * CELL, y: sq.y * CELL },
+      { x: sq.x * CELL, y: (sq.y + 1) * CELL },
+      { x: (sq.x + 1) * CELL, y: (sq.y + 1) * CELL },
+    ];
+  }
+
+  /* Does segment a->b pass through the interior of the box for square `sq`?
+     Grazing an edge (a line that only touches the boundary) does not count as
+     blocked, which is why the slab test uses strict inequalities on entry. */
+  function segmentBlocksSquare(a, b, sq) {
+    var minX = sq.x * CELL, maxX = (sq.x + 1) * CELL;
+    var minY = sq.y * CELL, maxY = (sq.y + 1) * CELL;
+    var dx = b.x - a.x, dy = b.y - a.y;
+    var t0 = 0, t1 = 1;
+    var checks = [
+      { p: -dx, q: a.x - minX },
+      { p: dx, q: maxX - a.x },
+      { p: -dy, q: a.y - minY },
+      { p: dy, q: maxY - a.y },
+    ];
+    for (var i = 0; i < checks.length; i++) {
+      var p = checks[i].p, q = checks[i].q;
+      if (Math.abs(p) < 1e-12) {
+        if (q < 0) return false;               // parallel and outside the slab
+      } else {
+        var r = q / p;
+        if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; }
+        else { if (r < t0) return false; if (r < t1) t1 = r; }
+      }
+    }
+    /* A positive-length overlap inside (t0, t1) means the segment genuinely
+       crosses the box rather than merely clipping a corner. */
+    return t1 - t0 > 1e-9;
+  }
+
+  function lineOfSightCover(attackerPos, targetPos, blockers) {
+    blockers = blockers || [];
+    var attCorners = corners(attackerPos);
+    var tgtCorners = corners(targetPos);
+    var best = 4;
+    /* The attacker chooses the corner that gives them the cleanest shot, so we
+       take the minimum number of blocked target corners over all four. */
+    for (var a = 0; a < attCorners.length; a++) {
+      var blocked = 0;
+      for (var c = 0; c < tgtCorners.length; c++) {
+        var hit = false;
+        for (var b = 0; b < blockers.length; b++) {
+          var bl = blockers[b];
+          if ((bl.x === attackerPos.x && bl.y === attackerPos.y) ||
+              (bl.x === targetPos.x && bl.y === targetPos.y)) continue;
+          if (segmentBlocksSquare(attCorners[a], tgtCorners[c], bl)) { hit = true; break; }
+        }
+        if (hit) blocked++;
+      }
+      if (blocked < best) best = blocked;
+    }
+    var level = best >= 4 ? 'total' : best === 3 ? 'three-quarters' : best === 2 ? 'half' : 'none';
+    var bonus = Rules ? Rules.coverBonus(level) : { ac: 0, dexSave: 0, untargetable: level === 'total' };
+    return { blockedCorners: best, level: level, ac: bonus.ac, dexSave: bonus.dexSave, untargetable: bonus.untargetable };
+  }
+
+  function hasLineOfSight(attackerPos, targetPos, blockers) {
+    return lineOfSightCover(attackerPos, targetPos, blockers).level !== 'total';
+  }
+
+  /* ============================================================ economy ====
+     Small readers over runtime.turn so every seat asks the same question the
+     same way. `runtime.turn` is owned by the turn_start / turn_end / action_
+     economy appliers; nothing here writes it. */
+
+  function turnOf(a) { return a && a.runtime && a.runtime.turn; }
+
+  /* Outside an encounter there is no action economy: nobody is counting your
+     actions while you walk across a village. A missing `runtime.turn` therefore
+     means "unconstrained", not "may do nothing" — reading it the other way left
+     an out-of-combat character with no legal moves at all, which silently
+     stalled every AI seat in exploration. */
+  function canAct(a) { var t = turnOf(a); return t ? !!t.action : true; }
+  function canBonus(a) { var t = turnOf(a); return t ? !!t.bonus : true; }
+  function canReact(a) { var t = turnOf(a); return t ? !!t.reaction : true; }
+  function movementLeft(a) {
+    var t = turnOf(a);
+    if (t) return t.movementRemaining;
+    return (a && a.runtime && a.runtime.speed) || 30;
+  }
+  function isSurprised(a) { var t = turnOf(a); return !!(t && t.surprised); }
+
+  /* ======================================================= two-weapon ======
+     The off-hand attack of two-weapon fighting adds NO ability modifier to its
+     damage — unless the modifier is negative (a penalty always applies) or the
+     Two-Weapon Fighting style has removed the restriction. */
+  function twoWeaponDamageBonus(abilityMod, opts) {
+    opts = opts || {};
+    if (opts.twoWeaponFightingStyle) return abilityMod;
+    if (abilityMod < 0) return abilityMod;
+    return 0;
+  }
+
+  /* ======================================================= turn loop ========
+     These build EventBatches and hand them back; the caller commits them
+     through dispatch or Events.commit, exactly like a resolver. They are the
+     orchestration the combat family leans on, kept pure for the same reason. */
+
+  function speedOf(a) {
+    return (a && a.runtime && typeof a.runtime.speed === 'number') ? a.runtime.speed : 30;
+  }
+
+  function beginEncounter(state, entries, opts) {
+    opts = opts || {};
+    var surprised = {};
+    (opts.surprised || []).forEach(function (id) { surprised[id] = true; });
+    var ranked = Dice.initiative(entries, { rng: state.rng });
+    var order = ranked.map(function (r) {
+      return { id: r.id, total: r.total, surprised: !!surprised[r.id] };
+    });
+    var b = Events.makeBatch(opts.command || { commandId: opts.commandId || null, actorId: null });
+    var names = order.map(function (o) {
+      var nm = actor(state, o.id);
+      return (nm ? nm.name : o.id) + (o.surprised ? ' (surprised)' : '');
+    });
+    Events.push(b, 'combat_start', { order: order, encounterId: opts.encounterId || null },
+      'Initiative! Order: ' + names.join(', ') + '.');
+    return b;
+  }
+
+  function startTurn(state, actorId, opts) {
+    opts = opts || {};
+    var a = actor(state, actorId);
+    var surprised = false;
+    var order = state.combat && state.combat.order;
+    if (order && (state.combat.round === 1)) {
+      for (var i = 0; i < order.length; i++) {
+        if (order[i].id === actorId && order[i].surprised) surprised = true;
+      }
+    }
+    if (opts.surprised != null) surprised = !!opts.surprised;
+    var b = Events.makeBatch(opts.command || { commandId: opts.commandId || null, actorId: actorId });
+    var name = a ? a.name : actorId;
+    Events.push(b, 'turn_start', { actorId: actorId, speed: speedOf(a), surprised: surprised },
+      surprised ? name + ' is caught flat-footed and can do nothing.' : name + '\u2019s turn.');
+
+    upkeep(state, actorId, b);
+    return b;
+  }
+
+  /**
+   * Everything that happens because a turn has BEGUN, rather than because the
+   * initiative pointer moved: at present, the death saving throw of a dying
+   * creature.
+   *
+   * Split out of startTurn because advanceTurn emits its own turn_start and
+   * must not emit a second one. Both doors into a new turn need this, and the
+   * turn that came in through advanceTurn was skipping it — so a character
+   * lying at zero hit points was never asked to roll, and simply stayed there
+   * neither recovering nor dying while the fight went on around them.
+   */
+  function upkeep(state, actorId, b) {
+    var a = actor(state, actorId);
+    if (!a) return b;
+    var name = a.name || actorId;
+
+    /* A Help lasts until the start of the helped creature's next turn (PHB
+       192). Without an expiry the grant simply sat there: eighteen Helps in a
+       long playtest produced six used and twelve permanent standing bonuses
+       against particular enemies, which is not the action anyone chose. */
+    if (a.runtime.helpedAgainst && Object.keys(a.runtime.helpedAgainst).length) {
+      Events.push(b, 'help_expire', { actorId: actorId },
+        name + ' loses the opening their ally made.');
+    }
+
+    /* A character at 0 hit points is unconscious: they do not act, they make a
+       death saving throw. A playtest caught Shen dropping to 0 and then taking
+       a swing on his next turn, which is both a rules violation and the kind
+       of thing that quietly removes all tension from a fight. Rolled here so
+       every caller — the UI, the AI seats, the headless harness — gets it
+       without having to remember. */
+    if (isDying(a)) {
+      /* Rules.deathSave takes a SINGLE options object and reports deltas plus
+         the resulting totals. An earlier version passed a stray first argument
+         and read fields that do not exist, which silently discarded the
+         session RNG and turned every save into a failure. */
+      var save = Rules.deathSave({
+        rng: state.rng,
+        current: a.runtime.deathSaves || { successes: 0, failures: 0 },
+      });
+      Events.push(b, 'roll', {
+        rollKind: 'death_save', actorId: actorId,
+        natural: save.natural, total: save.roll.total,
+        success: save.successesDelta > 0,
+        explain: Dice.explain(save.roll),
+      }, name + ' fights to stay alive: ' + (save.revive
+        ? 'a natural 20 \u2014 they come back with one hit point.'
+        : save.natural === 1 ? 'a natural 1 \u2014 that counts as two failures.'
+          : save.successesDelta ? 'a success.' : 'a failure.'));
+
+      if (save.revive) {
+        Events.push(b, 'revive', { actorId: actorId, hp: save.hp || 1 },
+          name + ' opens their eyes.');
+      } else {
+        Events.push(b, 'death_save', {
+          actorId: actorId,
+          successes: save.successesDelta,
+          failures: save.failuresDelta,
+        }, '');
+        if (save.dead || save.failures >= 3) {
+          /* The campaign's death policy decides what a lethal outcome means:
+             a heroic table stabilises instead, an ironman table ends here. */
+          applyLethal(state, b, actorId, name + ' does not get up again.');
+        } else if (save.stable || save.successes >= 3) {
+          Events.push(b, 'stabilise', { actorId: actorId },
+            name + ' is stable, but still down.');
+        }
+      }
+    }
+    return b;
+  }
+
+  /** Unconscious and dying: at zero hit points, not yet stable, not yet dead. */
+  function isDying(a) {
+    if (!a || !a.runtime) return false;
+    if (a.runtime.dead) return false;
+    return a.runtime.hp <= 0 && !a.runtime.stable;
+  }
+
+  /**
+   * Does this creature simply die at zero hit points?
+   *
+   * Player characters and anyone the campaign has marked as important fall
+   * unconscious and roll death saves. Everything else \u2014 the goblins, the
+   * wolves, the nameless \u2014 is done, which is both the rule and what keeps a
+   * fight from turning into bookkeeping.
+   */
+  function diesAtZero(a) {
+    if (!a) return true;
+    if (a.alwaysDeathSaves) return false;
+    if (a.side === 'party') return false;
+    if (a.kind === 'pc') return false;
+    return a.kind === 'monster' || !!a.statblock || a.side === 'enemy';
+  }
+
+  /** Down for any reason: no legal actions at all. */
+  function isDown(a) {
+    if (!a || !a.runtime) return true;
+    return a.runtime.dead || a.runtime.hp <= 0;
+  }
+
+  /* ---------------------------------------------------------- mortality ----
+     Death is a rules outcome; what death *means* is a campaign setting. The
+     combat engine decides that someone has run out of hit points and hands the
+     consequence to mortality.js, which knows whether this table plays with
+     permanent death, replacements, resurrection, or none of it. */
+
+  function Mortality() {
+    return (global.DND && global.DND.Mortality) ||
+      (typeof require !== 'undefined' ? require('./mortality.js') : null);
+  }
+
+  function lethalEvents(state, actorId, defaultBeat) {
+    var M = Mortality();
+    var base;
+    if (!M) {
+      base = {
+        events: [Events.makeEvent('death', { actorId: actorId, targetId: actorId })],
+        beats: [defaultBeat],
+      };
+    } else {
+      var res = M.resolveLethal(state, actorId, {});
+      base = {
+        events: res.events.map(function (e) {
+          var kind = e.kind;
+          var payload = {};
+          Object.keys(e).forEach(function (k) { if (k !== 'kind') payload[k] = e[k]; });
+          return Events.makeEvent(kind, payload);
+        }),
+        beats: res.beats.length ? res.beats : [defaultBeat],
+      };
+    }
+
+    /* Experience for the kill.
+       `xpForCr` existed from the start and nothing ever called it, so nobody
+       could level up by playing — the only route to level 4 was editing the
+       save. Awarded here because this is the one place the engine knows a
+       creature has actually died, and split among the survivors as the rules
+       intend. */
+    var dead = state.actors && state.actors[actorId];
+    if (dead && dead.side === 'enemy') {
+      var award = xpAwardEvents(state, dead);
+      award.events.forEach(function (e) { base.events.push(e); });
+      award.beats.forEach(function (b) { base.beats.push(b); });
+    }
+    return base;
+  }
+
+  /** Split a defeated creature's experience among the party who are still up. */
+  function xpAwardEvents(state, dead) {
+    var events = [], beats = [];
+    var cr = dead.statblock && dead.statblock.cr;
+    if (cr == null) cr = dead.cr;
+    if (cr == null) return { events: events, beats: beats };
+
+    var total = Rules && Rules.xpForCr ? Rules.xpForCr(cr) : 0;
+    if (!total) return { events: events, beats: beats };
+
+    var share = Object.keys(state.actors || {}).filter(function (id) {
+      var a = state.actors[id];
+      /* The unconscious still share the experience — they were in the fight.
+         The dead do not. */
+      return a.side === 'party' && a.runtime && !a.runtime.dead;
+    });
+    if (!share.length) return { events: events, beats: beats };
+
+    var each = Math.floor(total / share.length);
+    if (each <= 0) return { events: events, beats: beats };
+
+    share.forEach(function (id) {
+      events.push(Events.makeEvent('xp', { actorId: id, delta: each }));
+    });
+    beats.push('The party earns ' + each + ' experience each.');
+    return { events: events, beats: beats };
+  }
+
+  function applyLethal(state, batch, actorId, defaultBeat) {
+    var r = lethalEvents(state, actorId, defaultBeat);
+    r.events.forEach(function (e) { batch.events.push(e); });
+    r.beats.forEach(function (b) { batch.beats.push(b); });
+  }
+
+  function pushLethal(state, events, beats, actorId, defaultBeat) {
+    var r = lethalEvents(state, actorId, defaultBeat);
+    r.events.forEach(function (e) { events.push(e); });
+    r.beats.forEach(function (b) { beats.push(b); });
+  }
+
+  function endTurn(state, actorId, opts) {
+    opts = opts || {};
+    var a = actor(state, actorId);
+    var b = Events.makeBatch(opts.command || { commandId: opts.commandId || null, actorId: actorId });
+    Events.push(b, 'turn_end', { actorId: actorId }, (a ? a.name : actorId) + '\u2019s turn ends.');
+    return b;
+  }
+
+  /* Advance the initiative pointer: end the active actor's turn, roll the round
+     over if we have wrapped, and start the next actor's turn — the whole
+     transition as one committable batch. */
+  function advanceTurn(state, opts) {
+    opts = opts || {};
+    var c = state.combat || {};
+    var order = c.order || [];
+    if (!order.length) return Events.makeBatch(opts.command || {});
+    var idx = c.turnIndex || 0;
+    var current = order[idx] && order[idx].id;
+
+    /* Step past the dead. A corpse does not take a turn, and leaving it in the
+       rotation meant the loop handed the initiative to something that could
+       never act, which either stalled the fight or burned the step limit. The
+       dying are NOT skipped: their turn is when they roll a death save, and
+       skipping them would quietly make characters immortal. */
+    var nextIdx = idx, wrapped = false, steps = 0;
+    do {
+      nextIdx = (nextIdx + 1) % order.length;
+      if (nextIdx === 0) wrapped = true;
+      steps++;
+      var cand = actor(state, order[nextIdx].id);
+      if (cand && !cand.runtime.dead) break;
+    } while (steps < order.length);
+
+    var nextRound = (c.round || 1) + (wrapped ? 1 : 0);
+    var nextId = order[nextIdx].id;
+    var nextActor = actor(state, nextId);
+
+    var b = Events.makeBatch(opts.command || { commandId: opts.commandId || null, actorId: current });
+    if (current) {
+      var ca = actor(state, current);
+      Events.push(b, 'turn_end', { actorId: current }, (ca ? ca.name : current) + '\u2019s turn ends.');
+    }
+    /* Move the initiative pointer (and re-carry the order for exact replay). */
+    b.events.push(Events.makeEvent('initiative', { order: order, turnIndex: nextIdx }));
+    if (wrapped) Events.push(b, 'round', { round: nextRound }, 'Round ' + nextRound + '.');
+    var surprised = nextRound === 1 && order[nextIdx].surprised;
+    Events.push(b, 'turn_start', { actorId: nextId, speed: speedOf(nextActor), surprised: surprised },
+      surprised ? (nextActor ? nextActor.name : nextId) + ' is caught flat-footed and can do nothing.'
+                : (nextActor ? nextActor.name : nextId) + '\u2019s turn.');
+    upkeep(state, nextId, b);
+    return b;
+  }
+
+  /**
+   * Is the fight decided?
+   *
+   * One side has nobody left who can act. The dying count as out: a party
+   * bleeding on the floor has lost, and letting a fight "continue" against
+   * three unconscious bodies produced the ugliest turn a playtest ever
+   * printed.
+   */
+  function encounterOver(state) {
+    if (!state.combat || !state.combat.active) return { over: false };
+    var sides = { party: 0, enemy: 0, neutral: 0 };
+    Object.keys(state.actors).forEach(function (id) {
+      var a = state.actors[id];
+      if (!a || a.runtime.dead) return;
+      if (a.runtime.hp <= 0) return;
+      var side = a.side === 'party' ? 'party' : a.side === 'enemy' ? 'enemy' : 'neutral';
+      sides[side]++;
+    });
+    if (sides.enemy === 0) return { over: true, winner: 'party', sides: sides };
+    if (sides.party === 0) return { over: true, winner: 'enemy', sides: sides };
+    return { over: false, sides: sides };
+  }
+
+  /** Close the encounter: initiative is put away and the world returns to
+      exploration time. Experience is awarded as creatures die, not here, so a
+      fight fled from still counts for what was killed on the way out. */
+  function endEncounter(state, opts) {
+    opts = opts || {};
+    var b = Events.makeBatch(opts.command || { commandId: opts.commandId || null, actorId: null });
+    Events.push(b, 'encounter_end', { winner: opts.winner || null },
+      opts.winner === 'party' ? 'The last of them goes down. It is over.'
+        : opts.winner === 'enemy' ? 'The party is down. Silence.'
+          : 'The fighting stops.');
+    return b;
+  }
+
+  /* ===================================================== damage pipeline ====
+     One place that turns "N damage lands on T" into the full consequence chain:
+     the hit points themselves, a concentration check if T was concentrating,
+     death-save bookkeeping if T is already down, and instant death on massive
+     overflow. Returns events for a batch — it never touches state. */
+  function damageEvents(state, targetId, amount, opts) {
+    opts = opts || {};
+    var t = actor(state, targetId);
+    var events = [], beats = [];
+    if (!t) return { events: events, beats: beats };
+    var rt = t.runtime;
+    var name = t.name || targetId;
+    var hp = rt.hp, hpMax = rt.hpMax;
+    var temp = rt.tempHp || 0;
+    var toTemp = Math.min(temp, amount);
+    var toHp = amount - toTemp;
+
+    if (toTemp > 0) {
+      events.push(Events.makeEvent('temp_hp', { targetId: targetId, amount: temp - toTemp, set: true }));
+      beats.push(name + '\u2019s temporary hit points absorb ' + toTemp + '.');
+    }
+
+    /* Massive damage first: if the blow past 0 equals the maximum, the creature
+       dies where it stands and none of the save machinery runs. */
+    var massive = Rules.massiveDamage(hp, hpMax, toHp);
+    if (massive.dead) {
+      events.push(Events.makeEvent('hp', { targetId: targetId, delta: -toHp }));
+      pushLethal(state, events, beats, targetId, name + ' is destroyed outright by the sheer force of the blow.');
+      return { events: events, beats: beats, dead: true, massive: true };
+    }
+
+    if (hp === 0 && toHp > 0) {
+      /* Already dying: damage does not lower hit points further, it burns death
+         saves — two of them on a critical hit. */
+      var down = Rules.damageWhileDown(rt.deathSaves, !!opts.crit);
+      events.push(Events.makeEvent('death_save', { actorId: targetId, failures: down.failuresDelta }));
+      beats.push(name + ' takes a hit while down (' + down.failuresDelta + ' death-save failure' +
+        (down.failuresDelta > 1 ? 's' : '') + ').');
+      if (down.dead) {
+        pushLethal(state, events, beats, targetId, name + ' fails their last breath and dies.');
+      }
+      return { events: events, beats: beats, dead: down.dead };
+    }
+
+    events.push(Events.makeEvent('hp', { targetId: targetId, delta: -toHp }));
+    if (toHp > 0) beats.push(name + ' takes ' + toHp + ' damage.');
+
+    var newHp = Math.max(0, hp - toHp);
+    if (newHp === 0 && hp > 0) {
+      /* Dropped to 0: unconscious, and concentration ends with consciousness. */
+      if (rt.concentratingOn) {
+        events.push(Events.makeEvent('concentration_end', { targetId: targetId, actorId: targetId, reason: 'unconscious' }));
+        beats.push(name + ' falls, and their concentration breaks.');
+      }
+      /* A monster usually dies outright at 0 hit points; only player
+         characters and named NPCs fall unconscious and roll death saves.
+         Treating everything alike left gnolls lying "unconscious" on the
+         floor rolling saves, so fights never ended and experience arrived
+         several rounds after the kill. `alwaysDeathSaves` lets a campaign mark
+         an NPC whose death should be a scene rather than a subtraction. */
+      if (diesAtZero(t)) {
+        pushLethal(state, events, beats, targetId, name + ' is killed.');
+        return { events: events, beats: beats, dead: true };
+      }
+      beats.push(name + ' drops.');
+    } else if (rt.concentratingOn && opts.concentrationDerived && toHp > 0) {
+      /* Still up but concentrating: a Constitution save or the effect ends. */
+      var check = Rules.concentrationCheck(opts.concentrationDerived, toHp, { rng: state.rng });
+      events.push(Events.makeEvent('roll', { of: 'concentration', actorId: targetId, dc: check.dc, result: check.save }));
+      if (!check.success) {
+        events.push(Events.makeEvent('concentration_end', { actorId: targetId, reason: 'failed save' }));
+        beats.push(name + ' loses concentration (DC ' + check.dc + ' save failed).');
+      } else {
+        beats.push(name + ' grits their teeth and holds concentration (DC ' + check.dc + ').');
+      }
+    }
+    return { events: events, beats: beats, dead: false };
+  }
+
+  /* ===================================================== attack profiles ====
+     A profile is the minimum an attack needs: a to-hit bonus, damage notation,
+     an ability modifier for damage, reach and a couple of flags. Player
+     characters carry them on runtime.attacks; monsters keep them in the
+     statblock actions read from the data files. */
+  function profileFor(state, actorId, opts) {
+    opts = opts || {};
+    var a = actor(state, actorId);
+    if (!a) return null;
+    var sb = a.runtime.statblock;
+    if (opts.actionRef && sb && sb.actions) {
+      for (var i = 0; i < sb.actions.length; i++) {
+        if (sb.actions[i].id === opts.actionRef || sb.actions[i].name === opts.actionRef) {
+          var act = sb.actions[i];
+          var dmg = (act.damage && act.damage[0]) || { dice: '0', flat: 0, type: 'bludgeoning' };
+          return {
+            name: act.name, toHit: act.toHit, reach: act.reach || CELL,
+            damage: dmg.dice + (dmg.flat ? '+' + dmg.flat : ''), damageType: dmg.type,
+            abilityMod: 0, extraDamage: act.damage.slice(1),
+          };
+        }
+      }
+    }
+    var list = a.runtime.attacks || [];
+    var pick = opts.offHand ? (list[1] || list[0]) : list[0];
+    return pick || null;
+  }
+
+  /**
+   * The armour class an attack is actually resolved against.
+   *
+   * This read only `runtime.ac`, which nothing ever sets — so every attack in
+   * the running game was resolved against AC 10 while the sheet proudly
+   * displayed 18. The combat tests missed it because they inject `runtime.ac`
+   * into their fixtures, which is the same fixture-versus-reality trap that
+   * hid the armour bug earlier. Order of preference:
+   *
+   *   1. an explicit runtime override (effects, tests, DM fiat)
+   *   2. the derived sheet, which is where a character's real AC lives
+   *   3. the statblock, which is where a monster's does
+   *   4. 10, for something with no defences described at all
+   */
+  function targetAc(state, targetId) {
+    var t = actor(state, targetId);
+    if (!t) return 10;
+    if (typeof t.runtime.ac === 'number') return t.runtime.ac;
+
+    if (t.derivedCache && typeof t.derivedCache.ac === 'number') return t.derivedCache.ac;
+
+    var block = t.statblock;
+    if (block) {
+      if (typeof block.ac === 'number') return block.ac;
+      if (block.ac && typeof block.ac.value === 'number') return block.ac.value;
+      if (Array.isArray(block.armorClass) && block.armorClass[0] &&
+        typeof block.armorClass[0].value === 'number') return block.armorClass[0].value;
+      if (typeof block.armorClass === 'number') return block.armorClass;
+    }
+
+    /* Last resort: derive it now rather than pretending it is 10. */
+    var State = (global.DND && global.DND.State) ||
+      (typeof require !== 'undefined' ? require('./state.js') : null);
+    if (State && State.refreshDerived) {
+      var d = State.refreshDerived(state, targetId);
+      if (d && typeof d.ac === 'number') return d.ac;
+    }
+    return 10;
+  }
+
+  /* ============================================================ resolvers ===
+     Each returns an EventBatch; dispatch commits it. The beats are the ONLY
+     thing the narrator will see, so they describe what an onlooker perceives —
+     a hit, a miss, a stagger — and never a hidden number the fiction could not
+     reveal (an enemy's exact AC, say). */
+
+  function attackResolve(state, command, ctx, opts) {
+    opts = opts || {};
+    var b = Events.makeBatch(command);
+    var attackerId = command.actorId;
+    var attacker = actor(state, attackerId);
+    var targetId = (command.primary.targetIds || [])[0] || (ctx && ctx.targetId);
+    var target = actor(state, targetId);
+    if (!attacker || !target) return Events.refuse(b, 'no-target', 'there is nothing there to strike');
+
+    var reaction = !!opts.reaction;
+    var offHand = !!opts.offHand;
+    if (!reaction && !opts.free) {
+      if (offHand && !canBonus(attacker)) return Events.refuse(b, 'no-bonus', 'no bonus action left for an off-hand strike');
+      if (!offHand && !canAct(attacker)) return Events.refuse(b, 'no-action', 'no action left to attack with');
+    }
+    if (reaction && !canReact(attacker)) return Events.refuse(b, 'no-reaction', 'the reaction for this round is already spent');
+
+    var profile = profileFor(state, attackerId, opts);
+    if (!profile) return Events.refuse(b, 'no-weapon', 'nothing to attack with');
+
+    var ac = targetAc(state, targetId);
+    var cover = (ctx && ctx.cover) || null;
+    if (cover) {
+      var cb = Rules.coverBonus(cover);
+      if (cb.untargetable) return Events.refuse(b, 'total-cover', 'the target is completely behind cover');
+      ac += cb.ac;
+    }
+
+    /**
+     * Advantage and disadvantage from the state of the board.
+     *
+     * These were taken only from `ctx`, which nothing populated in play, so
+     * Dodge cost an action and changed nothing, an unconscious target was no
+     * easier to hit than a standing one, and Help was a line of prose. The
+     * conditions were being applied faithfully and then never read.
+     */
+    var stance = attackAdvantage(state, attacker, target, ctx);
+    var roll = Dice.attack({
+      rng: state.rng, mod: profile.toHit || 0, ac: ac,
+      advantage: stance.advantage, disadvantage: stance.disadvantage,
+      critRange: profile.critRange || 20,
+    });
+    if (stance.why.length) b.beats.push(stance.why.join(' '));
+    /* A Help is spent whether it helped or not — that is the point of it being
+       one ally's whole action rather than a standing bonus. */
+    if (stance.usedHelp) {
+      Events.push(b, 'help_used', { actorId: attackerId, targetId: targetId }, '');
+    }
+    /* Stepping out to attack gives your position away. */
+    if (attacker.runtime.hiddenFrom && Object.keys(attacker.runtime.hiddenFrom).length) {
+      Events.push(b, 'hidden', { actorId: attackerId, hidden: false },
+        attacker.name + ' breaks cover to strike.');
+    }
+    /* The full roll (including the AC it was measured against) goes in the
+       audit event; the beat the narrator sees says only what a bystander could
+       see — that a blow was aimed — never the enemy's exact Armour Class. */
+    Events.push(b, 'roll', { of: 'attack', actorId: attackerId, targetId: targetId, result: roll });
+    b.beats.push(attacker.name + ' swings at ' + target.name + '.');
+
+    /* Spend the economy regardless of hit or miss — a swing is a swing. */
+    if (!reaction && !opts.free) {
+      if (offHand) Events.push(b, 'action_economy', { actorId: attackerId, bonus: false });
+      else if (!opts.multiattack) Events.push(b, 'action_economy', { actorId: attackerId, action: false });
+    } else if (reaction) {
+      Events.push(b, 'action_economy', { actorId: attackerId, reaction: false });
+    }
+
+    if (roll.hit === false) {
+      b.beats.push('The blow misses.');
+      return b;
+    }
+
+    var dmg = Dice.damage(profile.damage, { rng: state.rng, crit: roll.isCrit, type: profile.damageType });
+    var total = dmg.total;
+    if (offHand) {
+      /* The off-hand die is rolled; the ability modifier is added only under
+         the two-weapon rule above. */
+      var already = profile.abilityMod || 0;
+      var allowed = twoWeaponDamageBonus(already, opts);
+      total = total - already + allowed;
+      if (total < 0) total = 0;
+    }
+    Events.push(b, 'roll', { of: 'damage', actorId: attackerId, targetId: targetId, result: dmg });
+    /* Resistance, immunity and vulnerability were derived onto every sheet and
+       then never consulted, so a skeleton took full damage from a club and a
+       fire elemental burned. Applied here, once, where damage becomes hit
+       points — before the death-save and massive-damage arithmetic that
+       depends on the real number. */
+    var adjusted = applyDamageType(state, targetId, total, profile.damageType);
+    if (adjusted.note) b.beats.push(adjusted.note);
+    total = adjusted.total;
+
+    var chain = damageEvents(state, targetId, total, {
+      crit: roll.isCrit,
+      concentrationDerived: ctx && ctx.targetConcentrationDerived,
+    });
+    b.events = b.events.concat(chain.events);
+    b.beats = b.beats.concat([attacker.name + (roll.isCrit ? ' critically hits' : ' hits') + ' for ' + total + '.']);
+    b.beats = b.beats.concat(chain.beats);
+    return b;
+  }
+
+  /**
+   * Work out whether an attack is made with advantage, disadvantage, or
+   * neither, from the conditions actually on the board.
+   *
+   * 2014 rules: advantage and disadvantage do not stack and they cancel. One
+   * of each leaves a plain d20 no matter how many of each there are, which is
+   * why this counts sources into two buckets and then compares them rather
+   * than tracking a running total.
+   */
+  function attackAdvantage(state, attacker, target, ctx) {
+    var adv = [], dis = [];
+    var ac = (attacker.runtime && attacker.runtime.conditions) || {};
+    var tc = (target.runtime && target.runtime.conditions) || {};
+
+    /* The target's condition. An unconscious or paralysed creature is helpless;
+       a prone one is easy to reach in melee but hard to shoot. */
+    if (tc.unconscious || tc.paralyzed || tc.petrified || tc.stunned || tc.restrained) {
+      adv.push('The target cannot properly defend.');
+    }
+    if (target.runtime && target.runtime.hp <= 0 && !target.runtime.dead) {
+      adv.push('The target is down and helpless.');
+    }
+    if (tc.prone) {
+      if (ctx && ctx.ranged) dis.push('The target is prone and hard to hit at range.');
+      else adv.push('The target is prone.');
+    }
+    if (tc.invisible || tc.hidden) dis.push('The target cannot be seen clearly.');
+    if (tc.dodging) dis.push('The target is dodging.');
+
+    /* Someone spent their action to Help this attacker against this target. */
+    var helped = attacker.runtime && attacker.runtime.helpedAgainst;
+    var usedHelp = false;
+    if (helped && helped[targetIdOf(state, target)]) {
+      adv.push('An ally has set them up.');
+      usedHelp = true;
+    }
+
+    /* The attacker's own condition. */
+    if (ac.prone) dis.push('Attacking from the floor is awkward.');
+    if (ac.restrained || ac.poisoned || ac.frightened) dis.push('The attacker is hampered.');
+    if (ac.blinded) dis.push('The attacker cannot see.');
+    if (ac.invisible || ac.hidden) adv.push('The attacker strikes unseen.');
+    if ((attacker.runtime && attacker.runtime.exhaustion) >= 3) dis.push('Exhaustion drags at them.');
+
+    /* Explicit overrides still win: a spell or the DM saying "with advantage"
+       is not something the board can be expected to know about. */
+    if (ctx && ctx.advantage) adv.push('');
+    if (ctx && ctx.disadvantage) dis.push('');
+
+    var hasAdv = adv.length > 0, hasDis = dis.length > 0;
+    var why = [];
+    if (hasAdv && hasDis) why = ['Advantage and disadvantage cancel.'];
+    else if (hasAdv) why = adv.filter(Boolean).slice(0, 1);
+    else if (hasDis) why = dis.filter(Boolean).slice(0, 1);
+
+    return {
+      advantage: hasAdv && !hasDis,
+      disadvantage: hasDis && !hasAdv,
+      usedHelp: usedHelp,
+      why: why,
+    };
+  }
+
+  /* Actors live in a map and do not reliably carry their own key, so an id is
+     looked up rather than read off the object. */
+  function targetIdOf(state, actorObj) {
+    if (!actorObj) return '';
+    if (actorObj.id) return actorObj.id;
+    var ids = Object.keys(state.actors || {});
+    for (var i = 0; i < ids.length; i++) if (state.actors[ids[i]] === actorObj) return ids[i];
+    return '';
+  }
+
+  /**
+   * Help: hand an ally advantage on their next attack against one creature.
+   *
+   * This used to print "lends a hand" and do nothing, which made an action
+   * that costs a whole turn strictly worse than attacking. The grant is
+   * recorded on the ally and consumed by their next attack against that
+   * target — it does not linger, and it does not apply to anyone else.
+   */
+  function helpResolve(state, command, ctx) {
+    var b = Events.makeBatch(command);
+    var a = actor(state, command.actorId);
+    if (!a) return Events.refuse(b, 'no-actor', 'no one to act');
+    if (!canAct(a)) return Events.refuse(b, 'no-action', 'no action left to Help');
+
+    var ids = command.primary.targetIds || [];
+    var allyId = ids[0];
+    var foeId = ids[1];
+    var ally = actor(state, allyId);
+    if (!ally) return Events.refuse(b, 'no-target', 'there is no one there to help');
+
+    /* No enemy named: help against whatever the ally is already facing. */
+    if (!foeId) foeId = perceivedEnemies(state, allyId)[0];
+    var foe = actor(state, foeId);
+    if (!foe) return Events.refuse(b, 'no-target', 'there is nothing to help against');
+
+    Events.push(b, 'action_economy', { actorId: command.actorId, action: false });
+    Events.push(b, 'help', { actorId: command.actorId, allyId: allyId, targetId: foeId },
+      a.name + ' distracts ' + foe.name + '; ' + ally.name + ' has the opening.');
+    return b;
+  }
+
+  /**
+   * Hide: a Stealth check against the passive Perception of everyone who might
+   * notice. Succeed and you are hidden from them specifically — which is what
+   * `hiddenFrom` means, and what the perception layer already understood but
+   * nothing ever set.
+   */
+  function hideResolve(state, command, ctx) {
+    var b = Events.makeBatch(command);
+    var a = actor(state, command.actorId);
+    if (!a) return Events.refuse(b, 'no-actor', 'no one to act');
+    if (!canAct(a)) return Events.refuse(b, 'no-action', 'no action left to Hide');
+
+    var derived = a.derivedCache || (ctx && ctx.derived) || {};
+    var stealthMod = (derived.skills && derived.skills.stealth &&
+      (derived.skills.stealth.total != null ? derived.skills.stealth.total : derived.skills.stealth)) ||
+      (derived.abilityMods && derived.abilityMods.dex) || 0;
+    var roll = Dice.check
+      ? Dice.check({ rng: state.rng, mod: stealthMod })
+      : Dice.roll('1d20', { rng: state.rng });
+    var total = roll.total != null ? roll.total : (roll.result || 0);
+
+    Events.push(b, 'action_economy', { actorId: command.actorId, action: false });
+    Events.push(b, 'roll', { of: 'stealth', actorId: command.actorId, result: roll },
+      a.name + ' slips into cover.');
+
+    var hidFrom = [], seenBy = [];
+    Object.keys(state.actors).forEach(function (id) {
+      if (id === command.actorId) return;
+      var o = state.actors[id];
+      if (!o.runtime || o.runtime.dead) return;
+      if (o.side === a.side) return;   // your own side knows where you went
+      var passive = (o.derivedCache && o.derivedCache.passives && o.derivedCache.passives.perception) || 10;
+      if (total >= passive) hidFrom.push(id); else seenBy.push(id);
+    });
+
+    if (hidFrom.length) {
+      Events.push(b, 'hidden', { actorId: command.actorId, from: hidFrom, hidden: true },
+        seenBy.length
+          ? a.name + ' is out of sight of some of them, but not all.'
+          : a.name + ' is out of sight.');
+    } else {
+      b.beats.push(a.name + ' fails to find cover; they are still in plain view.');
+    }
+    return b;
+  }
+
+  /**
+   * Halve, double or cancel damage according to what the target is made of.
+   *
+   * 2014 rules: resistance halves (rounding down), vulnerability doubles, and
+   * immunity removes it entirely. Resistance applies once no matter how many
+   * sources grant it, so this checks membership rather than counting.
+   */
+  function applyDamageType(state, targetId, amount, damageType) {
+    var t = actor(state, targetId);
+    if (!t || !damageType || !amount) return { total: amount, note: '' };
+    var d = t.derivedCache || {};
+    var type = String(damageType).toLowerCase();
+    var has = function (list) {
+      return (list || []).some(function (x) { return String(x).toLowerCase() === type; });
+    };
+
+    if (has(d.immunities)) {
+      return { total: 0, note: t.name + ' is unharmed \u2014 ' + type + ' does nothing to it.' };
+    }
+    if (has(d.vulnerabilities)) {
+      return { total: amount * 2, note: t.name + ' is horribly vulnerable to ' + type + '.' };
+    }
+    if (has(d.resistances)) {
+      return { total: Math.floor(amount / 2), note: t.name + ' shrugs off much of the ' + type + '.' };
+    }
+    return { total: amount, note: '' };
+  }
+
+  function contestResolve(state, command, ctx, mode) {
+    var b = Events.makeBatch(command);
+    var attackerId = command.actorId;
+    var attacker = actor(state, attackerId);
+    var targetId = (command.primary.targetIds || [])[0] || (ctx && ctx.targetId);
+    var target = actor(state, targetId);
+    if (!attacker || !target) return Events.refuse(b, 'no-target', 'there is no one to seize');
+    if (!ctx || !ctx.derivedA || !ctx.derivedB) return Events.refuse(b, 'no-derive', 'cannot resolve the contest without both combatants');
+    /* Grapple and shove are Attack-action attacks that spend one attack — they
+       are contests, never attack rolls, so they route through Rules.contest. */
+    if (!canAct(attacker) && !ctx.free) return Events.refuse(b, 'no-action', 'no attack left to grapple or shove with');
+
+    var result = mode === 'shove'
+      ? Rules.shove(ctx.derivedA, ctx.derivedB, { rng: state.rng, mode: ctx.mode })
+      : Rules.grapple(ctx.derivedA, ctx.derivedB, { rng: state.rng });
+    Events.push(b, 'roll', { of: mode, actorId: attackerId, targetId: targetId, result: result });
+    b.beats.push(attacker.name + ' grapples with ' + target.name + '.');
+    if (!ctx.free) Events.push(b, 'action_economy', { actorId: attackerId, action: false });
+
+    if (result.success) {
+      if (mode === 'grapple') {
+        Events.push(b, 'condition_add', { targetId: targetId, condition: 'grappled', source: attackerId },
+          target.name + ' is grappled.');
+      } else if (result.effect === 'prone') {
+        Events.push(b, 'condition_add', { targetId: targetId, condition: 'prone', source: attackerId },
+          target.name + ' is knocked prone.');
+      } else {
+        b.beats.push(target.name + ' is shoved back.');
+      }
+    } else {
+      b.beats.push(target.name + ' holds firm.');
+    }
+    return b;
+  }
+
+  function stanceResolve(state, command, condition, beat) {
+    var b = Events.makeBatch(command);
+    var a = actor(state, command.actorId);
+    if (!a) return Events.refuse(b, 'no-actor', 'no one to act');
+    if (!canAct(a)) return Events.refuse(b, 'no-action', 'no action left this turn');
+    Events.push(b, 'action_economy', { actorId: command.actorId, action: false });
+    if (condition) Events.push(b, 'condition_add', { targetId: command.actorId, condition: condition, endsOn: 'start_of_next_turn' },
+      (a.name) + ' ' + beat);
+    else b.beats.push(a.name + ' ' + beat);
+    return b;
+  }
+
+  function resolveCombat(state, command, ctx) {
+    ctx = ctx || {};
+    var verb = command.primary.verb;
+    switch (verb) {
+      case 'attack': return attackResolve(state, command, ctx, {});
+      case 'two_weapon_attack': return attackResolve(state, command, ctx, { offHand: true });
+      case 'unarmed_strike': return attackResolve(state, command, ctx, {});
+      case 'opportunity_attack': return attackResolve(state, command, ctx, { reaction: true });
+      case 'grapple': return contestResolve(state, command, ctx, 'grapple');
+      case 'shove': return contestResolve(state, command, ctx, 'shove');
+      case 'dodge': return stanceResolve(state, command, 'dodging', 'takes the Dodge action.');
+      case 'disengage': return stanceResolve(state, command, 'disengaging', 'disengages.');
+      case 'dash': {
+        var b = Events.makeBatch(command);
+        var a = actor(state, command.actorId);
+        if (!a) return Events.refuse(b, 'no-actor', 'no one to act');
+        if (!canAct(a)) return Events.refuse(b, 'no-action', 'no action left to Dash');
+        Events.push(b, 'action_economy', { actorId: command.actorId, action: false });
+        var extra = speedOf(a);
+        var cur = movementLeft(a);
+        Events.push(b, 'action_economy', { actorId: command.actorId, movementUsed: -extra },
+          a.name + ' dashes (movement now ' + (cur + extra) + ' ft).');
+        return b;
+      }
+      case 'help': return helpResolve(state, command, ctx);
+      case 'hide': return hideResolve(state, command, ctx);
+      case 'ready': return stanceResolve(state, command, null, 'readies an action.');
+      case 'escape_grapple': {
+        var eb = Events.makeBatch(command);
+        var esc = actor(state, command.actorId);
+        if (!esc) return Events.refuse(eb, 'no-actor', 'no one to act');
+        Events.push(eb, 'condition_remove', { targetId: command.actorId, condition: 'grappled' },
+          esc.name + ' breaks free.');
+        return eb;
+      }
+      default:
+        return Events.refuse(Events.makeBatch(command), 'unknown-verb', 'the combat engine does not know ' + verb);
+    }
+  }
+
+  /* Dispatch.commandFromMove puts `move.step` straight into a command's
+     `primary`, so a move's step must be a real step object, not a verb string.
+     This wrapper is the single place that shape is constructed, so the UI, the
+     AI seats and the referee enums cannot drift apart. */
+  function move(verb, what, cost, extra) {
+    var step = Command
+      ? Command.makeStep(Object.assign({ verb: verb }, extra || {}))
+      : Object.assign({ verb: verb, targetIds: [] }, extra || {});
+    return Object.assign({ step: step, what: what, cost: cost }, (extra && extra.warn) ? { warn: extra.warn } : {});
+  }
+
+  /**
+   * The hostile creatures this actor can actually perceive.
+   *
+   * The move list is shown to a player and handed to an AI seat, so anything
+   * it names has been revealed. Building it by walking `state.actors` meant
+   * the ambusher waiting in the dark appeared in the action bar as "Attack
+   * Hooded Figure" before anyone had seen or heard a thing — the perception
+   * layer exists precisely so this cannot happen, and this was one of the few
+   * places that went round it.
+   *
+   * A creature you cannot perceive is simply not offered as a target. You may
+   * still attack the space it occupies through improvised actions; you just
+   * are not told it is there.
+   */
+  /* Companions on your own side who are up and can be helped. */
+  function allies(state, actorId) {
+    var a = actor(state, actorId);
+    if (!a) return [];
+    return Object.keys(state.actors || {}).filter(function (id) {
+      if (id === actorId) return false;
+      var o = state.actors[id];
+      return o.side === a.side && o.runtime && !o.runtime.dead && o.runtime.hp > 0;
+    });
+  }
+
+  function perceivedEnemies(state, actorId) {
+    var a = actor(state, actorId);
+    if (!a) return [];
+    var K = (global.DND && global.DND.Knowledge) ||
+      (typeof require !== 'undefined' ? require('./knowledge.js') : null);
+    return Object.keys(state.actors || {}).filter(function (id) {
+      var o = state.actors[id];
+      if (!o.side || !a.side || o.side === a.side || o.side === 'neutral') return false;
+      if (!o.runtime || o.runtime.dead) return false;
+      if (K && K.canPerceive && !K.canPerceive(state, actorId, id)) return false;
+      return true;
+    });
+  }
+
+  resolveCombat.legalMoves = function (state, actorId, ctx) {
+    var a = actor(state, actorId);
+    /* Unconscious characters do not fight. They make death saves, which
+       startTurn rolls for them. */
+    if (!a || isDown(a)) return [];
+    var moves = [];
+    var enemies = perceivedEnemies(state, actorId);
+    if (canAct(a)) {
+      enemies.forEach(function (id) {
+        moves.push(move('attack', 'Attack ' + (state.actors[id].name || id), 'action', { targetIds: [id] }));
+      });
+      moves.push(move('dodge', 'Dodge', 'action'));
+      moves.push(move('disengage', 'Disengage', 'action'));
+      moves.push(move('dash', 'Dash', 'action'));
+      moves.push(move('hide', 'Hide', 'action',
+        { warn: 'a Stealth check against what they might notice' }));
+      /* Help names the ally first and the enemy second, which is the order the
+         resolver reads. Offered only when there is someone to help and someone
+         to help against — an unreachable button teaches players it does
+         nothing, which is how it came to be treated as decorative. */
+      allies(state, actorId).forEach(function (allyId) {
+        if (!enemies.length) return;
+        moves.push(move('help', 'Help ' + (state.actors[allyId].name || allyId), 'action',
+          { targetIds: [allyId, enemies[0]], warn: 'gives them advantage on their next attack' }));
+      });
+      enemies.forEach(function (id) {
+        moves.push(move('grapple', 'Grapple ' + (state.actors[id].name || id), 'action',
+          { targetIds: [id], warn: 'a contest, not an attack roll' }));
+        moves.push(move('shove', 'Shove ' + (state.actors[id].name || id), 'action',
+          { targetIds: [id], warn: 'a contest, not an attack roll' }));
+      });
+    }
+    if (canBonus(a) && (a.runtime.attacks || []).length > 1) {
+      enemies.forEach(function (id) {
+        moves.push(move('two_weapon_attack', 'Off-hand strike ' + (state.actors[id].name || id), 'bonus',
+          { targetIds: [id], warn: 'off-hand adds no ability modifier to damage' }));
+      });
+    }
+    return moves;
+  };
+
+  /* ----------------------------------------------------------- movement ---- */
+
+  function resolveMovement(state, command, ctx) {
+    ctx = ctx || {};
+    var b = Events.makeBatch(command);
+    var a = actor(state, command.actorId);
+    if (!a) return Events.refuse(b, 'no-actor', 'no one to move');
+    var verb = command.primary.verb;
+    if (verb === 'stand_up') {
+      Events.push(b, 'condition_remove', { targetId: command.actorId, condition: 'prone' }, a.name + ' stands up.');
+      return b;
+    }
+    if (verb === 'drop_prone') {
+      Events.push(b, 'condition_add', { targetId: command.actorId, condition: 'prone' }, a.name + ' drops prone.');
+      return b;
+    }
+    var path = command.primary.path || (command.primary.point ? [a.runtime.pos, command.primary.point] : null);
+    if (!path || path.length < 2) return Events.refuse(b, 'no-path', 'no destination to move to');
+    var cost = pathCost(path, { difficult: ctx.difficult });
+    if (cost.illegal) return Events.refuse(b, 'illegal-move', 'that is not a step-by-step path');
+    if (cost.cost > movementLeft(a)) return Events.refuse(b, 'no-speed', 'not enough movement left to go there');
+
+    var dest = path[path.length - 1];
+    Events.push(b, 'move', { actorId: command.actorId, to: dest, from: a.runtime.pos, movementUsed: cost.cost },
+      a.name + ' moves ' + cost.cost + ' ft.');
+
+    /* Note any opportunity attacks the move provokes — the loop offers them to
+       the reacting seats, it does not resolve them here. Disengaging (a stance
+       set this turn) suppresses them. */
+    if (!(a.runtime.conditions && a.runtime.conditions.disengaging)) {
+      var enemies = Object.keys(state.actors || {}).filter(function (id) {
+        var o = state.actors[id];
+        return o.side && a.side && o.side !== a.side && o.runtime && !o.runtime.dead && o.runtime.pos;
+      });
+      enemies.forEach(function (id) {
+        var o = state.actors[id];
+        if (provokesOpportunity(a.runtime.pos, dest, o.runtime.pos, { reachFt: (o.runtime.reach || CELL) })) {
+          Events.push(b, 'note', { text: 'opportunity', from: id, against: command.actorId },
+            a.name + ' leaves ' + o.name + '\u2019s reach, provoking an opportunity attack.');
+        }
+      });
+    }
+    return b;
+  }
+
+  resolveMovement.legalMoves = function (state, actorId) {
+    var a = actor(state, actorId);
+    if (!a || isDown(a) || movementLeft(a) <= 0) return [];
+    return [move('move', 'Move (' + movementLeft(a) + ' ft left)', 'movement')];
+  };
+
+  /* -------------------------------------------------------------- meta ----- */
+
+  function resolveMeta(state, command) {
+    var b = Events.makeBatch(command);
+    var a = actor(state, command.actorId);
+    var verb = command.primary.verb;
+    if (verb === 'end_turn') {
+      Events.push(b, 'turn_end', { actorId: command.actorId }, (a ? a.name : command.actorId) + ' ends their turn.');
+      return b;
+    }
+    if (verb === 'pass') {
+      Events.push(b, 'note', { text: 'pass', actorId: command.actorId }, (a ? a.name : command.actorId) + ' does nothing.');
+      return b;
+    }
+    return Events.refuse(b, 'unknown-verb', 'meta does not handle ' + verb);
+  }
+
+  resolveMeta.legalMoves = function (state, actorId) {
+    /* Nothing is offered to someone who is unconscious \u2014 not even passing.
+       Their turn is resolved by startTurn rolling a death save. */
+    if (isDown(actor(state, actorId))) return [];
+    return [
+      move('end_turn', 'End turn', 'free'),
+      move('pass', 'Do nothing', 'free'),
+    ];
+  };
+
+  /* ==================================================== monster actions =====
+     The statblock shape lives in docs/PLAN.md 3.6 and the srd_monsters data:
+     `multiattack.sequence` is a list of {actionRef, count}; `recharge` is a
+     [min, max] band; `legendaryActions` is {perRound, options:[{cost,actionRef}]};
+     `legendaryResistance` is a remaining count. */
+
+  function multiattackSequence(statblock) {
+    var ma = statblock && statblock.multiattack;
+    if (!ma || !ma.sequence) return [];
+    var out = [];
+    ma.sequence.forEach(function (part) {
+      for (var i = 0; i < (part.count || 1); i++) out.push(part.actionRef);
+    });
+    return out;
+  }
+
+  /* A monster's multiattack as one batch: a chain of attacks that each spend
+     nothing extra (the whole thing is the single Attack action). */
+  function monsterMultiattack(state, command, ctx) {
+    ctx = ctx || {};
+    var attackerId = command.actorId;
+    var attacker = actor(state, attackerId);
+    var b = Events.makeBatch(command);
+    if (!attacker || !attacker.runtime.statblock) return Events.refuse(b, 'no-statblock', 'not a statted creature');
+    if (!canAct(attacker)) return Events.refuse(b, 'no-action', 'no action left to multiattack');
+    var refs = multiattackSequence(attacker.runtime.statblock);
+    var targets = command.primary.targetIds || (ctx.targetId ? [ctx.targetId] : []);
+    Events.push(b, 'action_economy', { actorId: attackerId, action: false });
+    refs.forEach(function (ref, i) {
+      var targetId = targets[i] || targets[0];
+      var sub = attackResolve(state, {
+        commandId: command.commandId, actorId: attackerId,
+        primary: { verb: 'attack', targetIds: [targetId] },
+      }, Object.assign({}, ctx, {}), { actionRef: ref, multiattack: true, free: true });
+      if (sub.refused) return;
+      b.events = b.events.concat(sub.events);
+      b.beats = b.beats.concat(sub.beats);
+    });
+    return b;
+  }
+
+  /* Recharge: an ability with `recharge:[min,max]` comes back when a d6 at the
+     start of the monster's turn rolls at least `min`. */
+  function rollRecharge(state, band) {
+    if (!band || !band.length) return { ready: true, roll: null };
+    var r = Dice.roll('1d6', { rng: state.rng });
+    return { ready: r.total >= band[0], roll: r.total };
+  }
+
+  /* Legendary resistance turns a failed save into a success and spends one use.
+     Pure: takes the current count, returns whether it fired and the new count. */
+  function useLegendaryResistance(remaining) {
+    if ((remaining || 0) <= 0) return { used: false, remaining: remaining || 0, save: 'fail' };
+    return { used: true, remaining: remaining - 1, save: 'success' };
+  }
+
+  /* Legendary actions: a budget of `perRound` points, spent at the END of other
+     creatures' turns and reset at the top of the monster's own turn. */
+  function legendaryReset(statblock) {
+    return (statblock && statblock.legendaryActions && statblock.legendaryActions.perRound) || 0;
+  }
+  function spendLegendaryAction(remaining, cost) {
+    cost = cost || 1;
+    if ((remaining || 0) < cost) return { ok: false, remaining: remaining || 0 };
+    return { ok: true, remaining: remaining - cost };
+  }
+
+  var api = {
+    CELL: CELL,
+    /* geometry (imported by the UI verbatim) */
+    centreFt: centreFt, euclidFt: euclidFt,
+    chebyshevSquares: chebyshevSquares, chebyshevFt: chebyshevFt,
+    squaresInSphere: squaresInSphere, squaresInCone: squaresInCone,
+    pathCost: pathCost, provokesOpportunity: provokesOpportunity,
+    lineOfSightCover: lineOfSightCover, hasLineOfSight: hasLineOfSight,
+    segmentBlocksSquare: segmentBlocksSquare, corners: corners,
+    /* economy */
+    canAct: canAct, canBonus: canBonus, canReact: canReact,
+    isDying: isDying, isDown: isDown, diesAtZero: diesAtZero,
+    xpAwardEvents: xpAwardEvents,
+    movementLeft: movementLeft, isSurprised: isSurprised,
+    twoWeaponDamageBonus: twoWeaponDamageBonus,
+    /* turn loop */
+    beginEncounter: beginEncounter, startTurn: startTurn, endTurn: endTurn, advanceTurn: advanceTurn,
+    upkeep: upkeep, encounterOver: encounterOver, endEncounter: endEncounter,
+    perceivedEnemies: perceivedEnemies, attackAdvantage: attackAdvantage,
+    applyDamageType: applyDamageType, helpResolve: helpResolve, hideResolve: hideResolve,
+    /* damage pipeline */
+    damageEvents: damageEvents,
+    /* profiles + resolvers */
+    profileFor: profileFor, targetAc: targetAc,
+    resolveCombat: resolveCombat, resolveMovement: resolveMovement, resolveMeta: resolveMeta,
+    /* monsters */
+    multiattackSequence: multiattackSequence, monsterMultiattack: monsterMultiattack,
+    rollRecharge: rollRecharge, useLegendaryResistance: useLegendaryResistance,
+    legendaryReset: legendaryReset, spendLegendaryAction: spendLegendaryAction,
+    /* registration */
+    register: function () {
+      if (!Dispatch) return api;
+      Dispatch.register('combat', resolveCombat);
+      Dispatch.register('movement', resolveMovement);
+      Dispatch.register('meta', resolveMeta);
+      return api;
+    },
+  };
+
+  global.DND = global.DND || {};
+  global.DND.Combat = api;
+  /* Register on load rather than waiting to be asked. A resolver that exists
+     but is not registered produces an actor with no legal moves, which looks
+     exactly like a stuck AI rather than like a missing wiring call — and that
+     is precisely how it was found. `register()` stays exported and is
+     idempotent, so a caller may still be explicit. */
+  api.register();
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof window !== 'undefined' ? window : globalThis);

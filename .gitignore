@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# The local AI runtime and its models. Gigabytes of weights do not belong in
+# git — `scripts/install-ai.ps1` fetches them on a machine that needs them.
+ai/
+*.gguf
+*.bin
+*.safetensors
+
+# Saved games and transcripts a session produced. The game writes here; the
+# repository is not where anyone's campaign should live.
+exports/*.json
+exports/*.md
+
+# Playtest and server logs
+logs/
+_playtest*.log
+_s.log
+_s.err
+_shen.log
+*.log
+
+# Test screenshots, regenerated on every browser run
+tests/shot-*.png
+
+# The unpacked source material the campaign was reconstructed from
+_source/
+
+# Python bytecode from the one-off SRD extraction scripts
+__pycache__/
+*.pyc
