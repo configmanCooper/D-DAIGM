@@ -53,6 +53,10 @@ async function main() {
     page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
 
     await page.goto(URL, { waitUntil: 'networkidle2', timeout: 45000 });
+    /* Start clean: another suite may have left a saved game in this origin's
+       localStorage, and the wizard behaves differently when it finds one. */
+    await page.evaluate(() => { try { localStorage.clear(); } catch (e) { /* nothing to clear */ } });
+    await page.reload({ waitUntil: 'networkidle2', timeout: 45000 });
     await wait(2500);
 
     /* ------------------------------------------------------------- setup -- */
@@ -170,8 +174,19 @@ async function main() {
        had none at all: a player could attack all day, the same character kept
        the initiative for ever, the monsters never hit back, and every effect
        measured in rounds lasted the whole session. The headless playtests hid
-       it because the harness carried a turn loop of its own. */
+       it because the harness carried a turn loop of its own.
+
+       Ending the turn explicitly is how a person actually plays: a character
+       who has swung may still have a bonus action, and the game is right not
+       to take it away from them. */
     t.section('the turn passes to everyone else');
+    await page.evaluate(() => {
+      const end = Array.from(document.querySelectorAll('#actionbar button'))
+        .filter(b => /end turn/i.test(b.textContent))[0];
+      if (end) end.click();
+    });
+    await wait(3500);
+
     const turnState = await page.evaluate(() => {
       const s = window.DND.App.session;
       return {

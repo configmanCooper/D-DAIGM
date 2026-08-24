@@ -21,7 +21,14 @@ server, warms a model, and opens the page.
 stop.cmd
 ```
 
-Stops everything and reclaims GPU memory.
+Stops **everything the game started** — the web server, Ollama, and the model runner holding
+your GPU — and then tells you how much VRAM it got back. It names each process it stops, so
+you can check rather than take its word for it.
+
+It is careful about whose processes it stops. Only executables living under this folder or
+under the AI runtime *this game uses* are touched, so a system-wide Ollama, or another
+project's `llama-server` running on the same machine, is left completely alone. (That is not
+hypothetical: it was tested against a second game's model server running at the same time.)
 
 Useful switches:
 
@@ -31,6 +38,31 @@ Useful switches:
 .\start.ps1 -NoBrowser        don't open a window (for scripted runs)
 .\start.ps1 -Restart          force a fresh server even if one is healthy
 ```
+
+### Installing the local Dungeon Master
+
+```
+install-ai.cmd
+```
+
+Downloads the portable Ollama runtime and the best model your GPU has room for, into this
+game's own `ai\` folder. Nothing goes into Program Files, nothing goes on your PATH, and
+uninstalling is deleting the folder.
+
+The weights are several gigabytes, so they are **not in this repository** — this script is how
+you get them on a machine that needs them.
+
+```
+install-ai.cmd -List             what is installed, change nothing
+install-ai.cmd -Model qwen3.5:4b a specific model
+install-ai.cmd -All              all three
+install-ai.cmd -Force            install here even if a sibling game has a copy
+```
+
+If a sibling game in the same folder already has the runtime, the installer says so and
+downloads nothing — a second copy of several gigabytes helps nobody. It also stops the server
+it started to pull the model, because an installer that quietly leaves 3 GB resident on your
+card is a bad installer.
 
 ### Requirements
 
@@ -114,6 +146,28 @@ Three routes, all converging on the same editable sheet:
 Level-ups present exactly the choices the level actually calls for, built from the class data rather than hard-coded: hit points (roll or take the average), ability score improvements, your subclass when it is due, fighting styles, and new spells. Each comes with a recommendation and the reasoning behind it.
 
 **"Choose for me"** fills the whole form the way the class would want it — and AI-controlled seats use the same path, so an unattended session never stalls on a modal. A level-up commits as an event batch like any other turn, which means **Undo takes it back**.
+
+Spells offered are only ones the character can actually *cast* — a level-2 bard is not shown fourth-level spells — and the choice is validated in the engine, so a duplicate, an off-list spell or an invented id is refused rather than quietly accepted.
+
+## Preparing spells
+
+5e splits casters in two, and the difference is most of what makes them feel different to play.
+
+A **sorcerer, bard, ranger or warlock *knows*** a fixed list that only changes when they level.
+
+A **cleric, druid, paladin or wizard *prepares*** — they choose which spells are ready each morning, and may choose entirely differently tomorrow. AETHERTABLE re-prepares them on every long rest:
+
+| | may prepare | drawn from |
+|---|---|---|
+| cleric, druid | ability modifier + class level | the whole class list |
+| paladin | ability modifier + **half** class level | the whole class list |
+| wizard | ability modifier + class level | **their spellbook alone** |
+
+Always at least one; never cantrips, which are always ready; and a level-1 paladin prepares nothing, because it has no spellcasting yet.
+
+A wizard's spellbook is a real thing separate from what they have prepared — six spells at first level and two more at each level after — so choosing today's slate out of it is an actual decision rather than a formality.
+
+It happens automatically on a long rest, keeping whatever was already prepared where that is still legal, so an unattended game never stops at a spell menu. A player who wants to choose the slate themselves can.
 
 ## When someone dies
 
@@ -251,7 +305,7 @@ The interesting suites:
 A **fixture backend** replays recorded model responses, so the entire referee → engine →
 narrator pipeline is tested end to end with no model anywhere.
 
-Current state: **3,380 assertions across fifteen suites**, plus the data-integrity suite — all
+Current state: **3,438 assertions across sixteen suites**, plus the data-integrity suite — all
 passing, including a real-Chrome browser suite and a full click-through of a session in the
 actual UI.
 
@@ -320,8 +374,6 @@ Stated rather than quietly left:
   spent, but no reaction is triggered automatically.
 - Monster **recharge** and **legendary actions** are present in the data and not yet driven by
   the turn loop.
-- **Prepared casters** (cleric, druid, wizard, paladin) do not re-prepare on a long rest; they
-  keep the list they were built with.
 - Only spells with a `mech` block resolve mechanically. The rest are narrated and cost a slot.
 
 ---

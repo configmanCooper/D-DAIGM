@@ -26,15 +26,45 @@ function Write-Warn($msg)  { Write-Host "  ! $msg" -ForegroundColor Yellow }
 function Write-Err($msg)   { Write-Host "  x $msg" -ForegroundColor Red }
 function Write-Good($msg)  { Write-Host "  + $msg" -ForegroundColor Green }
 
-# Only ever touch processes whose executable lives under this game folder.
+# Where the AI runtime actually lives.
+#
+# Resolved exactly as server.js resolves it, because that is what determines
+# which processes are ours to stop. The runtime is several gigabytes, so a
+# sibling game's copy is reused rather than duplicated — which means the
+# Ollama we start usually lives OUTSIDE this folder. Scoping the shutdown to
+# "$Root only" therefore left our own model runner alive after stop.cmd,
+# holding several GB of GPU memory indefinitely.
+function Get-AiDir {
+  $candidates = @()
+  if ($env:DND_AI_DIR) { $candidates += (Resolve-Path -LiteralPath $env:DND_AI_DIR -ErrorAction SilentlyContinue) }
+  $candidates += (Join-Path $Root 'ai')
+  $candidates += (Join-Path (Split-Path -Parent $Root) 'NegotiatorGame\ai')
+  foreach ($c in $candidates) {
+    if ($c -and (Test-Path (Join-Path $c 'ollama\ollama.exe'))) { return "$c" }
+  }
+  return $null
+}
+
+$AiDir = Get-AiDir
+
+# Only ever touch processes whose executable lives under this game folder or
+# under the AI runtime this game uses. An unrelated Ollama, a system-wide
+# install, or another project's llama-server is never touched — there is
+# usually more than one on a machine like this, and killing someone else's
+# model mid-generation is unforgivable.
 function Get-OurProcesses {
   $names = @('ollama', 'llama-server')
+  $roots = @($Root.ToLower())
+  if ($AiDir) { $roots += $AiDir.ToLower() }
   $out = @()
   foreach ($n in $names) {
     Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object {
       try {
         $p = $_.Path
-        if ($p -and $p.ToLower().StartsWith($Root.ToLower())) { $out += $_ }
+        if ($p) {
+          $lower = $p.ToLower()
+          foreach ($r in $roots) { if ($lower.StartsWith($r)) { $out += $_; break } }
+        }
       } catch { }
     }
   }
@@ -67,10 +97,19 @@ function Stop-Tree($processId) {
 }
 
 function Remove-Leftovers {
-  $killed = 0
-  foreach ($p in Get-OurProcesses) { Stop-Tree $p.Id; $killed++ }
-  foreach ($processId in Get-OurNodeServers) { Stop-Tree $processId; $killed++ }
-  if ($killed) { Write-Step "cleared $killed leftover process(es)" }
+  $killed = @()
+  foreach ($p in Get-OurProcesses) {
+    $killed += "$($p.Name) [$($p.Id)]"
+    Stop-Tree $p.Id
+  }
+  foreach ($processId in Get-OurNodeServers) {
+    $killed += "node [$processId]"
+    Stop-Tree $processId
+  }
+  # Named, not counted. "cleared 2 processes" is not something a player can
+  # check; "stopped ollama [48864]" is.
+  if ($killed.Count) { Write-Step "stopped $($killed -join ', ')" }
+  return $killed.Count
 }
 
 function Get-FreeVramMiB {
@@ -106,8 +145,21 @@ Write-Host ''
 
 if ($Stop -or $Clean) {
   Write-Step 'shutting down...'
-  Remove-Leftovers
-  Write-Good 'stopped. GPU memory reclaimed.'
+  $n = Remove-Leftovers
+  if (-not $n) { Write-Step 'nothing of ours was running' }
+
+  # Say plainly whether the card was actually released. A stop script that
+  # claims success while a model runner is still resident is worse than one
+  # that says nothing.
+  Start-Sleep -Milliseconds 600
+  $left = @(Get-OurProcesses)
+  if ($left.Count) {
+    Write-Warn "still running: $(($left | ForEach-Object { "$($_.Name) [$($_.Id)]" }) -join ', ')"
+    exit 1
+  }
+  $vram = Get-FreeVramMiB
+  if ($vram -ne $null) { Write-Good "stopped. $vram MiB GPU free." }
+  else { Write-Good 'stopped.' }
   exit 0
 }
 
@@ -135,14 +187,14 @@ if (-not (Test-Path (Join-Path $Root 'server.js'))) {
   exit 1
 }
 
-# The AI runtime may live here or in a sibling game; the server resolves that
-# itself, so only report what we can see.
-$aiLocal   = Join-Path $Root 'ai\ollama\ollama.exe'
-$aiSibling = Join-Path (Split-Path -Parent $Root) 'NegotiatorGame\ai\ollama\ollama.exe'
-if (Test-Path $aiLocal) {
-  Write-Step 'local AI runtime found'
-} elseif (Test-Path $aiSibling) {
-  Write-Step 'using the AI runtime already installed alongside this game'
+# The AI runtime may live here or in a sibling game; either way $AiDir already
+# points at whichever one will actually be used.
+if ($AiDir) {
+  if ($AiDir.ToLower().StartsWith((Join-Path $Root 'ai').ToLower())) {
+    Write-Step 'local AI runtime found'
+  } else {
+    Write-Step "using the AI runtime already installed at $AiDir"
+  }
 } else {
   Write-Warn 'no local AI runtime found - the Offline Dungeon Master will narrate.'
   Write-Warn 'run install-ai.cmd for a local model, or choose a Copilot model in the game.'

@@ -54,6 +54,11 @@ async function main() {
     page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
 
     await page.goto(URL, { waitUntil: 'networkidle2', timeout: 45000 });
+    /* Start from a clean slate. Another suite may have left a saved game in
+       this origin's localStorage, and the wizard behaves differently when it
+       finds one — which made this suite pass alone and fail inside `npm test`. */
+    await page.evaluate(() => { try { localStorage.clear(); } catch (e) { /* nothing to clear */ } });
+    await page.reload({ waitUntil: 'networkidle2', timeout: 45000 });
     await wait(2000);
 
     /* A tiny in-page helper: set a control's value and fire the change setup
@@ -160,7 +165,13 @@ async function main() {
 
     const first = await sig();
     t.ok(first.split('|')[0].length > 0, 'a whole character is generated, with a name', '(' + first + ')');
-    const beginEnabled = await page.$eval('#btn-begin', b => !b.disabled);
+    /* Wait for the button to settle rather than assuming 300ms was enough.
+       The builder revalidates asynchronously, and a fixed delay makes this
+       assertion depend on how loaded the machine happens to be. */
+    const beginEnabled = await page.waitForFunction(
+      () => { const b = document.getElementById('btn-begin'); return b && !b.disabled; },
+      { timeout: 5000 },
+    ).then(() => true).catch(() => false);
     t.eq(beginEnabled, true, 'the generated character is valid — Begin is enabled');
 
     /* Reroll changes it (allow a few tries — the roll can repeat). */

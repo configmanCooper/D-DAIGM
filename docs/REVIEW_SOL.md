@@ -29,9 +29,10 @@
 > `exports/`; and the playtest harness exited with a libuv assertion.
 >
 > **Known limitations, not fixed:** Ready and opportunity attacks are still
-> declarative; monster recharge and legendary actions are modelled in data but
-> not driven by the turn loop; prepared casters do not re-prepare on a long
-> rest. These are documented rather than quietly left.
+> declarative, and monster recharge and legendary actions are modelled in data
+> but not driven by the turn loop. These are documented rather than quietly
+> left. (Prepared casters re-preparing on a long rest *was* on this list and is
+> now implemented — see js/engine/prepare.js.)
 
 ## Verdict
 
