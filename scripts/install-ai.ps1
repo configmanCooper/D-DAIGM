@@ -155,6 +155,21 @@ function Stop-OllamaServer {
 
 function Get-Installed {
   $env:OLLAMA_MODELS = $ModelsDir
+  # `ollama list` needs a running server, and the most useful moment to ask
+  # "what do I have?" is when nothing is running at all. So read the manifest
+  # tree directly, and only fall back to the command if that finds nothing.
+  $names = @()
+  $manifests = Join-Path $ModelsDir 'manifests'
+  if (Test-Path $manifests) {
+    # .../manifests/<registry>/<namespace>/<model>/<tag>  ->  model:tag
+    Get-ChildItem $manifests -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+      $model = $_.Directory.Name
+      $tag = $_.Name
+      if ($model -and $tag) { $names += "$model`:$tag" }
+    }
+  }
+  if ($names.Count) { return @($names | Sort-Object -Unique) }
+
   try {
     $out = & $OllamaExe list 2>$null
     if (-not $out) { return @() }

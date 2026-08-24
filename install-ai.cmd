@@ -12,5 +12,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-ai.ps1
 
 rem When double-clicked from Explorer there is no console left to read, and
 rem this script has things worth reading.
-echo %cmdcmdline% | find /i "/c" >nul
+rem Quoted: this game lives in a folder called "D&D Simulator", and an
+rem unquoted %cmdcmdline% hands that ampersand to the command parser, which
+rem then tries to run a program called D. Quoting it keeps the & literal.
+echo "%cmdcmdline%" | find /i "/c" >nul
 if not errorlevel 1 pause
