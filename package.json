@@ -14,7 +14,7 @@
   "scripts": {
     "start": "node server.js",
     "stop": "powershell -NoProfile -ExecutionPolicy Bypass -File ./start.ps1 -Stop",
-    "test": "node tests/dice.test.js && node tests/core.test.js && node tests/ai.test.js && node tests/rules.test.js && node tests/character.test.js && node tests/combat.test.js && node tests/data.test.js && node tests/art.test.js && node tests/chargen.test.js && node tests/mortality.test.js && node tests/progression.test.js && node tests/campaign.test.js && node tests/ui.test.js && node tests/browser.test.js && node tests/session.test.js && node tests/ui-chargen.test.js",
+    "test": "node tests/dice.test.js && node tests/core.test.js && node tests/ai.test.js && node tests/rules.test.js && node tests/character.test.js && node tests/combat.test.js && node tests/data.test.js && node tests/art.test.js && node tests/chargen.test.js && node tests/mortality.test.js && node tests/prepare.test.js && node tests/progression.test.js && node tests/campaign.test.js && node tests/ui.test.js && node tests/browser.test.js && node tests/session.test.js && node tests/ui-chargen.test.js",
     "test:fast": "node tests/dice.test.js && node tests/core.test.js && node tests/ai.test.js",
     "test:offline": "node tests/dice.test.js && node tests/core.test.js && node tests/ai.test.js && node tests/rules.test.js && node tests/character.test.js && node tests/combat.test.js && node tests/data.test.js && node tests/art.test.js && node tests/campaign.test.js && node tests/ui.test.js",
     "test:dice": "node tests/dice.test.js",
@@ -36,6 +36,7 @@
     "playtest:offline": "node tests/playtest.js --campaign sandbox --seats 4 --turns 20 --dm offline --no-export",
     "test:chargen": "node tests/chargen.test.js",
     "test:mortality": "node tests/mortality.test.js",
+    "test:prepare": "node tests/prepare.test.js",
     "test:progression": "node tests/progression.test.js"
   }
 }

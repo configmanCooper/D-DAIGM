@@ -452,9 +452,20 @@
       slotsMax: slotsMax,
       slotsRemaining: slotsRemaining,
       pactSlots: pactSlots,
-      prepares: primary ? (primary.cd.spellcasting.prepares || 'known') : null,
+      /* The class data carries this as `prepares` at the top level and as
+         `spellcasting.type` inside; reading only the latter meant every caster
+         in the game — cleric, druid, wizard, paladin — reported as a "known"
+         caster, so nothing could tell a prepared caster from a sorcerer. */
+      prepares: primary
+        ? (primary.cd.prepares || primary.cd.spellcasting.prepares ||
+          primary.cd.spellcasting.type || 'known')
+        : null,
       cantripsKnown: (progression.cantripsKnown || []).slice(),
       prepared: (progression.preparedSpells || []).slice(),
+      /* A wizard's spellbook is the pool they prepare FROM, and is not the
+         same thing as what they have prepared today. Everyone else prepares
+         from their class list, so they have no book. */
+      spellbook: (progression.spellbook || []).slice(),
     };
   }
 
@@ -689,6 +700,10 @@
          auto-created caster reached the table with a full set of slots and an
          empty spell list. */
       preparedSpells: spec.preparedSpells || spec.spells || [],
+      /* A wizard prepares from their book, not from the class list, so the
+         book has to exist from the moment the character does — otherwise
+         their first long rest finds an empty pool and prepares nothing. */
+      spellbook: spec.spellbook || spec.spells || spec.preparedSpells || [],
       cantripsKnown: spec.cantripsKnown || spec.cantrips || [],
       fightingStyles: spec.fightingStyles || [],
       expertise: spec.expertise || [],

@@ -240,6 +240,16 @@
       var events = !restore ? []
         : (Array.isArray(restore) ? restore : (restore.events || []));
       events.forEach(function (e) { b.events.push(e); });
+
+      /* A long rest is when a cleric, druid, paladin or wizard chooses which
+         spells they have ready for the day. Without this they kept the list
+         they were built with for the whole campaign, which quietly turned
+         every prepared caster into a worse sorcerer.
+
+         Prepared automatically here so an unattended game never stalls on a
+         spell menu; a player who wants to choose for themselves does it
+         through Game.preparationFor before resting, or revises afterwards. */
+      if (isLong) preparedSlateFor(state, id, b);
     });
 
     Events.push(b, 'time', { minutes: isLong ? 480 : 60 }, '');
@@ -257,6 +267,40 @@
       var o = state.actors[id];
       return o.side === self.side && o.runtime && !o.runtime.dead;
     });
+  }
+
+  /**
+   * Re-prepare one character's spells over a long rest.
+   *
+   * Silent for anyone who does not prepare — a fighter, a sorcerer, a
+   * level-1 paladin — so the caller can hand it the whole party.
+   */
+  function preparedSlateFor(state, actorId, b) {
+    var Prepare = (global.DND && global.DND.Prepare) ||
+      (typeof require !== 'undefined' ? require('./prepare.js') : null);
+    if (!Prepare) return;
+    var a = actor(state, actorId);
+    if (!a || !a.base || !a.progression) return;
+
+    try {
+      Prepare.ensureSpellbook(a.base, a.progression);
+      var plan = Prepare.preparationFor(a.base, a.progression, derivedOf(state, actorId));
+      if (!plan || !plan.count) return;
+
+      var chosen = Prepare.autoChoose(plan, {});
+      if (!chosen.length) return;
+
+      /* Say so only when the slate actually changed; "prepares the same spells
+         again" is noise in a transcript every single night. */
+      var before = (a.progression.preparedSpells || []).slice().sort().join(',');
+      Prepare.eventsFor(actorId, plan, chosen).forEach(function (e) { b.events.push(e); });
+      if (chosen.slice().sort().join(',') !== before) {
+        b.beats.push(a.name + ' studies and prepares a different slate of spells.');
+      }
+    } catch (e) {
+      /* A failure to re-prepare must not cost the party their rest. */
+      if (global.console) global.console.warn('could not re-prepare for ' + actorId + ': ' + e.message);
+    }
   }
 
   /**

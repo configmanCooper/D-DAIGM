@@ -32,6 +32,7 @@
   var LevelUp = (global.DND && global.DND.LevelUp) || req('./engine/levelup.js');
   var Mortality = (global.DND && global.DND.Mortality) || req('./engine/mortality.js');
   var Combat = (global.DND && global.DND.Combat) || req('./engine/combat.js');
+  var Prepare = (global.DND && global.DND.Prepare) || req('./engine/prepare.js');
   var RNG = (global.DND && global.DND.RNG) || (req('./rng.js') || {}).RNG;
 
   function createSession(spec) {
@@ -750,6 +751,51 @@
     return gated.text;
   }
 
+  /**
+   * What this character may prepare, and how many.
+   *
+   * Null for anyone who does not prepare spells. A long rest re-prepares
+   * automatically so an unattended game never stalls on a menu; this is the
+   * door for a player who wants to choose the slate themselves.
+   */
+  function preparationFor(session, actorId) {
+    var a = session.state.actors[actorId];
+    if (!a || !Prepare) return null;
+    Prepare.ensureSpellbook(a.base, a.progression);
+    return Prepare.preparationFor(a.base, a.progression, derivedFor(session, actorId));
+  }
+
+  /**
+   * Commit a chosen slate. Rejects an illegal one rather than quietly
+   * trimming it — a player who picked a spell they cannot prepare should be
+   * told, not silently overruled.
+   */
+  function applyPreparation(session, actorId, chosen) {
+    var plan = preparationFor(session, actorId);
+    if (!plan) return { ok: false, errors: ['this character does not prepare spells'] };
+    var errors = Prepare.validate(plan, chosen);
+    if (errors.length) return { ok: false, errors: errors };
+
+    var batch = Events.makeBatch({ commandId: 'prepare:' + actorId + ':' + session.state.revision, actorId: actorId });
+    Prepare.eventsFor(actorId, plan, chosen).forEach(function (e) { batch.events.push(e); });
+    var a = session.state.actors[actorId];
+    batch.beats.push((a && a.name ? a.name : actorId) + ' prepares their spells.');
+
+    var res = Events.commit(session.state, batch);
+    if (!res.ok) return { ok: false, errors: [res.error] };
+    State.refreshDerived(session.state, actorId);
+    emit(session, 'prepared', { actorId: actorId, spells: chosen.slice() });
+    return { ok: true, revision: res.revision, spells: chosen.slice() };
+  }
+
+  /** Choose a sensible slate without asking. Used by the "prepare for me"
+      button and by AI-controlled seats. */
+  function autoPreparation(session, actorId) {
+    var plan = preparationFor(session, actorId);
+    if (!plan) return { ok: false, errors: ['this character does not prepare spells'] };
+    return applyPreparation(session, actorId, Prepare.autoChoose(plan, {}));
+  }
+
   function currentController(session) {
     var actorId = session.state.activeActorId;
     if (!actorId) return null;
@@ -1006,6 +1052,8 @@
     advanceUntilHuman: advanceUntilHuman,
     advanceTurn: advanceTurn, endHumanTurn: endHumanTurn, turnIsSpent: turnIsSpent,
     ensureEncounter: ensureEncounter, gateSpeech: gateSpeech,
+    preparationFor: preparationFor, applyPreparation: applyPreparation,
+    autoPreparation: autoPreparation,
     explorationOrder: explorationOrder,
     undo: undo, redo: redo, rewindTo: rewindTo,
     retryNarration: retryNarration,

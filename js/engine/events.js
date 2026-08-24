@@ -36,6 +36,7 @@
     'help', 'help_used', 'help_expire', 'hidden',   // the Help grant, and who cannot see whom
     'resource',          // hit dice, ki, rage, channel divinity, lay on hands...
     'slot_spend', 'slot_restore',   // spell slots, kept in their own pool
+    'prepare_spells',    // a prepared caster's slate for the day
     'action_economy',    // an action, bonus action, reaction, object interaction or movement was spent this turn
     'move',
     'item_gain', 'item_lose', 'item_equip', 'item_unequip', 'item_attune', 'item_unattune',
@@ -206,6 +207,15 @@
        casting check both read. Keeping them out of the generic resource pool
        is the whole point: routing a slot spend through esource wrote it
        somewhere nothing looked, and casters had unlimited magic. */
+    /* A prepared caster choosing today's spells. Cantrips are untouched:
+       they are always ready and are never part of the slate. */
+    prepare_spells: function (state, e) {
+      var a = actor(state, e.actorId);
+      if (!a || !a.progression) return;
+      a.progression.preparedSpells = (e.spells || []).slice();
+      a.progression.preparedAt = state.revision;
+    },
+
     slot_spend: function (state, e) {
       var a = actor(state, e.actorId);
       if (!a) return;

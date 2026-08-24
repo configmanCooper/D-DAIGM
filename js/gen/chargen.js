@@ -381,6 +381,7 @@
       levels: levels,
       cantrips: magic.cantrips,
       spells: magic.spells,
+      spellbook: magic.spellbook || null,
       generated: {
         method: opts.method || 'array',
         fixedFields: Object.keys(fixed),
@@ -430,9 +431,20 @@
       var lv = SPELLS[id].level;
       return lv > 0 && lv <= maxSpellLevel;
     });
+
+    /* A wizard's spellbook is not the same thing as what they have prepared.
+       2014: six spells at first level and two more at every level after, and
+       they prepare from that book each morning. The book is drawn first and
+       the day's prepared slate comes out of it — drawing the two separately
+       and merging them produced a book larger than the rules allow. */
+    var spellbook = null;
+    if (classId === 'wizard') {
+      spellbook = choose(pool, 6 + Math.max(0, levels - 1) * 2, rng, SPELLS);
+      pool = spellbook;
+    }
     var spells = choose(pool, spellCount, rng, SPELLS);
 
-    return { cantrips: cantrips, spells: spells };
+    return { cantrips: cantrips, spells: spells, spellbook: spellbook };
   }
 
   /**
