@@ -258,13 +258,41 @@ t.section('what a creature is made of changes what hurts it');
   t.eq(Combat.applyDamageType(s, 'skel', 10, 'bludgeoning').total, 20, 'vulnerability doubles it');
   t.eq(Combat.applyDamageType(s, 'skel', 10, 'piercing').total, 10, 'an ordinary type is unchanged');
 
-  /* Both at once: doubled, then halved, with rounding at each step. */
+  /* Both at once. 2014 applies resistance and then vulnerability, each
+     rounding down as it goes: 5 halves to 2, doubles to 4. Doing it the other
+     way round (double to 10, halve to 5) looks equivalent and is not, because
+     the rounding happens at a different point. */
   addMonster(s, 'odd', 'Odd Thing', {
     statblock: { ac: 12, resistances: ['fire'], vulnerabilities: ['fire'] },
   });
   State.refreshAllDerived(s);
-  t.eq(Combat.applyDamageType(s, 'odd', 5, 'fire').total, 5,
-    'resistant AND vulnerable applies both: 5 doubled to 10, halved to 5');
+  t.eq(Combat.applyDamageType(s, 'odd', 5, 'fire').total, 4,
+    'resistant AND vulnerable: 5 halves to 2, then doubles to 4');
+}
+
+t.section('a monster\u2019s own statblock defences are honoured');
+{
+  /* The SRD monster data names these `damageResistances` and friends; the
+     derived sheet says `resistances`. Only the sheet was read, so every
+     shipped monster in the game ignored its own defences. */
+  const MONSTERS = require('../js/data/srd_monsters.js').MONSTERS;
+  const skeletonData = MONSTERS.skeleton;
+  const s = State.create({ seed: 'realmonster' });
+  State.addActor(s, {
+    id: 'skel', name: 'Skeleton', side: 'enemy', kind: 'monster',
+    base: { name: 'Skeleton', abilities: {}, classes: [] },
+    statblock: skeletonData,
+    progression: { levels: [] },
+    runtime: { hp: 13, hpMax: 13, conditions: {}, inventory: [], deathSaves: {} },
+  });
+  State.refreshAllDerived(s);
+
+  t.deep(skeletonData.damageVulnerabilities, ['bludgeoning'], 'the shipped skeleton is vulnerable to bludgeoning');
+  t.deep(skeletonData.damageImmunities, ['poison'], 'and immune to poison');
+  t.eq(Combat.applyDamageType(s, 'skel', 10, 'bludgeoning').total, 20,
+    'a real skeleton takes double from a club');
+  t.eq(Combat.applyDamageType(s, 'skel', 10, 'poison').total, 0,
+    'and nothing at all from poison');
 }
 
 t.section('damage reaches the pipeline with its type intact');
@@ -297,6 +325,140 @@ t.section('skill checks use the identifiers the sheet actually has');
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'js', 'engine', 'interaction.js'), 'utf8');
   t.eq(/sleight_of_hand|animal_handling/.test(src), false,
     'and no snake_case skill identifier is left in the interaction resolvers');
+}
+
+/* ------------------------------------------- the second review's finds -- */
+
+t.section('a shipped monster fights with its own statblock');
+{
+  const MONSTERS = require('../js/data/srd_monsters.js').MONSTERS;
+  const dragon = MONSTERS['adult-black-dragon'];
+  const s = State.create({ seed: 'dragon' });
+  State.addActor(s, {
+    id: 'boss', name: dragon.name, side: 'enemy', kind: 'monster',
+    base: { name: dragon.name, abilities: dragon.abilities || {}, classes: [] },
+    statblock: dragon, progression: { levels: [] },
+    runtime: { hp: 195, hpMax: 195, conditions: {}, inventory: [], deathSaves: {}, pos: { x: 3, y: 1 } },
+  });
+  State.addActor(s, {
+    id: 'pc', name: 'Vess', side: 'party', kind: 'pc',
+    base: { name: 'Vess', abilities: { str: 16, dex: 12, con: 14 }, classes: [{ classId: 'fighter', levels: 10 }] },
+    progression: { levels: [] },
+    runtime: { hp: 400, hpMax: 400, conditions: {}, inventory: [], deathSaves: {}, pos: { x: 1, y: 1 } },
+  });
+  State.refreshAllDerived(s);
+  s.actors.pc.runtime.hp = 400; s.actors.pc.runtime.hpMax = 400;
+  freshTurn(s, 'boss');
+
+  const seq = Combat.multiattackSequence(dragon);
+  t.ok(seq.length > 1, 'the dragon has a multiattack in its shipped data', '(' + seq.join(', ') + ')');
+  t.ok(Dispatch.legalMoves(s, 'boss', {}).some(m => m.step.verb === 'multiattack'),
+    'and is offered it');
+
+  const h = State.makeHistory();
+  const r = Dispatch.dispatch(s, h, Command.create({
+    actorId: 'boss', family: 'combat', stateRevision: s.revision, turnEpoch: s.turnEpoch,
+    primary: Command.makeStep({ verb: 'multiattack', targetIds: ['pc'] }),
+  }), {});
+  t.eq(r.ok, true, 'the multiattack resolves');
+
+  const attacks = (r.batch.events || []).filter(e => e.of === 'attack');
+  /* The sequence is Frightful Presence, Bite, Claw, Claw — and Frightful
+     Presence is not an attack. Treating it as one invented a swing from
+     nothing. */
+  t.eq(attacks.length, seq.length - 1,
+    'every entry in the sequence that IS an attack is rolled, and nothing else',
+    '(' + attacks.length + ' of ' + seq.length + ')');
+
+  const beats = (r.batch.beats || []).join(' ');
+  t.ok(/acid/i.test(beats),
+    'the bite\u2019s secondary acid damage lands too, not just the piercing');
+}
+
+t.section('spells that were pure prose now do something');
+{
+  const mk = () => {
+    const s = State.create({ seed: 'prose' });
+    const w = build('wizard', 9, 'prosew');
+    w.progression.preparedSpells = ['magic-missile', 'sleep'];
+    State.addActor(s, { id: 'w', name: 'W', side: 'party', kind: 'pc', base: w.base, progression: w.progression, runtime: w.runtime });
+    [['g1', 6], ['g2', 12], ['g3', 40]].forEach(([id, hp]) => addMonster(s, id, id, {
+      runtime: { hp, hpMax: hp, conditions: {}, inventory: [], deathSaves: {}, pos: { x: 3, y: 1 } },
+    }));
+    State.refreshAllDerived(s);
+    freshTurn(s, 'w');
+    return s;
+  };
+  const cast = (s, spellId, slot, targets) => {
+    freshTurn(s, 'w');
+    return Dispatch.dispatch(s, State.makeHistory(), Command.create({
+      actorId: 'w', family: 'spell', stateRevision: s.revision, turnEpoch: s.turnEpoch,
+      primary: Command.makeStep({ verb: 'cast', spellId, targetIds: targets, slotLevel: slot }),
+    }), {});
+  };
+
+  /* Magic Missile never misses and calls for no save, so it fits neither the
+     attack nor the save shape and was recorded as prose the engine ignored. */
+  let s = mk();
+  const before = s.actors.g1.runtime.hp;
+  cast(s, 'magic-missile', 1, ['g1']);
+  t.ok(s.actors.g1.runtime.hp < before, 'Magic Missile deals damage', '(' + before + ' -> ' + s.actors.g1.runtime.hp + ')');
+
+  s = mk();
+  const r3 = cast(s, 'magic-missile', 3, ['g1', 'g2', 'g3']);
+  const darts = (r3.batch.events || []).filter(e => e.kind === 'hp' && e.delta < 0);
+  t.eq(darts.length, 5, 'and upcasting to a level-3 slot throws five darts, not three');
+
+  /* Sleep is a pool of hit points that takes the weakest first. */
+  s = mk();
+  cast(s, 'sleep', 1, ['g1']);
+  const asleep = ['g1', 'g2', 'g3'].filter(id => s.actors[id].runtime.conditions.unconscious);
+  t.ok(asleep.length > 0, 'Sleep actually puts creatures under', '(' + asleep.join(', ') + ')');
+  t.eq(asleep.indexOf('g3') < 0, true, 'and the strongest one it cannot reach stays awake');
+}
+
+t.section('an event payload is never shared with live state');
+{
+  /* The log is permanent and replayable. An applier that keeps the event's own
+     object makes the world and its history the same memory, so a later change
+     to one silently edits the other. */
+  const s = State.create({ seed: 'payload' });
+  State.addActor(s, {
+    id: 'a', name: 'A', side: 'party', kind: 'pc',
+    base: { name: 'A', abilities: {}, classes: [] }, progression: { levels: [] },
+    runtime: { hp: 10, hpMax: 10, conditions: {}, inventory: [], deathSaves: {} },
+  });
+  const effect = { id: 'x', targetId: 'a', kind: 'ac', ac: { type: 'add', source: 'X', value: 2 } };
+  const b = Events.makeBatch({ commandId: 'p', actorId: 'a' });
+  b.events.push({ kind: 'effect_add', targetId: 'a', actorId: 'a', effect: effect });
+  Events.commit(s, b);
+
+  t.ok(s.effects[0] !== effect, 'the world holds a copy, not the logged object');
+  effect.ac.value = 999;
+  t.eq(s.effects[0].ac.value, 2, 'so mutating the log cannot change the world');
+}
+
+t.section('a spell that boosts an ally refreshes the ALLY');
+{
+  /* refreshTouched preferred the event's actorId, which on a spell effect is
+     the caster — so buffing a companion re-derived the wizard and left the
+     companion reading a stale armour class. */
+  const s = State.create({ seed: 'ally' });
+  const w = build('wizard', 5, 'allyw');
+  const f = build('fighter', 5, 'allyf');
+  State.addActor(s, { id: 'w', name: 'W', side: 'party', kind: 'pc', base: w.base, progression: w.progression, runtime: w.runtime });
+  State.addActor(s, { id: 'f', name: 'F', side: 'party', kind: 'pc', base: f.base, progression: f.progression, runtime: f.runtime });
+  State.refreshAllDerived(s);
+  const before = Combat.targetAc(s, 'f');
+
+  const b = Events.makeBatch({ commandId: 'buff', actorId: 'w' });
+  b.events.push({
+    kind: 'effect_add', actorId: 'w', targetId: 'f',
+    effect: { id: 'sof', name: 'Shield of Faith', targetId: 'f', kind: 'ac', ac: { type: 'add', source: 'Shield of Faith', value: 2 } },
+  });
+  Events.commit(s, b);
+  t.eq(Combat.targetAc(s, 'f'), before + 2,
+    'the ally\u2019s armour class actually goes up, not the caster\u2019s');
 }
 
 t.done();

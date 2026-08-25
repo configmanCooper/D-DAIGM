@@ -201,7 +201,11 @@
 
     effect_add: function (state, e) {
       state.effects = state.effects || [];
-      state.effects.push(e.effect);
+      /* A COPY. Pushing the event's own object made the live world and the
+         permanent log share it, so anything that later touched the logged
+         batch silently rewrote current state — and undo replayed a log whose
+         entries had already been mutated. */
+      state.effects.push(clonePayload(e.effect));
     },
 
     effect_remove: function (state, e) {
@@ -221,9 +225,9 @@
       state.effects = (state.effects || []).filter(function (x) { return x.concentrationId !== e.actorId; });
     },
 
-    /* Spell slots live in untime.slotsSpent, which is what derive() and the
+    /* Spell slots live in runtime.slotsSpent, which is what derive() and the
        casting check both read. Keeping them out of the generic resource pool
-       is the whole point: routing a slot spend through esource wrote it
+       is the whole point: routing a slot spend through resource wrote it
        somewhere nothing looked, and casters had unlimited magic. */
     /* A prepared caster choosing today's spells. Cantrips are untouched:
        they are always ready and are never part of the slate. */
@@ -360,7 +364,7 @@
       var a = actor(state, e.actorId);
       if (!a) return;
       a.runtime.inventory = a.runtime.inventory || [];
-      a.runtime.inventory.push(e.item);
+      a.runtime.inventory.push(clonePayload(e.item));
     },
 
     item_lose: function (state, e) {
@@ -569,7 +573,7 @@
       var a = actor(state, e.actorId);
       if (!a) return;
       a.progression.levels = a.progression.levels || [];
-      a.progression.levels.push(e.entry);
+      a.progression.levels.push(clonePayload(e.entry));
       /* The class level lives in `base.classes` because that is what the
          character IS, while `progression.levels` is the log of how they got
          there. Advancing one without the other left a level-4 paladin still
@@ -644,6 +648,17 @@
    * a handful of actors, one command at a time, seconds of human thought
    * between turns — that is far cheaper than a corrupt world.
    */
+  /* Event payloads belong to the log, which is permanent and replayable.
+     Anything an applier keeps must therefore be a copy: sharing the object
+     means a later mutation of live state reaches back and edits history. */
+  function clonePayload(v) {
+    if (v === null || typeof v !== 'object') return v;
+    if (typeof structuredClone === 'function') {
+      try { return structuredClone(v); } catch (err) { /* falls through */ }
+    }
+    return JSON.parse(JSON.stringify(v));
+  }
+
   function commit(state, batch) {
     if (!batch) return { ok: false, error: 'no batch' };
     if (state.appliedCommandIds && batch.commandId && state.appliedCommandIds[batch.commandId]) {
@@ -903,7 +918,8 @@
     effect_add: 1, effect_remove: 1,
     item_equip: 1, item_unequip: 1, item_attune: 1, item_unattune: 1,
     item_gain: 1, item_lose: 1,
-    condition_add: 1, condition_remove: 1,
+    condition_add: 1, condition_remove: 1, condition_tick: 1,
+    concentration_end: 1,
     level: 1, prepare_spells: 1, ability_change: 1, exhaustion: 1,
   };
 
@@ -913,13 +929,32 @@
     if (!State || !State.refreshDerived) return;
 
     var who = null;
-    (batch.events || []).forEach(function (e) {
-      if (!RESHAPES_SHEET[e.kind]) return;
-      var id = e.actorId || e.targetId;
+    var mark = function (id) {
       if (!id) return;
       who = who || {};
       who[id] = true;
+    };
+
+    (batch.events || []).forEach(function (e) {
+      if (!RESHAPES_SHEET[e.kind]) return;
+      /* Whose sheet changed, which is not always whose turn it is. A spell
+         effect event carries `actorId` for the CASTER and `targetId` for the
+         creature it lands on; preferring actorId re-derived the wizard and
+         left the ally whose armour class had just gone up reading the old
+         number. Mark both — refreshing one character too many is free. */
+      mark(e.targetId);
+      mark(e.actorId);
+      if (e.effect && e.effect.targetId) mark(e.effect.targetId);
     });
+
+    /* Removing an effect names the effect, not always its target, so find who
+       was carrying it. The list has already been updated by the time we get
+       here, so this reads the batch rather than the state. */
+    (batch.events || []).forEach(function (e) {
+      if (e.kind !== 'effect_remove' || !e.effectId) return;
+      Object.keys(state.actors || {}).forEach(function (id) { mark(id); });
+    });
+
     if (!who) return;
 
     Object.keys(who).forEach(function (id) {

@@ -778,19 +778,35 @@
     opts = opts || {};
     var a = actor(state, actorId);
     if (!a) return null;
-    var sb = a.runtime.statblock;
+    /* A monster's statblock may sit at the top level (how the data ships, and
+       how every other path reads it) or on the runtime (how a few fixtures set
+       it). Reading only the runtime meant a real shipped monster never matched
+       its own named actions: an adult black dragon's bite fell through to the
+       generic fallback and hit for a flat 7 instead of 2d10+6 piercing plus
+       1d8 acid. */
+    var sb = statblockOf(a);
     if (opts.actionRef && sb && sb.actions) {
       for (var i = 0; i < sb.actions.length; i++) {
-        if (sb.actions[i].id === opts.actionRef || sb.actions[i].name === opts.actionRef) {
-          var act = sb.actions[i];
-          var dmg = (act.damage && act.damage[0]) || { dice: '0', flat: 0, type: 'bludgeoning' };
-          return {
-            name: act.name, toHit: act.toHit, reach: act.reach || CELL,
-            damage: dmg.dice + (dmg.flat ? '+' + dmg.flat : ''), damageType: dmg.type,
-            abilityMod: 0, extraDamage: act.damage.slice(1),
-          };
-        }
+        var ref = String(opts.actionRef).toLowerCase();
+        var act = sb.actions[i];
+        var matches = String(act.id || '').toLowerCase() === ref ||
+          String(act.name || '').toLowerCase() === ref ||
+          String(act.name || '').toLowerCase().replace(/\s+/g, '_') === ref;
+        if (!matches) continue;
+        /* Not every named action is an attack. A dragon's multiattack
+           sequence includes Frightful Presence, which has no attack roll and
+           no damage; treating it as a swing invented a hit out of nothing. */
+        if (!act.damage || !act.damage.length || typeof act.toHit !== 'number') return null;
+        var dmg = act.damage[0];
+        return {
+          name: act.name, toHit: act.toHit, reach: act.reach || CELL,
+          damage: dmg.dice + (dmg.flat ? '+' + dmg.flat : ''), damageType: dmg.type,
+          abilityMod: 0, extraDamage: act.damage.slice(1),
+        };
       }
+      /* Named an action this creature does not have: better to make no attack
+         than to silently swing with something else. */
+      return null;
     }
     var list = a.runtime.attacks || [];
     var pick = opts.offHand ? (list[1] || list[0]) : list[0];
@@ -919,6 +935,19 @@
 
     var dmg = Dice.damage(profile.damage, { rng: state.rng, crit: roll.isCrit, type: profile.damageType });
     var total = dmg.total;
+
+    /* A monster whose bite is "1 piercing plus 9 poison" was dealing 1: the
+       extra components were parsed onto the profile and never rolled. Each is
+       rolled and judged against the target's defences separately, because a
+       creature can be immune to the poison and not to the bite. */
+    var extras = [];
+    (profile.extraDamage || []).forEach(function (part) {
+      if (!part || !part.dice) return;
+      var extraRoll = Dice.damage(part.dice + (part.flat ? '+' + part.flat : ''),
+        { rng: state.rng, crit: roll.isCrit, type: part.type });
+      extras.push({ amount: extraRoll.total, type: part.type });
+    });
+
     if (offHand) {
       /* The off-hand die is rolled; the ability modifier is added only under
          the two-weapon rule above. */
@@ -940,6 +969,18 @@
     b.events = b.events.concat(chain.events);
     b.beats = b.beats.concat([attacker.name + (roll.isCrit ? ' critically hits' : ' hits') + ' for ' + total + '.']);
     b.beats = b.beats.concat(chain.beats);
+
+    /* Secondary components land as their own damage, so each is measured
+       against the right resistance and each can be the blow that drops
+       someone. Skipped once the target is already down — a corpse does not
+       need to be poisoned as well. */
+    extras.forEach(function (part) {
+      if (chain.dead) return;
+      var sub = damageEvents(state, targetId, part.amount, { damageType: part.type });
+      b.events = b.events.concat(sub.events);
+      b.beats = b.beats.concat([target.name + ' also takes ' + part.amount + ' ' + part.type + '.']);
+      b.beats = b.beats.concat(sub.beats);
+    });
     return b;
   }
 
@@ -1168,11 +1209,24 @@
     var type = String(damageType).toLowerCase();
 
     var has = function (which) {
-      var lists = [d[which], block[which]];
+      /* Two vocabularies in play: the derived sheet says `resistances`, the
+         SRD monster data says `damageResistances`. Only the first was read, so
+         every shipped monster's defences were ignored — a real skeleton took
+         full damage from a club and was harmed by poison. */
+      var lists = [
+        d[which], block[which],
+        d['damage' + cap(which)], block['damage' + cap(which)],
+      ];
       for (var i = 0; i < lists.length; i++) {
         var list = lists[i] || [];
         for (var j = 0; j < list.length; j++) {
-          if (String(list[j]).toLowerCase() === type) return true;
+          var entry = String(list[j]).toLowerCase();
+          if (entry === type) return true;
+          /* SRD writes qualified physical resistances as one string, e.g.
+             "bludgeoning, piercing, and slashing from nonmagical attacks". */
+          if (entry.indexOf(',') >= 0 && entry.split(/,\s*|\band\b/).some(function (part) {
+            return part.trim().replace(/^\s*/, '').indexOf(type) === 0;
+          })) return true;
         }
       }
       return false;
@@ -1182,15 +1236,20 @@
       return { total: 0, note: t.name + ' is unharmed \u2014 ' + type + ' does nothing to it.' };
     }
 
+    /* Resistance first, then vulnerability: halve, then double. The order
+       matters because each rounds down — 5 damage becomes 2 and then 4, not
+       10 and then 5. */
     var out = amount, notes = [];
-    if (has('vulnerabilities')) { out = out * 2; notes.push('horribly vulnerable to ' + type); }
     if (has('resistances')) { out = Math.floor(out / 2); notes.push('shrugs off much of the ' + type); }
+    if (has('vulnerabilities')) { out = out * 2; notes.push('horribly vulnerable to ' + type); }
 
     return {
       total: out,
       note: notes.length ? t.name + ' is ' + notes.join(', and ') + '.' : '',
     };
   }
+
+  function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
   function contestResolve(state, command, ctx, mode) {
     var b = Events.makeBatch(command);
@@ -1555,9 +1614,14 @@
     var out = {};
     Object.keys(actors || {}).forEach(function (id) {
       var a = actors[id];
-      /* Only the runtime changes mid-sequence; the rest can be shared. */
+      /* Everything an applier might write must be copied, not shared. Cloning
+         only the runtime left `progression` shared with the live state, so an
+         experience award applied to the shadow landed on the REAL character —
+         and then landed again when the batch was committed. A monster killed
+         mid-multiattack paid out twice. */
       out[id] = Object.assign({}, a, {
         runtime: JSON.parse(JSON.stringify(a.runtime || {})),
+        progression: JSON.parse(JSON.stringify(a.progression || {})),
       });
     });
     return out;

@@ -190,7 +190,7 @@
    */
   function modifiersFor(state, actorId, rollType, ctx) {
     ctx = ctx || {};
-    var out = { flat: 0, dice: [], advantage: [], disadvantage: [] };
+    var out = { flat: 0, dice: [], penaltyDice: [], advantage: [], disadvantage: [] };
 
     forTarget(state, actorId).forEach(function (e) {
       if (!rollMatches(e.appliesTo, rollType)) return;
@@ -198,6 +198,9 @@
         case 'advantage': out.advantage.push(e.name || e.id); break;
         case 'disadvantage': out.disadvantage.push(e.name || e.id); break;
         case 'bonus_dice': if (e.dice) out.dice.push(e.dice); break;
+        /* Bane and its kin subtract a die. Without this the sign was
+           dropped and every penalty spell became a bonus. */
+        case 'penalty_dice': if (e.dice) out.penaltyDice.push(e.dice); break;
         case 'flat': if (typeof e.magnitude === 'number') out.flat += e.magnitude; break;
         default: break;
       }

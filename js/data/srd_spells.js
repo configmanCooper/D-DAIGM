@@ -3507,8 +3507,10 @@
       },
       "effects": [
         {
-          "kind": "narrative",
-          "summary": "You create three glowing darts of magical force. Each dart hits a creature of your choice that you can see within range. A dart deals 1d4..."
+          "kind": "auto",
+          "darts": 3,
+          "perDart": { "dice": "1d4", "flat": 1, "type": "force" },
+          "summary": "Three darts of force, each dealing 1d4 + 1 damage. They always hit."
         }
       ],
       "cantripScaling": null,

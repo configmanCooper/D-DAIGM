@@ -703,6 +703,32 @@
     return Combat.withEffects(state, actorId, rollType, opts, ctx);
   }
 
+  /**
+   * The AC contribution type a spell's mode means.
+   *
+   * set fixes a base (Mage Armor is 13 + Dex), loor guarantees a minimum
+   * (Barkskin is "your AC cannot be less than 16"), dd stacks on top
+   * (Shield is +5). Collapsing floor into add granted +16 armour class.
+   */
+  function acTypeFor(mode) {
+    if (mode === 'set') return 'base';
+    if (mode === 'floor') return 'floor';
+    return 'add';
+  }
+
+  /** How many rounds a spell lasts, for conditions that ride on it. */
+  function durationRoundsOf(spell) {
+    var Effects = (global.DND && global.DND.Effects) ||
+      (typeof require !== 'undefined' ? require('./effects.js') : null);
+    if (Effects && Effects.durationRounds && spell) {
+      try {
+        var r = Effects.durationRounds(spell.duration || (spell.mech && spell.mech.duration));
+        if (typeof r === 'number' && r > 0) return r;
+      } catch (e) { /* fall through to a sane default */ }
+    }
+    return 10;   // one minute, the commonest spell duration
+  }
+
   function combatModule() {
     return (global.DND && global.DND.Combat) ||
       (typeof require !== 'undefined' ? require('./combat.js') : null);
@@ -1028,7 +1054,8 @@
       Events.push(b, 'action_economy', econ, '');
     }
 
-    if (spell && spell.mech && spell.mech.concentration) {
+    var concentrating = !!(spell && spell.mech && spell.mech.concentration);
+    if (concentrating) {
       if (a.runtime.concentratingOn) {
         Events.push(b, 'concentration_end', { actorId: command.actorId },
           a.name + '\u2019s earlier spell ends.');
@@ -1105,10 +1132,113 @@
             effect: {
               id: 'eff_' + spellId + '_' + tid, name: name, targetId: tid,
               kind: 'ac', spellId: spellId,
-              /* The data says `mode`; the AC resolver reads `type`. */
-              ac: { type: e.mode === 'set' ? 'base' : 'add', source: name, value: e.value },
+              concentrationId: concentrating ? command.actorId : null,
+              /* The data's `mode` maps onto the AC resolver's `type`, and the
+                 mapping is not cosmetic: Barkskin sets a FLOOR of 16, and
+                 treating that as an addition granted +16 armour class. */
+              ac: {
+                type: acTypeFor(e.mode),
+                source: name,
+                value: e.value,
+                dexApplies: e.dexApplies !== false,
+              },
             },
           }, name + ' settles over ' + t.name + '.');
+        });
+        handled = true;
+        return;
+      }
+
+      if (e.kind === 'auto') {
+        /* Damage that simply lands: no attack roll, no save. Magic Missile is
+           the archetype — it never misses, which is why it fits neither the
+           attack nor the save shape and was left as prose that did nothing. */
+        var darts = (e.darts || 1) + (spell && spell.mech && spell.mech.scaling &&
+          spell.mech.scaling.mode === 'targets' ? (spell.mech.scaling.addTargets || 1) * upcastBy : 0);
+        var per = e.perDart || { dice: '1d4', flat: 0, type: 'force' };
+        var order = targets.length ? targets : [];
+        for (var dart = 0; dart < darts && order.length; dart++) {
+          var tid = order[dart % order.length];
+          var t = actor(state, tid);
+          if (!t || t.runtime.dead) continue;
+          var dr = Dice.roll(per.dice, { rng: state.rng });
+          var amount = dr.total + (per.flat || 0);
+          applySpellDamage(state, b, tid, { total: amount, type: per.type }, t, name, false);
+        }
+        handled = true;
+        return;
+      }
+
+      if (e.kind === 'hp_pool') {
+        /* Sleep and Colour Spray: a pool of hit points that takes creatures
+           out of the fight, weakest first, until it runs out. Neither spell
+           did anything at all before — Sleep was a slot spent on a sentence. */
+        var poolRoll = Dice.roll(scaleDice(e.dice || '5d8', spell, upcastBy), { rng: state.rng });
+        var pool = poolRoll.total;
+        Events.push(b, 'roll', { rollKind: 'hp_pool', actorId: command.actorId, total: pool, explain: Dice.explain(poolRoll) },
+          a.name + ' casts ' + name + ' \u2014 ' + pool + ' hit points of it.');
+
+        var rider = effects.filter(function (x) { return x.kind === 'condition'; })[0];
+        var byHp = targets.slice().sort(function (x, y) {
+          return (actor(state, x).runtime.hp || 0) - (actor(state, y).runtime.hp || 0);
+        });
+        byHp.forEach(function (tid) {
+          var t = actor(state, tid);
+          if (!t || t.runtime.dead) return;
+          var hp = t.runtime.hp || 0;
+          if (hp > pool) return;            // too strong; the pool stops here
+          pool -= hp;
+          if (rider) {
+            Events.push(b, 'condition_add', {
+              targetId: tid, condition: rider.condition, source: name,
+              endsOn: 'duration', rounds: durationRoundsOf(spell),
+            }, t.name + ' succumbs to ' + name + '.');
+          }
+        });
+        handled = true;
+        return;
+      }
+
+      if (e.kind === 'hp_threshold') {
+        /* Power Word Kill and its kin: it works, or it does not, on a hit
+           point count alone. No save, no roll. */
+        targets.forEach(function (tid) {
+          var t = actor(state, tid);
+          if (!t) return;
+          if ((t.runtime.hp || 0) > e.threshold) {
+            b.beats.push(t.name + ' is too strong for ' + name + '; nothing happens.');
+            return;
+          }
+          if (e.effect === 'death' || e.condition === 'dead') {
+            Events.push(b, 'death', { actorId: tid }, t.name + ' simply stops.');
+          } else if (e.condition) {
+            Events.push(b, 'condition_add', {
+              targetId: tid, condition: e.condition, source: name,
+              endsOn: 'duration', rounds: durationRoundsOf(spell),
+            }, t.name + ' is ' + e.condition + '.');
+          }
+        });
+        handled = true;
+        return;
+      }
+
+      if (e.kind === 'condition') {
+        /* A rider on a save is applied by the save branch, which rolls first.
+           A condition with no save of its own lands outright. */
+        if (effects.some(function (x) { return x.kind === 'save' || x.kind === 'hp_pool'; })) {
+          handled = true;
+          return;
+        }
+        targets.forEach(function (tid) {
+          var t = actor(state, tid);
+          if (!t) return;
+          Events.push(b, 'condition_add', {
+            targetId: tid, condition: e.condition, source: name,
+            endsOn: e.escapeAbility ? 'save' : 'duration',
+            saveAbility: e.escapeAbility || null,
+            saveDc: (d && d.spellcasting && d.spellcasting.dc) || null,
+            rounds: durationRoundsOf(spell),
+          }, t.name + ' is ' + e.condition + '.');
         });
         handled = true;
         return;
@@ -1122,7 +1252,14 @@
             targetId: tid, actorId: command.actorId,
             effect: {
               id: 'eff_' + spellId + '_' + tid, name: name, targetId: tid,
-              kind: 'bonus_dice', appliesTo: e.appliesTo, dice: e.die, spellId: spellId,
+              /* `sign: -1` is how Bane is written. Dropping it turned every
+                 penalty into a bonus, so Bane HELPED the creature it was cast
+                 on. A negative modifier is a disadvantage-shaped die, not a
+                 bonus one. */
+              kind: (e.sign < 0) ? 'penalty_dice' : 'bonus_dice',
+              appliesTo: e.appliesTo, dice: e.die, sign: e.sign || 1,
+              spellId: spellId,
+              concentrationId: concentrating ? command.actorId : null,
             },
           }, t.name + ' is touched by ' + name + '.');
         });
