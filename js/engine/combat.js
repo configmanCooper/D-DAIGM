@@ -104,15 +104,28 @@
   /* Cost in feet to walk a path (a list of squares, step by step). Entering a
      difficult-terrain square costs double; `difficult(sq)` reports it. Uses
      Chebyshev, so a diagonal step is the same 5 ft as an orthogonal one. */
+  /**
+   * What a path costs, in feet.
+   *
+   * Extra costs are ADDITIVE, not multiplicative: a foot of climbing through
+   * difficult terrain costs three feet (one base, one for the climb, one for
+   * the terrain), not four. Doubling the difficult-terrain cost and then
+   * doubling the result again for climbing charged four, which is a whole
+   * extra square of movement on every square of a bad ascent.
+   *
+   * `extras` is how many EXTRA feet each foot costs beyond the first, from
+   * causes other than terrain — one for climbing, swimming or crawling.
+   */
   function pathCost(path, opts) {
     opts = opts || {};
     var difficult = opts.difficult || function () { return false; };
+    var extras = opts.extras || 0;
     var cost = 0;
     for (var i = 1; i < path.length; i++) {
       var step = chebyshevSquares(path[i - 1], path[i]);
       if (step > 1) return { cost: Infinity, illegal: true, at: i };   // teleport, not a walk
-      var per = CELL * (difficult(path[i]) ? 2 : 1);
-      cost += per;
+      var multiples = 1 + extras + (difficult(path[i]) ? 1 : 0);
+      cost += CELL * multiples;
     }
     return { cost: cost, illegal: false };
   }
@@ -1411,9 +1424,22 @@
       enemies.forEach(function (id) {
         moves.push(move('attack', 'Attack ' + (state.actors[id].name || id), 'action', { targetIds: [id] }));
       });
+      /* A creature always has fists: an unarmed strike is a legal choice for
+         the Attack action whatever else you are holding, and it is how you
+         subdue rather than kill. The two-step bar collapses this to a single
+         button however many enemies there are. */
+      enemies.forEach(function (id) {
+        moves.push(move('unarmed_strike', 'Strike ' + (state.actors[id].name || id) + ' unarmed', 'action',
+          { targetIds: [id], warn: '1 + your Strength modifier, bludgeoning' }));
+      });
       moves.push(move('dodge', 'Dodge', 'action'));
       moves.push(move('disengage', 'Disengage', 'action'));
       moves.push(move('dash', 'Dash', 'action'));
+      /* Readying is a whole action in the rules and was reachable only by
+         typing it, which meant one of the four things a character can do with
+         their action was invisible. */
+      moves.push(move('ready', 'Ready an action', 'action',
+        { warn: 'holds your action for a trigger, and costs your reaction when it fires' }));
       moves.push(move('hide', 'Hide', 'action',
         { warn: 'a Stealth check against what they might notice' }));
       /* Help names the ally first and the enemy second, which is the order the
@@ -1438,6 +1464,16 @@
           { targetIds: [id], warn: 'off-hand adds no ability modifier to damage' }));
       });
     }
+
+    /* Getting free. A grappled character could see no way out of it from the
+       action bar, which made the condition look permanent. */
+    var grapple = a.runtime.conditions && a.runtime.conditions.grappled;
+    if (grapple && canAct(a)) {
+      var byId = grapple.by || grapple.source || null;
+      var byName = (byId && state.actors[byId] && state.actors[byId].name) || 'the grapple';
+      moves.push(move('escape_grapple', 'Break free of ' + byName, 'action',
+        { targetIds: byId ? [byId] : [], warn: 'Athletics or Acrobatics against their Athletics' }));
+    }
     return moves;
   };
 
@@ -1449,23 +1485,75 @@
     var a = actor(state, command.actorId);
     if (!a) return Events.refuse(b, 'no-actor', 'no one to move');
     var verb = command.primary.verb;
+
+    /* Standing up costs HALF your speed (PHB "Being Prone"), and it used to be
+       free — a character could stand, move their full distance and attack, in
+       a rule specifically written to make going down cost something. */
     if (verb === 'stand_up') {
-      Events.push(b, 'condition_remove', { targetId: command.actorId, condition: 'prone' }, a.name + ' stands up.');
+      if (!(a.runtime.conditions && a.runtime.conditions.prone)) {
+        return Events.refuse(b, 'not-prone', a.name + ' is already on their feet');
+      }
+      var half = Math.floor(speedOf(a) / 2);
+      if (inCombat(state) && movementLeft(a) < half) {
+        return Events.refuse(b, 'no-speed', 'standing up costs ' + half + ' ft of movement');
+      }
+      if (inCombat(state)) {
+        Events.push(b, 'action_economy', { actorId: command.actorId, movementUsed: half }, '');
+      }
+      Events.push(b, 'condition_remove', { targetId: command.actorId, condition: 'prone' },
+        a.name + ' stands up.');
       return b;
     }
     if (verb === 'drop_prone') {
-      Events.push(b, 'condition_add', { targetId: command.actorId, condition: 'prone' }, a.name + ' drops prone.');
+      if (a.runtime.conditions && a.runtime.conditions.prone) {
+        return Events.refuse(b, 'already-prone', a.name + ' is already prone');
+      }
+      /* Dropping prone is free — it costs no part of the action economy. */
+      Events.push(b, 'condition_add', { targetId: command.actorId, condition: 'prone' },
+        a.name + ' drops prone.');
       return b;
     }
+
+    /* Mounting or dismounting costs half your speed (PHB "Mounted Combat"). */
+    if (verb === 'mount' || verb === 'dismount') {
+      return resolveMounting(state, command, b, a, verb, ctx);
+    }
+
+    /* A jump is measured in feet and paid for out of movement. */
+    if (verb === 'jump') {
+      return resolveJump(state, command, b, a, ctx);
+    }
+
+    /* Climbing, swimming and crawling are not separate actions: they are
+       movement that costs an extra foot for every foot (PHB "Difficult
+       Terrain" / "Climbing, Swimming, and Crawling"). Where the going is
+       genuinely hard the DM may call for an Athletics check, which is what
+       `ctx.obstacles` describes. */
+    var mode = (verb === 'climb' || verb === 'swim' || verb === 'crawl') ? verb : null;
+    if (mode === 'crawl' && !(a.runtime.conditions && a.runtime.conditions.prone)) {
+      return Events.refuse(b, 'not-prone', 'crawling is how a prone creature moves');
+    }
+
     var path = command.primary.path || (command.primary.point ? [a.runtime.pos, command.primary.point] : null);
-    if (!path || path.length < 2) return Events.refuse(b, 'no-path', 'no destination to move to');
-    var cost = pathCost(path, { difficult: ctx.difficult });
+    if (!path || path.length < 2) {
+      if (mode) return resolveModeMove(state, command, b, a, mode, ctx);
+      return Events.refuse(b, 'no-path', 'no destination to move to');
+    }
+    var cost = pathCost(path, {
+      difficult: ctx.difficult,
+      /* One EXTRA foot per foot for climbing, swimming or crawling — added to
+         any difficult-terrain cost rather than multiplied with it. */
+      extras: mode ? 1 : 0,
+    });
     if (cost.illegal) return Events.refuse(b, 'illegal-move', 'that is not a step-by-step path');
-    if (cost.cost > movementLeft(a)) return Events.refuse(b, 'no-speed', 'not enough movement left to go there');
+    var total = cost.cost;
+    if (total > movementLeft(a)) return Events.refuse(b, 'no-speed', 'not enough movement left to go there');
 
     var dest = path[path.length - 1];
-    Events.push(b, 'move', { actorId: command.actorId, to: dest, from: a.runtime.pos, movementUsed: cost.cost },
-      a.name + ' moves ' + cost.cost + ' ft.');
+    var plainFeet = (path.length - 1) * CELL;
+    Events.push(b, 'move', { actorId: command.actorId, to: dest, from: a.runtime.pos, movementUsed: total },
+      a.name + ' ' + (mode ? MODE_VERB[mode] : 'moves') + ' ' + plainFeet + ' ft' +
+      (total !== plainFeet ? ' (' + total + ' ft of movement)' : '') + '.');
 
     /* Note any opportunity attacks the move provokes — the loop offers them to
        the reacting seats, it does not resolve them here. Disengaging (a stance
@@ -1486,10 +1574,215 @@
     return b;
   }
 
-  resolveMovement.legalMoves = function (state, actorId) {
+  var MODE_VERB = { climb: 'climbs', swim: 'swims', crawl: 'crawls' };
+
+  function inCombat(state) { return !!(state.combat && state.combat.active); }
+
+  /**
+   * Climb, swim or crawl a named obstacle rather than a mapped path.
+   *
+   * The map is a skirmish grid, not a terrain model, so "climb the chapel
+   * wall" is described by the scene rather than drawn on it. Slippery or
+   * otherwise treacherous going calls for an Athletics check, exactly as the
+   * rules say the DM may.
+   */
+  function resolveModeMove(state, command, b, a, mode, ctx) {
+    var id = command.primary.targetId || (command.primary.targetIds || [])[0] ||
+      command.primary.note || null;
+    var obs = ((ctx && ctx.obstacles) || []).filter(function (o) {
+      return o.id === id || o.kind === mode;
+    })[0];
+    if (!obs) return Events.refuse(b, 'nothing-to-' + mode, 'there is nothing here to ' + mode);
+
+    var feet = obs.distanceFt || 10;
+    var cost = feet * 2;                      // an extra foot for every foot
+    if (inCombat(state) && cost > movementLeft(a)) {
+      return Events.refuse(b, 'no-speed', mode + 'ing that costs ' + cost + ' ft of movement');
+    }
+    if (inCombat(state)) {
+      Events.push(b, 'action_economy', { actorId: command.actorId, movementUsed: cost }, '');
+    }
+
+    if (obs.dc) {
+      /* The DM's call for treacherous going. `check()` lives in the
+         interaction module, not this one, so the roll goes through Rules the
+         way every other contest in this file does. */
+      var derived = (ctx && ctx.derivedA) || a.derived;
+      if (derived) {
+        var roll = Rules.skillCheck(derived, obs.skill || 'athletics', { rng: state.rng });
+        var made = roll.total >= obs.dc;
+        Events.push(b, 'roll', {
+          of: mode, actorId: command.actorId, dc: obs.dc, result: roll, success: made,
+        }, a.name + ' tries ' + obs.name + ': ' + roll.total + ' against DC ' + obs.dc +
+          (made ? ' — they manage it.' : ' — they do not.'));
+        if (!made) {
+          Events.push(b, 'note', { text: mode + '-failed', actorId: command.actorId },
+            a.name + ' cannot manage ' + obs.name + '.');
+          return b;
+        }
+      }
+    }
+    Events.push(b, 'note', { text: mode, actorId: command.actorId, detail: obs.id },
+      a.name + ' ' + MODE_VERB[mode] + ' ' + obs.name + '.');
+    return b;
+  }
+
+  /**
+   * A jump.
+   *
+   * Long jump: your Strength SCORE in feet, but ONLY with a ten-foot running
+   * start — without one you cover half that. High jump: 3 + your Strength
+   * modifier, again halved without a run-up. Both are paid for out of movement.
+   *
+   * The running start is a real condition, not a flag the caller passes: it
+   * means ten feet moved on foot immediately before the jump. Defaulting to
+   * "running" gave a character who had not moved at all the full distance,
+   * which is most of a square of free reach every turn.
+   */
+  function resolveJump(state, command, b, a, ctx) {
+    var abil = a.derived && a.derived.abilities ? a.derived.abilities : (a.base && a.base.abilities) || {};
+    var str = abil.str || 10;
+    var mod = Math.floor((str - 10) / 2);
+    var high = (command.primary.note === 'high' || (command.primary.suggestion || {}).jump === 'high');
+
+    /* Did they actually take a run-up? The turn records how far they have
+       moved; ten feet of it immediately before the jump is the requirement. */
+    var t = turnOf(a);
+    var movedThisTurn = t ? Math.max(0, speedOf(a) - (t.movementRemaining || 0)) : 0;
+    var running = command.primary.runningStart === true ||
+      (command.primary.runningStart !== false && movedThisTurn >= 10);
+
+    var full = high ? Math.max(0, 3 + mod) : str;
+    var distance = running ? full : Math.floor(full / 2);
+
+    if (inCombat(state)) {
+      var need = Math.max(CELL, distance);
+      if (need > movementLeft(a)) {
+        return Events.refuse(b, 'no-speed', 'a jump that far needs ' + need + ' ft of movement');
+      }
+      Events.push(b, 'action_economy', { actorId: command.actorId, movementUsed: need }, '');
+    }
+
+    var gap = ((ctx && ctx.obstacles) || []).filter(function (o) { return o.kind === 'jump'; })[0];
+    if (gap && (gap.distanceFt || 0) > distance) {
+      /* Too far to clear. Saying so plainly — with the numbers — is better
+         than a silent failure or an invented success. */
+      Events.push(b, 'note', { text: 'jump-short', actorId: command.actorId },
+        a.name + ' judges ' + gap.name + ' too wide to clear \u2014 ' + distance +
+        ' ft of jump against ' + gap.distanceFt + ' ft of gap' +
+        (running ? '' : ', and there is no room for a run-up') + '.');
+      return b;
+    }
+    Events.push(b, 'note', { text: 'jump', actorId: command.actorId },
+      a.name + ' jumps ' + distance + ' ft' + (high ? ' straight up' : '') +
+      (running ? '' : ' from standing') +
+      (gap ? ', clearing ' + gap.name : '') + '.');
+    return b;
+  }
+
+  /**
+   * Getting on and off a mount, at half your speed — and once per move.
+   *
+   * Without the limit a character with sixty feet of movement could mount,
+   * dismount, mount and dismount again in a single turn, which is four
+   * repositionings of a creature the rules allow one of.
+   */
+  function resolveMounting(state, command, b, a, verb, ctx) {
+    var t = turnOf(a);
+    if (inCombat(state) && t && t.mountedThisMove) {
+      return Events.refuse(b, 'already-mounted-this-move',
+        'you can mount or dismount only once in a move');
+    }
+
+    if (verb === 'dismount') {
+      if (!a.runtime.mountedOn) return Events.refuse(b, 'not-mounted', a.name + ' is not mounted');
+      var offHalf = Math.floor(speedOf(a) / 2);
+      if (inCombat(state) && movementLeft(a) < offHalf) {
+        return Events.refuse(b, 'no-speed', 'dismounting costs ' + offHalf + ' ft of movement');
+      }
+      if (inCombat(state)) {
+        Events.push(b, 'action_economy',
+          { actorId: command.actorId, movementUsed: offHalf, mountedThisMove: true }, '');
+      }
+      Events.push(b, 'mount', { actorId: command.actorId, mountId: null }, a.name + ' dismounts.');
+      return b;
+    }
+
+    if (a.runtime.mountedOn) return Events.refuse(b, 'already-mounted', a.name + ' is already mounted');
+    var wantId = command.primary.targetId || (command.primary.targetIds || [])[0] || null;
+    var mounts = (ctx && ctx.mounts) || [];
+    var m = wantId ? mounts.filter(function (x) { return x.id === wantId; })[0] : mounts[0];
+    if (!m) return Events.refuse(b, 'no-mount', 'there is nothing here to ride');
+
+    var half = Math.floor(speedOf(a) / 2);
+    if (inCombat(state) && movementLeft(a) < half) {
+      return Events.refuse(b, 'no-speed', 'mounting costs ' + half + ' ft of movement');
+    }
+    if (inCombat(state)) {
+      Events.push(b, 'action_economy',
+        { actorId: command.actorId, movementUsed: half, mountedThisMove: true }, '');
+    }
+    Events.push(b, 'mount', { actorId: command.actorId, mountId: m.id, mountName: m.name },
+      a.name + ' mounts ' + m.name + '.');
+    return b;
+  }
+
+  resolveMovement.legalMoves = function (state, actorId, ctx) {
     var a = actor(state, actorId);
-    if (!a || isDown(a) || movementLeft(a) <= 0) return [];
-    return [move('move', 'Move (' + movementLeft(a) + ' ft left)', 'movement')];
+    if (!a || isDown(a)) return [];
+    ctx = ctx || {};
+    var moves = [];
+    var prone = !!(a.runtime.conditions && a.runtime.conditions.prone);
+    var left = movementLeft(a);
+    var half = Math.floor(speedOf(a) / 2);
+    var fighting = inCombat(state);
+
+    /* Getting up, and going down. Both were reachable only by typing them,
+       which meant a prone character had no way back to their feet from the
+       action bar at all. */
+    if (prone) {
+      if (!fighting || left >= half) {
+        moves.push(move('stand_up', 'Stand up', 'movement', { warn: 'costs ' + half + ' ft of movement' }));
+      }
+      if (left > 0) moves.push(move('crawl', 'Crawl', 'movement', { warn: 'every foot costs two' }));
+    } else {
+      moves.push(move('drop_prone', 'Drop prone', 'free',
+        { warn: 'ranged attacks against you have disadvantage; melee has advantage' }));
+    }
+
+    if (left <= 0) return moves;
+    if (!prone) moves.push(move('move', 'Move (' + left + ' ft left)', 'movement'));
+
+    /* Terrain the scene says is there. */
+    (ctx.obstacles || []).forEach(function (o) {
+      if (o.kind === 'climb') {
+        moves.push(move('climb', 'Climb ' + o.name, 'movement',
+          { targetIds: [o.id], warn: 'every foot costs two' }));
+      } else if (o.kind === 'swim') {
+        moves.push(move('swim', 'Swim ' + o.name, 'movement',
+          { targetIds: [o.id], warn: 'every foot costs two' }));
+      } else if (o.kind === 'jump') {
+        moves.push(move('jump', 'Jump ' + o.name, 'movement',
+          { targetIds: [o.id], warn: 'a long jump clears your Strength score in feet' }));
+      }
+    });
+    if (!(ctx.obstacles || []).some(function (o) { return o.kind === 'jump'; })) {
+      moves.push(move('jump', 'Jump', 'movement',
+        { warn: 'a long jump clears your Strength score in feet' }));
+    }
+
+    /* Mounts. */
+    if (a.runtime.mountedOn) {
+      if (!fighting || left >= half) moves.push(move('dismount', 'Dismount', 'movement',
+        { warn: 'costs ' + half + ' ft of movement' }));
+    } else {
+      (ctx.mounts || []).forEach(function (m) {
+        if (fighting && left < half) return;
+        moves.push(move('mount', 'Mount ' + m.name, 'movement',
+          { targetIds: [m.id], warn: 'costs ' + half + ' ft of movement' }));
+      });
+    }
+    return moves;
   };
 
   /* -------------------------------------------------------------- meta ----- */

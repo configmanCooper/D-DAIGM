@@ -118,17 +118,83 @@
      All ten open threads from §11. Titles are fixture-side only; the engine's
      observation exposes quest status, never titles. */
 
+  /*
+   * The campaign's open threads.
+   *
+   * `triggers` is what makes a quest a quest rather than a line in a list.
+   * Each one says what would count as progress — arriving somewhere, learning
+   * something, carrying something to somebody — and the engine watches every
+   * committed batch for them. Without these, all ten of these threads sat in
+   * the journal from the first turn to the last, unchanged by anything the
+   * party did, including walking into the very keep the quest is about.
+   */
   var quests = [
-    { id: 'screen-witnesses', title: 'Screen and select witnesses for a safe Third Seal Binding.', status: 'open' },
-    { id: 'restore-lantern-watch', title: 'Determine whether the Lantern Kin Watch can be restored.', status: 'open' },
-    { id: 'locate-fragment-two', title: 'Locate the exact current position of the Saint Orien fragment.', status: 'open' },
-    { id: 'identify-conspiracy', title: 'Identify the internal Veiled Witness conspiracy.', status: 'open' },
-    { id: 'identify-marrowen-woman', title: 'Determine the identity of the woman in Marrowen colours.', status: 'open' },
-    { id: 'blackharrow-presence', title: 'Investigate the Warden-linked presence beneath Blackharrow Keep.', status: 'open' },
-    { id: 'deliver-fragment-three', title: 'Complete the eastern fragment\u2019s safe delivery to Greyhaven.', status: 'open' },
-    { id: 'saint-oriens-saboteur', title: 'Support Elowen\u2019s hunt for the Saint Orien\u2019s saboteur.', status: 'open' },
-    { id: 'secure-fragment-four', title: 'Long term: locate and secure the last fragment and understand a whole Steel.', status: 'open' },
-    { id: 'enter-mirror-abbey', title: 'Enter Mirror Abbey and attempt the Third Seal Binding \u2014 not yet begun.', status: 'open' },
+    { id: 'screen-witnesses', title: 'Screen and select witnesses for a safe Third Seal Binding.', status: 'open',
+      triggers: [
+        { on: 'arrive', where: "lantern's rest", objective: 'reach-lanterns-rest',
+          text: 'reached Lantern\u2019s Rest, where the Kin still keep the watch',
+          beat: 'Lantern\u2019s Rest. The witnesses, if there are any left, are here.' },
+        { on: 'arrive', where: 'hearthmere', objective: 'reach-hearthmere',
+          text: 'reached Hearthmere, where more of the Kin settled' },
+      ] },
+    { id: 'restore-lantern-watch', title: 'Determine whether the Lantern Kin Watch can be restored.', status: 'open',
+      triggers: [
+        { on: 'arrive', where: "lantern's rest", objective: 'see-the-watch',
+          text: 'stood where the Watch was kept',
+          beat: 'The lantern-hooks are still in the beams at Lantern\u2019s Rest. Most are empty.' },
+      ] },
+    { id: 'locate-fragment-two', title: 'Locate the exact current position of the Saint Orien fragment.', status: 'open',
+      triggers: [
+        { on: 'arrive', where: 'saint-oriens', objective: 'reach-saint-oriens',
+          text: 'reached Saint Orien\u2019s Watch',
+          beat: 'Saint Orien\u2019s Watch. The fragment was here; the question is whether it still is.' },
+      ] },
+    { id: 'identify-conspiracy', title: 'Identify the internal Veiled Witness conspiracy.', status: 'open',
+      triggers: [
+        { on: 'arrive', where: 'mirror-abbey', objective: 'reach-mirror-abbey',
+          text: 'reached Mirror Abbey, the Witnesses\u2019 own house' },
+      ] },
+    { id: 'identify-marrowen-woman', title: 'Determine the identity of the woman in Marrowen colours.', status: 'open',
+      triggers: [
+        { on: 'arrive', where: 'greyhaven', objective: 'reach-greyhaven-to-ask',
+          text: 'reached Greyhaven, where Marrowen colours would be recognised' },
+      ] },
+    { id: 'blackharrow-presence', title: 'Investigate the Warden-linked presence beneath Blackharrow Keep.', status: 'open',
+      triggers: [
+        { on: 'arrive', where: 'blackharrow-keep', objective: 'reach-blackharrow',
+          text: 'reached Blackharrow Keep',
+          beat: 'Blackharrow Keep stands over you. Whatever is under it has not moved in a long time.' },
+      ] },
+    { id: 'deliver-fragment-three', title: 'Complete the eastern fragment\u2019s safe delivery to Greyhaven.', status: 'open',
+      triggers: [
+        { on: 'arrive', where: 'greyhaven', objective: 'reach-greyhaven',
+          text: 'reached Greyhaven, where the fragment is expected' },
+        /* The delivery itself needs the fragment in hand AND the party at
+           Greyhaven — arriving empty-handed is not a delivery, and recording
+           it as one was the journal claiming something that had not happened. */
+        { on: 'deliver', where: 'greyhaven', itemId: 'fragment-three',
+          objective: 'hand-it-over', completes: true,
+          text: 'put the eastern fragment into Greyhaven\u2019s keeping',
+          doneBeat: 'The eastern fragment is behind Greyhaven\u2019s walls. That is one of them safe.' },
+      ] },
+    { id: 'saint-oriens-saboteur', title: 'Support Elowen\u2019s hunt for the Saint Orien\u2019s saboteur.', status: 'open',
+      triggers: [
+        { on: 'arrive', where: 'saint-oriens', objective: 'join-the-hunt',
+          text: 'reached Saint Orien\u2019s, where Elowen is hunting' },
+      ] },
+    { id: 'secure-fragment-four', title: 'Long term: locate and secure the last fragment and understand a whole Steel.', status: 'open',
+      triggers: [
+        { on: 'arrive', where: 'mirror-abbey', objective: 'reach-mirror-abbey-4',
+          text: 'reached the abbey, where the last of it is said to lie' },
+      ] },
+    { id: 'enter-mirror-abbey', title: 'Enter Mirror Abbey and attempt the Third Seal Binding \u2014 not yet begun.', status: 'open',
+      triggers: [
+        { on: 'arrive', where: 'mirror-abbey', objective: 'enter-the-abbey',
+          text: 'entered Mirror Abbey',
+          completes: true,
+          beat: 'Mirror Abbey. The doors are open, which is worse than finding them shut.',
+          doneBeat: 'You are inside Mirror Abbey. Whatever the Third Seal Binding costs, it is payable from here.' },
+      ] },
   ];
 
   /* --------------------------------------------------------- resources ----

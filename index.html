@@ -204,6 +204,8 @@
 <script src="js/engine/dice.js"></script>
 <script src="js/engine/command.js"></script>
 <script src="js/engine/events.js"></script>
+    <!-- Watches every committed batch for anything that advances a quest. -->
+    <script src="js/engine/quests.js"></script>
 <script src="js/engine/effects.js"></script>
 <script src="js/engine/knowledge.js"></script>
 <script src="js/engine/character.js"></script>
@@ -227,6 +229,10 @@
 <script src="js/gen/scene.js"></script>
 <script src="js/gen/tokens.js"></script>
 <script src="js/gen/worldgen.js"></script>
+<!-- What a place contains: loot, locks, traps, traders, mounts. Loaded
+     before game.js, which furnishes a location the moment the party
+     stands in it. -->
+<script src="js/gen/contents.js"></script>
 <script src="js/gen/chargen.js"></script>
 
 <!-- ai: backend first, then schema/prompt/offline, then the agents -->

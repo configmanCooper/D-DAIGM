@@ -482,6 +482,24 @@
          same thing as what they have prepared today. Everyone else prepares
          from their class list, so they have no book. */
       spellbook: (progression.spellbook || []).slice(),
+      /* Whether this caster has the Ritual Casting feature at all.
+         The class table has always carried it and nothing read it: the move
+         list tested `sc.ritualCasting`, a field that does not exist, so the
+         check was vacuously true and a PALADIN — who has no ritual casting in
+         the 2014 rules — was offered rituals. */
+      ritual: !!(primary && primary.cd.spellcasting && primary.cd.spellcasting.ritual),
+      /* What may be cast as a ritual. A wizard rituals from the SPELLBOOK, and
+         needs the spell prepared for nothing; every other ritual caster works
+         from what they have prepared or know. */
+      ritualFrom: (function () {
+        if (!primary || !primary.cd.spellcasting || !primary.cd.spellcasting.ritual) return [];
+        var book = (progression.spellbook || []);
+        var ready = (progression.preparedSpells || []);
+        if (primary.c && primary.c.classId === 'wizard' && book.length) {
+          return book.concat(ready.filter(function (id) { return book.indexOf(id) < 0; }));
+        }
+        return ready.slice();
+      })(),
     };
   }
 
@@ -871,17 +889,24 @@
     if (!Chargen || !Chargen.generate) return;
 
     try {
-      var spec = Chargen.generate({
+      var spec2 = Chargen.generate({
         fixed: {
           classId: firstClass.classId,
           levels: firstClass.levels || 1,
           raceId: base.raceId || undefined,
         },
+        /* Derived from the character rather than left to the clock. Without a
+           seed the generator falls back to `Date.now()`, so the same spec
+           produced a different spell list every time it was built — which
+           breaks the promise that a seed replays a session exactly, and made
+           any test that looked at a generated caster's spells flaky. */
+        seed: 'spells:' + (base.name || '') + ':' + firstClass.classId + ':' +
+          (firstClass.levels || 1) + ':' + (base.raceId || ''),
       });
-      if (!spec) return;
-      progression.preparedSpells = (spec.spells || []).slice();
-      progression.cantripsKnown = (spec.cantrips || []).slice();
-      progression.spellbook = (spec.spellbook || spec.spells || []).slice();
+      if (!spec2) return;
+      progression.preparedSpells = (spec2.spells || []).slice();
+      progression.cantripsKnown = (spec2.cantrips || []).slice();
+      progression.spellbook = (spec2.spellbook || spec2.spells || []).slice();
     } catch (e) { /* an empty caster is bad; a crash on character creation is worse */ }
   }
 

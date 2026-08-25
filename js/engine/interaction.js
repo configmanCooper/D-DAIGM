@@ -191,8 +191,31 @@
 
     var focus = command.primary.note || command.primary.suggestion && command.primary.suggestion.focus || '';
     var band = (ctx.difficulty && ctx.difficulty[verb]) || spec.band;
-    var result = check(state, b, command.actorId, spec.skill, band,
-      command.primary.suggestion, focus || undefined);
+
+    /* A named obstacle sets its own difficulty and has its own consequences.
+       Picking a lock and disarming a trap used to roll a generic check against
+       nothing in particular: the lock stayed locked however well you rolled,
+       the trap stayed armed, and failing to disarm one was free. */
+    var obstacle = null;
+    if (verb === 'unlock' || verb === 'disarm_trap') {
+      var wantId = command.primary.targetId || (command.primary.targetIds || [])[0] || focus;
+      var kind = verb === 'unlock' ? 'locked' : 'trap';
+      obstacle = ((ctx.obstacles) || []).filter(function (o) {
+        return !o.cleared && (o.id === wantId || o.kind === kind);
+      })[0];
+      if (!obstacle) {
+        return Events.refuse(b, 'nothing-to-' + verb,
+          verb === 'unlock' ? 'there is nothing locked here' : 'there is no trap here to disarm');
+      }
+    }
+
+    var result = obstacle && obstacle.dc
+      ? checkAgainstDc(state, b, command.actorId, obstacle.skill || spec.skill, obstacle.dc,
+        obstacle.name)
+      : check(state, b, command.actorId, spec.skill, band,
+        command.primary.suggestion, focus || undefined);
+
+    if (obstacle) return resolveObstacle(state, command, b, a, verb, obstacle, result);
 
     if (result.success) {
       /* A successful search is only meaningful if the scene has something to
@@ -220,6 +243,70 @@
       Events.push(b, 'note', { text: 'failed-' + verb, actorId: command.actorId },
         a.name + ' finds nothing.');
     }
+    return b;
+  }
+
+  /**
+   * A check against a specific difficulty, rather than a difficulty band.
+   *
+   * A lock has a DC of its own; asking "how hard is picking a lock in general"
+   * throws that away.
+   */
+  function checkAgainstDc(state, b, actorId, skill, dc, what) {
+    var a = actor(state, actorId);
+    var d = derivedOf(state, actorId);
+    var roll = Rules.skillCheck(d, skill, { rng: state.rng });
+    var success = roll.total >= dc;
+    Events.push(b, 'roll', {
+      rollKind: 'skill', of: skill, actorId: actorId, dc: dc,
+      total: roll.total, natural: roll.natural, success: success,
+      explain: Dice.explain(roll),
+    }, a.name + ' works at ' + (what || 'it') + ': ' + roll.total + ' against DC ' + dc +
+      (success ? ' \u2014 it gives.' : ' \u2014 it does not.'));
+    return { success: success, roll: roll, dc: dc };
+  }
+
+  /**
+   * What actually happens to a lock or a trap.
+   *
+   * Both used to be pure theatre: a successful pick left the door locked and
+   * the option to pick it offered for ever, and a failed disarm — the one
+   * moment in the game where a trap is supposed to bite — cost nothing at all.
+   */
+  function resolveObstacle(state, command, b, a, verb, obstacle, result) {
+    if (result.success) {
+      Events.push(b, 'scene_clear', {
+        locationId: state.locationId, obstacleId: obstacle.id, by: command.actorId,
+      }, verb === 'unlock'
+        ? a.name + ' picks the lock on ' + obstacle.name + '.'
+        : a.name + ' disarms ' + obstacle.name + '.');
+      return b;
+    }
+
+    if (verb === 'unlock') {
+      Events.push(b, 'note', { text: 'lock-held', actorId: command.actorId },
+        obstacle.name + ' holds.');
+      return b;
+    }
+
+    /* A trap that goes off. This is the whole reason disarming one is a
+       decision rather than a formality. */
+    var dmgSpec = obstacle.damage || '2d6';
+    var roll = Dice.roll(dmgSpec, { rng: state.rng });
+    var amount = roll.total != null ? roll.total : 0;
+    Events.push(b, 'roll', {
+      rollKind: 'damage', of: 'trap', actorId: command.actorId,
+      total: amount, explain: Dice.explain(roll),
+    }, '');
+    Events.push(b, 'hp', {
+      targetId: command.actorId, delta: -amount,
+      damageType: obstacle.damageType || 'piercing',
+    }, a.name + ' sets off ' + obstacle.name + ' \u2014 ' + amount + ' damage.');
+    /* A sprung trap is spent, which is why setting one off is a cost and not
+       a loop. */
+    Events.push(b, 'scene_clear', {
+      locationId: state.locationId, obstacleId: obstacle.id, by: command.actorId, sprung: true,
+    }, '');
     return b;
   }
 
@@ -381,6 +468,33 @@
       ((ctx && ctx.exits) || []).forEach(function (exit) {
         moves.push(mv('travel', 'Travel to ' + (exit.name || exit.id), 'hours', { note: exit.id }));
       });
+
+      /* What this particular place actually contains. Six verbs the engine has
+         always resolved lived here with nothing describing the scene, so a
+         locked door could never be picked, a trap never disarmed, a lever
+         never pulled and a book never read — the game had the rules for all of
+         it and no way to reach any of it. */
+      ((ctx && ctx.obstacles) || []).forEach(function (o) {
+        if (o.kind === 'locked') {
+          moves.push(mv('unlock', 'Pick the lock on ' + o.name, 'time',
+            { note: o.id, targetIds: [o.id] }, 'thieves\u2019 tools, against the lock'));
+        } else if (o.kind === 'trap') {
+          moves.push(mv('disarm_trap', 'Disarm ' + o.name, 'time',
+            { note: o.id, targetIds: [o.id] }, 'getting it wrong sets it off'));
+        }
+      });
+      ((ctx && ctx.interactables) || []).forEach(function (i) {
+        moves.push(mv('interact', 'Try ' + (i.name || i.id), 'object', { note: i.id, targetIds: [i.id] }));
+      });
+      ((ctx && ctx.readables) || []).forEach(function (r) {
+        moves.push(mv('read', 'Read ' + (r.name || r.id), 'time', { note: r.id, targetIds: [r.id] }));
+      });
+      ((ctx && ctx.tracks) || []).forEach(function (tr) {
+        moves.push(mv('track', 'Follow ' + (tr.name || tr.id), 'time', { note: tr.id, targetIds: [tr.id] }));
+      });
+      if (ctx && ctx.forage) {
+        moves.push(mv('forage', 'Forage for food and water', 'time'));
+      }
     }
     return moves;
   };
@@ -568,7 +682,27 @@
         moves.push(mv('deceive', 'Lie to ' + who, 'a moment', { targetIds: [id] },
           'being caught costs trust badly'));
       }
+      /* Telling someone something, rather than asking. The whole half of a
+         conversation where the party volunteers what it knows had no button. */
+      if (talks) {
+        moves.push(mv('tell', 'Tell ' + who + ' something', 'a moment', { targetIds: [id] },
+          'what you say is remembered, and repeated'));
+        moves.push(mv('offer', 'Offer ' + who + ' a deal', 'a moment', { targetIds: [id] }));
+        moves.push(mv('refuse', 'Refuse ' + who, 'a moment', { targetIds: [id] },
+          'refusing is remembered too'));
+      }
     });
+
+    /* Performing is for the room, not for one person: it needs an audience,
+       any audience, and it is how a bard earns a bed for the night. */
+    var audience = Object.keys(state.actors || {}).filter(function (id) {
+      var o = state.actors[id];
+      return id !== actorId && o.runtime && !o.runtime.dead && !downed(o) &&
+        perceives(state, actorId, id) && canConverse(o);
+    });
+    if (audience.length && !(state.combat && state.combat.active)) {
+      moves.push(mv('perform', 'Perform for the room', 'time', { targetIds: audience.slice(0, 4) }));
+    }
     return moves;
   };
 
@@ -974,22 +1108,129 @@
     }
   }
 
-  resolveItem.legalMoves = function (state, actorId) {
+  resolveItem.legalMoves = function (state, actorId, ctx) {
     var a = actor(state, actorId);
     if (!a || downed(a)) return [];
+    ctx = ctx || {};
     var inv = (a.runtime && a.runtime.inventory) || [];
+    var equipped = (a.runtime && a.runtime.equipped) || {};
+    var attuned = (a.runtime && a.runtime.attuned) || [];
     var moves = [];
-    inv.slice(0, 12).forEach(function (i) {
+    var table = itemTable(ctx) || {};
+
+    function equippedUids() {
+      var out = {};
+      Object.keys(equipped).forEach(function (slot) {
+        var v = equipped[slot];
+        if (!v) return;
+        if (Array.isArray(v)) v.forEach(function (x) { out[x] = slot; });
+        else out[v] = slot;
+      });
+      return out;
+    }
+    var onBody = equippedUids();
+
+    inv.slice(0, 16).forEach(function (i) {
       var uid = i.uid || i.id;
       var label = i.name || i.id;
-      if (i.heal || i.consumable) {
+      var def = table[i.id] || table[uid] || i;
+      if (i.heal || i.consumable || (def && def.consumable)) {
         moves.push(mv('drink', 'Drink ' + label, 'action', { itemId: uid }));
       } else {
         moves.push(mv('use', 'Use ' + label, 'action', { itemId: uid }));
       }
+
+      /* Wearing and wielding. Neither was ever offered, so a character could
+         pick a sword up and had no way to draw it. */
+      var wearable = def && (def.slot || def.armor || def.weapon ||
+        def.category === 'weapon' || def.category === 'armor' || def.category === 'shield');
+      if (wearable) {
+        if (onBody[uid]) {
+          moves.push(mv('unequip', 'Put away ' + label, 'object', { itemId: uid }));
+        } else {
+          moves.push(mv('equip', 'Equip ' + label, 'object', { itemId: uid }));
+        }
+      }
+
+      /* Attunement. Three items at a time, and the limit is worth saying out
+         loud rather than discovering by refusal. */
+      if (def && def.attunement) {
+        if (attuned.indexOf(uid) >= 0 || attuned.indexOf(i.id) >= 0) {
+          moves.push(mv('unattune', 'End attunement to ' + label, 'time', { itemId: uid }));
+        } else if (attuned.length < 3) {
+          moves.push(mv('attune', 'Attune to ' + label, 'time',
+            { itemId: uid, warn: 'a short rest spent with it; three items at once' }));
+        }
+      }
+
+      /* Throwing, giving away, putting down. */
+      if (def && (def.thrown || def.range || def.category === 'weapon')) {
+        perceivedFoes(state, actorId).forEach(function (foeId) {
+          moves.push(mv('throw', 'Throw ' + label + ' at ' + nameOf(state, foeId), 'action',
+            { itemId: uid, targetIds: [foeId] }));
+        });
+      }
+      alliesOf(state, actorId).forEach(function (allyId) {
+        moves.push(mv('give', 'Give ' + label + ' to ' + nameOf(state, allyId), 'object',
+          { itemId: uid, targetIds: [allyId] }));
+      });
+      moves.push(mv('drop', 'Drop ' + label, 'free', { itemId: uid }));
+
+      /* Selling, when there is somebody here who buys. */
+      (ctx.merchants || []).forEach(function (m) {
+        if (m.buys === false) return;
+        moves.push(mv('sell', 'Sell ' + label + ' to ' + (m.name || 'the trader'), 'time',
+          { itemId: uid, targetIds: m.actorId ? [m.actorId] : [] }));
+      });
     });
+
+    /* Anything lying on the ground here. */
+    (ctx.groundItems || []).forEach(function (g) {
+      moves.push(mv('pick_up', 'Pick up ' + (g.name || g.id), 'object',
+        { itemId: g.uid || g.id }));
+    });
+
+    /* Anything for sale. */
+    (ctx.merchants || []).forEach(function (m) {
+      (m.sells || []).forEach(function (id) {
+        var def = table[id] || {};
+        /* priceOf, not the raw `cost` field: the data stores cost as
+           `{qty, unit}`, which stringified to "[object Object]" in the button
+           and told a player nothing about what they were about to spend. */
+        var gp = priceOf(def);
+        var price = (gp != null && isFinite(gp)) ? gp + ' gp' : null;
+        moves.push(mv('buy', 'Buy ' + (def.name || id) +
+          (price ? ' (' + price + ')' : '') + ' from ' + (m.name || 'the trader'), 'time',
+        { itemId: id, targetIds: m.actorId ? [m.actorId] : [] }));
+      });
+    });
+
     return moves;
   };
+
+  function nameOf(state, id) {
+    var a = state.actors[id];
+    return (a && a.name) || id;
+  }
+
+  function alliesOf(state, actorId) {
+    var a = state.actors[actorId];
+    if (!a) return [];
+    return Object.keys(state.actors).filter(function (id) {
+      var o = state.actors[id];
+      return id !== actorId && o.side === a.side && o.runtime && !o.runtime.dead;
+    });
+  }
+
+  function perceivedFoes(state, actorId) {
+    var a = state.actors[actorId];
+    if (!a) return [];
+    return Object.keys(state.actors).filter(function (id) {
+      var o = state.actors[id];
+      return o.side && a.side && o.side !== a.side && o.side !== 'neutral' &&
+        o.runtime && !o.runtime.dead;
+    });
+  }
 
   /* ========================================================= spells ========= */
 
@@ -1019,6 +1260,9 @@
       (sc.cantripsKnown || []).indexOf(spellId) >= 0;
 
     var known = (sc.available || sc.prepared || []).concat(sc.cantripsKnown || []);
+    /* A wizard rituals from the SPELLBOOK, and needs nothing prepared for it —
+       so the ritual pool counts as available when the command IS a ritual. */
+    if (command.primary.verb === 'ritual_cast') known = known.concat(sc.ritualFrom || []);
     if (known.length && known.indexOf(spellId) < 0) {
       return Events.refuse(b, 'not-prepared', a.name + ' does not have ' + spellId + ' prepared');
     }
@@ -1042,7 +1286,37 @@
       }
     }
 
-    if (level > 0) {
+    /* A ritual costs no spell slot. That is the entire point of the ritual tag
+       in the 2014 rules: ten extra minutes buys you the casting for free, so a
+       cleric can Detect Magic all afternoon without touching their slots. This
+       went through the ordinary spend path, which meant a ritual cost a slot
+       AND was refused outright once the slots ran out — the one situation the
+       rule exists to cover. */
+    var asRitual = command.primary.verb === 'ritual_cast';
+    if (asRitual) {
+      if (!spell || !spell.ritual) {
+        return Events.refuse(b, 'not-a-ritual',
+          (spell && spell.name || spellId) + ' cannot be cast as a ritual');
+      }
+      /* Only a class with the Ritual Casting feature. A paladin has none. */
+      if (!sc.ritual) {
+        return Events.refuse(b, 'no-ritual-casting',
+          a.name + ' has no ritual casting');
+      }
+      /* And it must be somewhere they can ritual from — the spellbook for a
+         wizard, the prepared list for everyone else. */
+      if ((sc.ritualFrom || []).indexOf(spellId) < 0) {
+        return Events.refuse(b, 'ritual-not-available',
+          a.name + ' cannot ritual ' + (spell.name || spellId) + ' from anything they carry');
+      }
+      if (state.combat && state.combat.active) {
+        return Events.refuse(b, 'in-combat',
+          'a ritual takes ten minutes longer than the spell \u2014 not in the middle of a fight');
+      }
+      Events.push(b, 'time', { minutes: 10 }, 'The ritual takes ten minutes longer.');
+    }
+
+    if (level > 0 && !asRitual) {
       var spent = (a.runtime.slotsSpent && a.runtime.slotsSpent[level]) || 0;
       var maxSlots = (d && d.spellcasting && d.spellcasting.slotsMax && d.spellcasting.slotsMax[level]) || 0;
       if (maxSlots && spent >= maxSlots) {
@@ -1341,11 +1615,48 @@
         moves.push(mv('cast', 'Cast ' + name, 'action', { spellId: spellId }));
       }
     });
+
+    /* Rituals: ten extra minutes, no spell slot, and only for a class that
+       actually has the Ritual Casting feature. A wizard rituals from the
+       SPELLBOOK and needs nothing prepared; everyone else works from what they
+       have prepared or know. This used to test `sc.ritualCasting`, a field
+       that does not exist — so the check was vacuously true and a paladin, who
+       has no ritual casting at all in 2014, was offered rituals. */
+    if (sc.ritual && !(state.combat && state.combat.active)) {
+      (sc.ritualFrom || []).slice(0, 24).forEach(function (spellId) {
+        var spell = SPELLS && SPELLS[spellId];
+        if (!spell || !spell.ritual) return;
+        moves.push(mv('ritual_cast', 'Cast ' + (spell.name || spellId) + ' as a ritual',
+          'ten minutes', { spellId: spellId }, 'costs no spell slot'));
+      });
+    }
     if (a.runtime && a.runtime.concentratingOn) {
       moves.push(mv('dismiss_concentration', 'Let the spell go', 'free'));
     }
+
+    /* Counterspell is a reaction taken on somebody else's turn. It belongs in
+       the bar whenever the reaction is unspent and there is an enemy caster to
+       use it against — offering it only at the instant of casting meant it was
+       never offered at all. */
+    if (known.indexOf('counterspell') >= 0 && canReact(a)) {
+      Object.keys(state.actors || {}).forEach(function (id) {
+        var o = state.actors[id];
+        if (!o || o.side === a.side || !o.runtime || o.runtime.dead) return;
+        if (!perceives(state, actorId, id)) return;
+        var theirs = derivedOf(state, id);
+        if (!theirs || !theirs.spellcasting) return;
+        moves.push(mv('counterspell', 'Ready counterspell against ' + (o.name || id), 'reaction',
+          { spellId: 'counterspell', targetIds: [id] },
+          'spent when they cast, not now'));
+      });
+    }
     return moves;
   };
+
+  function canReact(a) {
+    var t = a && a.runtime && a.runtime.turn;
+    return !t || t.reaction !== false;
+  }
 
   /* ===================================================== improvised ========= */
 

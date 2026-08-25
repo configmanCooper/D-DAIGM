@@ -62,6 +62,101 @@
     };
   }
 
+  /**
+   * Furnish the party's current location if it has not been furnished yet.
+   *
+   * Called at session start and after anything that can move them. The opening
+   * scene used to be the one place in the game with nothing in it, because
+   * furnishing only ever happened on arrival somewhere else.
+   */
+  function settle(session) {
+    if (session && session.state && session.state.locationId) {
+      ensureScene(session, session.state.locationId);
+      seedQuests(session);
+      /* A quest about where the party ALREADY IS has no arrival to notice.
+         The Shen campaign opens at Lantern's Rest with a thread about Lantern's
+         Rest, and it stayed untouched because the party never travelled there
+         — they were simply standing in it from the first turn. */
+      checkStanding(session);
+    }
+    return session;
+  }
+
+  /**
+   * Put the campaign's quests on the board.
+   *
+   * A quest the state has never heard of cannot advance, and a generated
+   * sandbox had no quests in state at all — so its journal read "No quests
+   * recorded" for the whole game while its definitions sat unused. Only
+   * missing ones are added, so this is safe to call on every settle and never
+   * overwrites progress.
+   */
+  function seedQuests(session) {
+    var defs = questDefsFor(session);
+    if (!defs || !defs.length) return;
+    var state = session.state;
+    var missing = defs.filter(function (d) {
+      return d && d.id && !(state.quests || {})[d.id];
+    });
+    if (!missing.length) return;
+
+    var b = Events.makeBatch({ commandId: 'quests:seed:' + state.revision, actorId: null });
+    missing.forEach(function (d) {
+      Events.push(b, 'quest', {
+        questId: d.id, title: d.title, status: d.status || 'open',
+      }, 'Open thread: ' + d.title);
+    });
+    Events.commit(state, b);
+  }
+
+  function questDefsFor(session) {
+    return (session.campaign && session.campaign.quests) || session.questDefs || null;
+  }
+
+  /**
+   * Evaluate quest triggers against where things STAND, not what just changed.
+   *
+   * Repeats are harmless: an objective already marked done is skipped, so this
+   * can be called on every settle without accumulating anything.
+   */
+  function checkStanding(session) {
+    var state = session.state;
+    if (!state.locationId) return null;
+    return advanceQuests(session, {
+      events: [{ kind: 'position', locationId: state.locationId }],
+      beats: [],
+    });
+  }
+
+  /**
+   * Did anything that just happened move a quest along?
+   *
+   * The campaign has always been able to LIST quests and never to advance one:
+   * ten open threads sat in the journal from the first turn to the last, with
+   * no relationship to anything the party did — walking into the very keep a
+   * quest was about changed nothing. Quest progress is committed as ordinary
+   * events, so it is logged, replayable and undoable like everything else.
+   */
+  function advanceQuests(session, batch) {
+    var Q = (global.DND && global.DND.Quests) ||
+      (typeof require !== 'undefined' ? (function () {
+        try { return require('./engine/quests.js'); } catch (e) { return null; }
+      })() : null);
+    if (!Q || !batch) return null;
+    var defs = questDefsFor(session);
+    if (!defs || !defs.length) return null;
+
+    var out = Q.advanceFrom(session.state, batch, defs, {
+      commandId: 'quest:' + session.state.revision,
+    });
+    if (!out) return null;
+    var res = Events.commit(session.state, out);
+    if (res.ok) {
+      emit(session, 'quests', { batch: out, beats: out.beats || [] });
+    }
+    return out;
+  }
+
   /* --------------------------------------------------------------- events -- */
 
   function on(session, name, fn) {
@@ -236,18 +331,136 @@
    * press, a typed sentence, an AI seat's decision. When only the UI supplied
    * it (and it supplied nothing), `travel` was never offered and never
    * resolved, in campaigns with ten connected locations.
+   *
+   * Exits come from the campaign's gazetteer, which is a DEFINITION and is
+   * rebuilt on load. Everything else comes from `state.locations`, which is
+   * live and saved — because what the party has already taken off the floor
+   * must stay taken.
    */
   function sceneCtx(session) {
     var out = {};
+    var state = session.state;
+    var locId = state.locationId;
+    if (!locId) return out;
+
     var gaz = session.locations;
-    var here = gaz && session.state.locationId && gaz[session.state.locationId];
+    var here = gaz && gaz[locId];
     if (here && here.connections) {
       out.exits = here.connections.map(function (id) {
         var to = gaz[id];
         return { id: id, name: (to && to.name) || id };
       });
     }
+
+    var live = (state.locations || {})[locId];
+    if (live) {
+      /* Copies, not the live arrays.
+         Handing `state.locations[here].items` straight out meant a caller held
+         a reference to the world: anything that mutated it changed the game
+         without an event, which is precisely what the event system exists to
+         prevent, and would leave undo unable to put it back. It also made a
+         captured context silently track later changes, so a test comparing
+         "before" and "after" compared the same array with itself. */
+      out.groundItems = copyList(live.items);
+      out.obstacles = copyList(live.obstacles).filter(function (o) { return !o.cleared; });
+      out.interactables = copyList(live.interactables);
+      out.readables = copyList(live.readables);
+      out.tracks = copyList(live.tracks);
+      out.merchants = copyList(live.merchants);
+      out.mounts = copyList(live.mounts);
+      out.forage = !!live.forage;
+      out.sceneName = live.name;
+      out.biome = live.biome;
+    }
     return out;
+  }
+
+  function copyList(list) {
+    if (!list || !list.length) return [];
+    return list.map(function (x) {
+      return (x && typeof x === 'object') ? JSON.parse(JSON.stringify(x)) : x;
+    });
+  }
+
+  /**
+   * Furnish a location the first time the party stands in it.
+   *
+   * Deterministic in the campaign seed and the location id, so the same place
+   * is the same place on every visit and across every reload — and stored in
+   * state, so what is taken stays taken.
+   */
+  function ensureScene(session, locationId) {
+    var state = session.state;
+    var id = locationId || state.locationId;
+    if (!id) return null;
+    state.locations = state.locations || {};
+    if (state.locations[id] && state.locations[id].furnished) return state.locations[id];
+
+    var Contents = (global.DND && global.DND.Contents) ||
+      (typeof require !== 'undefined' ? (function () {
+        try { return require('./gen/contents.js'); } catch (e) { return null; }
+      })() : null);
+    if (!Contents) return state.locations[id] || null;
+
+    var def = (session.locations && session.locations[id]) || { name: id, biome: 'road' };
+    var scene = Contents.furnish(def, {
+      locationId: id,
+      seed: (state.seed || '') + ':' + id,
+    });
+    /* Anything already recorded for this place (a campaign's hand-placed items,
+       or a previous partial visit) outranks what is generated for it. */
+    var existing = state.locations[id];
+    if (existing) {
+      Object.keys(existing).forEach(function (k) {
+        if (existing[k] != null && !(Array.isArray(existing[k]) && !existing[k].length)) {
+          scene[k] = existing[k];
+        }
+      });
+    }
+    state.locations[id] = scene;
+    materialiseMerchants(session, scene);
+    return scene;
+  }
+
+  /**
+   * Give a generated trader a body.
+   *
+   * The buy and sell resolvers trade with an ACTOR — they need somebody who
+   * can be perceived, talked to and haggled with. A merchant that existed only
+   * as scene data meant Buy and Sell were offered and then immediately
+   * refused with "there is nobody here selling anything", which is worse than
+   * not offering them: it teaches a player that the verb does not work.
+   *
+   * Making them real also means they can be asked about the town, persuaded,
+   * and remembered — which is what a shopkeeper is for.
+   */
+  function materialiseMerchants(session, scene) {
+    var state = session.state;
+    (scene.merchants || []).forEach(function (m) {
+      if (m.actorId && State.hasActor && State.hasActor(state, m.actorId)) return;
+      var actorId = m.actorId || ('trader-' + m.id);
+      m.actorId = actorId;
+      if (State.hasActor && State.hasActor(state, actorId)) return;
+      State.addActor(state, {
+        id: actorId, name: m.name, side: 'neutral', kind: 'npc',
+        role: 'trader', persona: 'a trader at ' + (scene.name || scene.id),
+        base: {
+          name: m.name,
+          abilities: { str: 10, dex: 10, con: 10, int: 11, wis: 12, cha: 13 },
+          proficiencies: { skills: ['persuasion'], saves: [] }, classes: [],
+        },
+        progression: { xp: 0, levels: [] },
+        runtime: {
+          hp: 9, hpMax: 9, tempHp: 0, conditions: {}, exhaustion: 0,
+          concentratingOn: null, attuned: [], equipped: {}, inventory: [],
+          deathSaves: { successes: 0, failures: 0 }, resources: {},
+          gold: 60, pos: null,
+        },
+      });
+    });
+    if ((scene.merchants || []).length && State.refreshAllDerived) {
+      State.refreshAllDerived(state);
+    }
   }
 
   function withScene(session, ctx) {
@@ -281,6 +494,11 @@
 
     /* The mechanical truth is now settled and visible. Everything after this
        point is presentation. */
+    /* If that command moved the party, the place they have arrived in needs
+       furnishing before anyone asks what they can do here. */
+    settle(session);
+    /* And anything that happened may have moved a quest along. */
+    advanceQuests(session, result.batch);
     emit(session, 'committed', {
       command: command,
       batch: result.batch,
@@ -1141,6 +1359,8 @@
     /* Exposed so the browser offers moves with the same scene context the
        engine resolves them with. Two copies of this drifted apart once. */
     sceneCtx: sceneCtx,
+    ensureScene: ensureScene,
+    settle: settle,
     submitText: submitText,
     applyCommand: applyCommand,
     narrateBatch: narrateBatch,

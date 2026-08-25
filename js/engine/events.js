@@ -41,6 +41,7 @@
     'move',
     'item_gain', 'item_lose', 'item_equip', 'item_unequip', 'item_attune', 'item_unattune',
     'location_item_remove',   // something taken off the floor of a room
+    'scene_clear',            // a lock picked, a trap disarmed or sprung
     'gold',
     'knowledge',         // an observer learned a fact — the ONLY way knowledge spreads
     'relationship',
@@ -48,6 +49,7 @@
     'combat_start', 'combat_end', 'initiative', 'turn_start', 'turn_end', 'round',
     'death_save', 'stabilise', 'death', 'revive',
     'position',          // entered/left a location, travelled
+    'mount',             // got on or off a mount
     'time',              // minutes/hours/days passed
     'xp', 'level',
     'spawn', 'despawn',
@@ -347,6 +349,9 @@
       if (typeof e.movementUsed === 'number') {
         a.runtime.turn.movementRemaining = Math.max(0, a.runtime.turn.movementRemaining - e.movementUsed);
       }
+      /* Mounting is once per move. Recorded on the turn so it clears with the
+         turn, like every other part of the economy. */
+      if (e.mountedThisMove) a.runtime.turn.mountedThisMove = true;
     },
 
     /* Something picked up is no longer lying there. Kept separate from
@@ -357,6 +362,23 @@
       if (!loc || !loc.items) return;
       loc.items = loc.items.filter(function (it) {
         return (it.uid || it.id) !== e.uid;
+      });
+    },
+
+    /* A lock that has been picked stays picked; a trap that has been disarmed
+       or has gone off is spent. Without this an obstacle was pure theatre: a
+       successful pick left the door locked and offered the same button again
+       for ever. */
+    scene_clear: function (state, e) {
+      var loc = (state.locations || {})[e.locationId];
+      if (!loc || !loc.obstacles) return;
+      loc.obstacles = loc.obstacles.map(function (o) {
+        if (o.id !== e.obstacleId) return o;
+        var next = {};
+        Object.keys(o).forEach(function (k) { next[k] = o[k]; });
+        next.cleared = true;
+        if (e.sprung) next.sprung = true;
+        return next;
       });
     },
 
@@ -449,7 +471,14 @@
          the id and printed slugs like "screen-witnesses" at a campaign whose
          quests all have titles. */
       if (e.title) q.title = e.title;
-      if (e.objectiveId) q.objectives[e.objectiveId] = e.objectiveStatus || 'done';
+      if (e.objectiveId) {
+        /* Store the written description alongside the status when the trigger
+           supplied one, so the journal can print "reached Blackharrow Keep"
+           rather than a humanised slug. The reader accepts either shape. */
+        q.objectives[e.objectiveId] = e.objectiveText
+          ? { status: e.objectiveStatus || 'done', text: e.objectiveText }
+          : (e.objectiveStatus || 'done');
+      }
       /* A seeded quest may arrive with its objectives already listed. */
       if (e.objectives && typeof e.objectives === 'object') {
         Object.keys(e.objectives).forEach(function (k) {
@@ -499,6 +528,7 @@
         a.runtime.turn = {
           action: true, bonus: true, reaction: true, objectInteraction: true,
           movementRemaining: e.speed != null ? e.speed : 30, surprised: false,
+          mountedThisMove: false,
         };
       }
     },
@@ -562,10 +592,29 @@
     },
 
     position: function (state, e) {
+      /* Guarded: a caller that pushed a `position` event for something other
+         than a change of location would otherwise set locationId to undefined
+         and lose the party's place in the world entirely. */
+      if (e.locationId == null) return;
       state.locationId = e.locationId;
       if (e.discovered) {
         state.discoveredLocations = state.discoveredLocations || {};
         state.discoveredLocations[e.locationId] = true;
+      }
+    },
+
+    /* Getting on and off a mount. Held on the rider, because the rider is who
+       the rules care about: a mounted creature's speed, and whether it can be
+       knocked off. */
+    mount: function (state, e) {
+      var a = actor(state, e.actorId);
+      if (!a) return;
+      if (e.mountId) {
+        a.runtime.mountedOn = e.mountId;
+        a.runtime.mountName = e.mountName || e.mountId;
+      } else {
+        a.runtime.mountedOn = null;
+        a.runtime.mountName = null;
       }
     },
 

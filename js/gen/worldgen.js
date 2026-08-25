@@ -241,8 +241,55 @@
   }
 
   /** A campaign object shaped the way prompt.buildSystem expects. */
+  /**
+   * The country around a generated opening.
+   *
+   * A sandbox used to be a single location with no connections, so `travel`
+   * could never be offered there whatever the verb did — a world you cannot
+   * leave is a room. Three neighbours is enough to make the map feel like a
+   * place without pretending to be a campaign: somewhere to resupply, somewhere
+   * to get into trouble, and somewhere in between.
+   */
+  var NEIGHBOURS = [
+    { suffix: 'crossroads', name: 'the crossroads', biome: 'road',
+      description: 'Three roads and a leaning signpost. People pass; few stop.' },
+    { suffix: 'hamlet', name: 'Millbrook', biome: 'village',
+      description: 'A dozen houses, a mill, and a headman who would rather you moved on.' },
+    { suffix: 'wood', name: 'the old wood', biome: 'forest',
+      description: 'Older than the road, and less interested in it.' },
+    { suffix: 'ford', name: 'the ford', biome: 'river',
+      description: 'Shallow in summer. It is not summer.' },
+    { suffix: 'workings', name: 'the abandoned workings', biome: 'cave',
+      description: 'Someone dug here for something, and stopped.' },
+    { suffix: 'barrows', name: 'the barrow field', biome: 'crypt',
+      description: 'Low mounds in rows, most of them undisturbed.' },
+  ];
+
+  function neighboursFor(scene, opts) {
+    opts = opts || {};
+    var rng = opts.rng || new RNG('around:' + scene.id);
+    var pool = NEIGHBOURS.slice();
+    rng.shuffle(pool);
+    var chosen = pool.slice(0, 3);
+    return chosen.map(function (n, i) {
+      var id = scene.id + '-' + n.suffix;
+      return {
+        id: id, name: n.name, biome: n.biome, description: n.description,
+        timeOfDay: scene.timeOfDay, weather: scene.weather,
+        /* Everywhere connects back to the opening, and the last two to each
+           other, so the map is a loop rather than a star with dead ends. */
+        connections: [scene.id].concat(
+          chosen[(i + 1) % chosen.length] === n ? [] : [scene.id + '-' + chosen[(i + 1) % chosen.length].suffix]
+        ),
+      };
+    });
+  }
+
   function campaignFor(scene, opts) {
     opts = opts || {};
+    /* Computed once: the country around the opening feeds both the map and the
+       thread that asks the party to go and look at it. */
+    var neighbours = neighboursFor(scene, opts);
     return {
       id: 'sandbox-' + scene.id,
       title: opts.title || ('A matter at ' + scene.name),
@@ -255,11 +302,17 @@
       hardRules: [],
       locations: (function () {
         var m = {};
+        /* The opening scene, plus somewhere to go from it.
+           A one-location sandbox had no exits at all, which meant travel was
+           unreachable there however well the verb worked — and a world you
+           cannot leave is a room, not a sandbox. */
         m[scene.id] = {
           id: scene.id, name: scene.name, biome: scene.biome,
           description: scene.hook,
           timeOfDay: scene.timeOfDay, weather: scene.weather,
+          connections: neighbours.map(function (n) { return n.id; }),
         };
+        neighbours.forEach(function (n) { m[n.id] = n; });
         return m;
       })(),
       npcs: (function () {
@@ -275,6 +328,34 @@
         return m;
       })(),
       factions: {}, items: {}, characters: {},
+      /* A sandbox deserves threads of its own. Without any, the journal read
+         "No quests recorded" for the whole of a generated game, and the quest
+         engine had nothing to track. */
+      quests: [
+        {
+          id: 'sandbox-' + scene.id + '-hook',
+          title: scene.hook || ('Settle the matter at ' + scene.name + '.'),
+          status: 'open',
+          triggers: [
+            { on: 'arrive', where: scene.id, objective: 'be-here',
+              text: 'took the matter on at ' + scene.name },
+            { on: 'defeat', role: 'monster', objective: 'clear-the-way',
+              text: 'put down whatever was waiting', completes: true,
+              doneBeat: 'The matter at ' + scene.name + ' is settled.' },
+          ],
+        },
+        {
+          id: 'sandbox-' + scene.id + '-around',
+          title: 'See what lies around ' + scene.name + '.',
+          status: 'open',
+          triggers: neighbours.map(function (n) {
+            return {
+              on: 'arrive', where: n.id, objective: 'seen-' + n.suffix,
+              text: 'walked as far as ' + n.name,
+            };
+          }),
+        },
+      ],
     };
   }
 

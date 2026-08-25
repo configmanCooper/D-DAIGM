@@ -102,7 +102,14 @@ async function main() {
       const raw = localStorage.getItem(window.DND.Save.STORAGE_KEY);
       if (!raw) return null;
       const b = JSON.parse(raw);
-      return { title: b.title, savedAt: b.savedAt, campaignId: b.campaignId };
+      return {
+        title: b.title, savedAt: b.savedAt, campaignId: b.campaignId,
+        /* The revision the save ACTUALLY recorded. Comparing against a value
+           captured before the click made this a race: an AI seat or a monster
+           taking its turn in between advanced the game by one, and the test
+           failed for a reason that had nothing to do with resuming. */
+        revision: b.state && b.state.revision,
+      };
     });
     t.ok(!!saved, 'the Save button writes a slot');
     t.ok(saved && !!saved.title, 'and the slot carries a readable title', '(' + (saved && saved.title) + ')');
@@ -165,7 +172,8 @@ async function main() {
     t.eq(after.actors, before.actors, 'everyone who was there is still there');
     t.deep(after.names, before.names, 'by name');
     t.deep(after.hp, before.hp, 'carrying the hit points they had, not fresh ones');
-    t.eq(after.revision, before.revision, 'at the revision the game was saved on');
+    t.eq(after.revision, saved.revision, 'at the revision the game was saved on',
+      '(' + saved.revision + ')');
 
     /* The point of resuming is to keep playing. A restored world that offers
        no legal move is a museum piece. */

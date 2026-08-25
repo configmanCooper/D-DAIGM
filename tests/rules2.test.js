@@ -521,4 +521,242 @@ t.section('an action in the action bar costs an action');
     'but movement is a separate budget and survives');
 }
 
+
+/* ---------------------------------------------------------------------- */
+t.section('a ritual costs no spell slot');
+/*
+ * The whole point of the ritual tag in the 2014 rules: ten extra minutes buys
+ * the casting for free, so a cleric can Detect Magic all afternoon without
+ * touching their slots. Ritual casting went through the ordinary spend path,
+ * so it cost a slot AND was refused outright once the slots ran out — which is
+ * precisely the situation the rule exists to cover.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+  const Character = require('../js/engine/character.js');
+
+  const st = State.create({ seed: 'ritual' });
+  const c = Character.buildFromSpec({
+    name: 'Sister Aud', raceId: 'human', classId: 'cleric', levels: 5,
+    backgroundId: 'acolyte',
+    abilities: { str: 10, dex: 12, con: 14, int: 12, wis: 17, cha: 12 },
+    proficiencies: { skills: ['religion'] },
+  });
+  c.runtime.pos = { x: 2, y: 2 };
+  /* Named explicitly rather than left to the generator: this test is about
+     what a ritual COSTS, and it should not also depend on which spells a
+     particular cleric happened to prepare. */
+  c.progression.preparedSpells = ['detect-magic', 'cure-wounds'];
+  State.addActor(st, {
+    id: 'pc1', name: 'Sister Aud', side: 'party', kind: 'pc',
+    base: c.base, progression: c.progression, runtime: c.runtime,
+  });
+  State.addSeat(st, { id: 'p1', name: 'P1', actorId: 'pc1', control: 'human' });
+  State.refreshAllDerived(st);
+  st.combat = { active: false, round: 0, order: [], turnIndex: 0 };
+
+  const moves = Dispatch.legalMoves(st, 'pc1', {}) || [];
+  const rituals = moves.filter(m => m.step && m.step.verb === 'ritual_cast');
+  t.ok(rituals.length > 0, 'a prepared caster is offered their rituals',
+    '(' + rituals.slice(0, 2).map(m => m.what).join(' / ') + ')');
+
+  if (rituals.length) {
+    /* Burn every slot the character has. */
+    const sc = st.actors.pc1.derivedCache && st.actors.pc1.derivedCache.spellcasting;
+    const maxes = (sc && sc.slotsMax) || {};
+    st.actors.pc1.runtime.slotsSpent = {};
+    Object.keys(maxes).forEach(L => { st.actors.pc1.runtime.slotsSpent[L] = maxes[L]; });
+    const burned = JSON.stringify(st.actors.pc1.runtime.slotsSpent);
+    t.ok(Object.keys(maxes).length > 0, 'the cleric has slots to burn', burned);
+
+    const cmd = Dispatch.commandFromMove(st, 'pc1', rituals[0]);
+    const r = Dispatch.dispatch(st, { past: [], future: [] }, cmd, {});
+    t.eq(r.ok, true, 'the ritual still casts with every slot spent',
+      r.ok ? '' : JSON.stringify(r.errors || r.detail));
+    t.eq(JSON.stringify(st.actors.pc1.runtime.slotsSpent), burned,
+      'and it spends no slot of its own');
+    t.ok(st.clock >= 10, 'but it does cost the ten extra minutes',
+      '(' + st.clock + ' min)');
+  }
+
+  /* And a spell without the ritual tag cannot be cast as one. A refusal is
+     COMMITTED rather than thrown away — it is part of the record, and replays
+     — so the refusal lives on the batch, not on `ok`. */
+  const notRitual = Dispatch.dispatch(st, { past: [], future: [] }, {
+    v: 1, family: 'spell', commandId: 'nr', actorId: 'pc1',
+    stateRevision: st.revision, turnEpoch: st.turnEpoch,
+    primary: { verb: 'ritual_cast', spellId: 'cure-wounds', targetIds: ['pc1'] },
+  }, {});
+  t.ok(notRitual.batch && notRitual.batch.refused,
+    'a spell with no ritual tag cannot be cast as a ritual',
+    notRitual.batch && notRitual.batch.refused
+      ? '(' + notRitual.batch.refused.detail + ')' : '(it was allowed)');
+}
+
+
+/* ---------------------------------------------------------------------- */
+t.section('movement costs what the 2014 rules say it costs');
+/*
+ * Every one of these was found by an independent reviewer running the engine
+ * rather than reading it, and every one of them made a character faster or
+ * freer than the rules allow.
+ */
+{
+  const Combat = require('../js/engine/combat.js');
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  const Character = require('../js/engine/character.js');
+
+  const scene = (opts) => {
+    opts = opts || {};
+    const st = State.create({ seed: opts.seed || 'move' });
+    const c = Character.buildFromSpec({
+      name: 'Walker', raceId: 'human', classId: 'fighter', levels: 3,
+      backgroundId: 'soldier',
+      abilities: { str: opts.str || 16, dex: 14, con: 14, int: 10, wis: 10, cha: 10 },
+      proficiencies: { skills: ['athletics'] },
+    });
+    c.runtime.pos = { x: 2, y: 2 };
+    State.addActor(st, {
+      id: 'pc1', name: 'Walker', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime,
+    });
+    State.addActor(st, {
+      id: 'foe1', name: 'Foe', side: 'enemy', kind: 'monster',
+      base: c.base, progression: c.progression,
+      runtime: Object.assign({}, c.runtime, { pos: { x: 9, y: 9 } }),
+    });
+    State.addSeat(st, { id: 'p1', name: 'P1', actorId: 'pc1', control: 'human' });
+    State.refreshAllDerived(st);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: [{ id: 'pc1' }, { id: 'foe1' }] };
+    st.actors.pc1.runtime.turn = {
+      action: true, bonus: true, reaction: true, objectInteraction: true,
+      movementRemaining: opts.speed || 30, surprised: false, mountedThisMove: false,
+    };
+    return st;
+  };
+
+  const run = (st, primary, ctx) => Dispatch.dispatch(st, { past: [], future: [] }, {
+    v: 1, family: primary.family || 'movement', commandId: 'm' + Math.random(),
+    actorId: 'pc1', stateRevision: st.revision, turnEpoch: st.turnEpoch,
+    primary: primary.step,
+  }, ctx || {});
+
+  /* --- climbing through difficult terrain is THREE feet per foot, not four */
+  {
+    const st = scene({ seed: 'climb-difficult', speed: 30 });
+    const ctx = { difficult: () => true };
+    run(st, { step: { verb: 'climb', path: [{ x: 2, y: 2 }, { x: 3, y: 2 }] } }, ctx);
+    const left = st.actors.pc1.runtime.turn.movementRemaining;
+    t.eq(30 - left, 15,
+      'one square of climbing through difficult terrain costs 15 ft, not 20',
+      '(spent ' + (30 - left) + ')');
+  }
+
+  /* --- ordinary climbing is still two feet per foot */
+  {
+    const st = scene({ seed: 'climb-plain', speed: 30 });
+    run(st, { step: { verb: 'climb', path: [{ x: 2, y: 2 }, { x: 3, y: 2 }] } }, {});
+    const left = st.actors.pc1.runtime.turn.movementRemaining;
+    t.eq(30 - left, 10, 'and one square of ordinary climbing costs 10 ft');
+  }
+
+  /* --- a long jump needs a ten-foot run-up */
+  {
+    const st = scene({ seed: 'jump-standing', str: 16, speed: 30 });
+    const r = run(st, { step: { verb: 'jump' } }, {});
+    const beat = ((r.batch || {}).beats || []).join(' ');
+    t.ok(/8 ft/.test(beat) && /from standing/.test(beat),
+      'a jump with no run-up covers half your Strength score',
+      '(' + beat.trim() + ')');
+  }
+  {
+    const st = scene({ seed: 'jump-running', str: 16, speed: 30 });
+    /* Spend ten feet first, which is what a running start IS. */
+    st.actors.pc1.runtime.turn.movementRemaining = 20;
+    const r = run(st, { step: { verb: 'jump' } }, {});
+    const beat = ((r.batch || {}).beats || []).join(' ');
+    t.ok(/16 ft/.test(beat), 'and a full Strength score with one',
+      '(' + beat.trim() + ')');
+  }
+
+  /* --- mounting is once per move */
+  {
+    const st = scene({ seed: 'mount', speed: 60 });
+    const ctx = { mounts: [{ id: 'horse1', name: 'a horse' }] };
+    const first = run(st, { step: { verb: 'mount', targetIds: ['horse1'] } }, ctx);
+    t.ok(!(first.batch && first.batch.refused), 'you can get on a horse');
+    t.eq(st.actors.pc1.runtime.mountedOn, 'horse1', 'and you are on it');
+
+    const second = run(st, { step: { verb: 'dismount' } }, ctx);
+    t.ok(second.batch && second.batch.refused,
+      'but not get straight back off in the same move',
+      second.batch && second.batch.refused
+        ? '(' + second.batch.refused.detail + ')' : '(it was allowed)');
+  }
+
+  /* --- standing up costs half your speed */
+  {
+    const st = scene({ seed: 'stand', speed: 30 });
+    st.actors.pc1.runtime.conditions.prone = { rounds: null };
+    run(st, { step: { verb: 'stand_up' } }, {});
+    t.eq(st.actors.pc1.runtime.turn.movementRemaining, 15,
+      'standing up costs half your speed');
+    t.eq(!!st.actors.pc1.runtime.conditions.prone, false, 'and you are on your feet');
+  }
+}
+
+t.section('only a class with Ritual Casting gets rituals');
+/*
+ * The class table has always carried the ritual flag and nothing read it: the
+ * move list tested `sc.ritualCasting`, a field that does not exist, so the
+ * check was vacuously true and a PALADIN — who has no ritual casting at all in
+ * 2014 — was offered rituals. A wizard, meanwhile, rituals from the SPELLBOOK
+ * and needs nothing prepared, and could not.
+ */
+{
+  const Character = require('../js/engine/character.js');
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+
+  const ritualsFor = (classId) => {
+    const st = State.create({ seed: 'rit-' + classId });
+    const c = Character.buildFromSpec({
+      name: 'T', raceId: 'human', classId, levels: 5, backgroundId: 'sage',
+      abilities: { str: 12, dex: 14, con: 13, int: 16, wis: 16, cha: 16 },
+      proficiencies: { skills: [] },
+    });
+    c.runtime.pos = { x: 2, y: 2 };
+    State.addActor(st, {
+      id: 'pc1', name: 'T', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime,
+    });
+    State.addSeat(st, { id: 'p1', name: 'P', actorId: 'pc1', control: 'human' });
+    State.refreshAllDerived(st);
+    st.combat = { active: false, round: 0, order: [], turnIndex: 0 };
+    return {
+      st,
+      moves: (Dispatch.legalMoves(st, 'pc1', {}) || [])
+        .filter(m => m.step && m.step.verb === 'ritual_cast'),
+    };
+  };
+
+  t.eq(ritualsFor('paladin').moves.length, 0,
+    'a paladin is offered no rituals, having no Ritual Casting');
+  t.eq(ritualsFor('sorcerer').moves.length, 0, 'and neither is a sorcerer');
+  t.ok(ritualsFor('cleric').moves.length > 0, 'a cleric is');
+  const wiz = ritualsFor('wizard');
+  t.ok(wiz.moves.length > 0, 'and so is a wizard',
+    '(' + wiz.moves.length + ')');
+
+  /* A wizard's rituals come from the BOOK, not the prepared list. */
+  const sc = wiz.st.actors.pc1.derivedCache.spellcasting;
+  t.ok((sc.ritualFrom || []).length >= (sc.spellbook || []).length,
+    'a wizard may ritual anything in the spellbook, prepared or not',
+    '(' + (sc.ritualFrom || []).length + ' from a book of ' + (sc.spellbook || []).length + ')');
+}
+
 t.done();

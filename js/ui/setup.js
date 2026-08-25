@@ -169,6 +169,8 @@
     /* Rebuilt from the campaign, not restored from the save — the world's
        shape is a definition, and only where you ARE was ever saved. */
     session.locations = (campaign && campaign.locations) || null;
+    session.questDefs = questDefsFor(campaign && campaign.id);
+    if (global.DND.Game.settle) global.DND.Game.settle(session);
     /* Carry the DM's working memory across, or the model resumes with no idea
        what it has already narrated and repeats the opening scene. */
     if (loaded.session) {
@@ -959,6 +961,11 @@
        typing "I travel to Mirror Abbey" answered "there is nowhere named to
        travel to" in a campaign with ten named places. */
     session.locations = (campaign && campaign.locations) || null;
+    /* And the quest definitions, so the engine can watch for what would count
+       as progress. These are definitions too — rebuilt on load, never saved. */
+    session.questDefs = questDefsFor(W.campaign.id);
+    /* The place they start in is furnished before anyone asks what is here. */
+    if (global.DND.Game.settle) global.DND.Game.settle(session);
     if (W.opening && W.opening.scene) {
       session.locationName = W.opening.scene.name;
       session.timeOfDay = W.opening.scene.timeOfDay;
@@ -1158,6 +1165,23 @@
       if (global.console) global.console.warn('could not begin Chapter I:', e && e.message);
       return null;
     }
+  }
+
+  /**
+   * The quest definitions for a campaign.
+   *
+   * Definitions, like the gazetteer and the knowledge facts: rebuilt from the
+   * campaign on every load rather than saved, so the save carries only what the
+   * party has actually done about them.
+   */
+  function questDefsFor(campaignId) {
+    var C = global.DND && global.DND.Campaigns;
+    if (!C) return null;
+    if (campaignId === 'shen_chapter1' || campaignId === 'shen-cooper' ||
+        campaignId === 'shen_continuation') {
+      return (C.shenContinuation && C.shenContinuation.quests) || null;
+    }
+    return null;
   }
 
   function agentFor(seat) {
