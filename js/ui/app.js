@@ -156,12 +156,26 @@
       subscribe();
       S.viewerId = firstHumanSeat() || firstSeat();
       if (DND.Log) DND.Log.reset();
-      if (DND.Log) DND.Log.system('The table is set. ' + (session.campaign && session.campaign.title ? session.campaign.title + '.' : ''));
-      /* The opening scene puts hostiles in the room. Roll for initiative
-         before anyone is asked to act, so the first turn has an action economy
-         and the monsters are in the order rather than watching from it. */
-      if (DND.Game.ensureEncounter(session) && DND.Log) {
-        DND.Log.system('Roll for initiative.');
+
+      /* A resumed game is already underway: its log, its initiative and its
+         encounter all came out of the save. Re-running the opening would roll
+         a fresh initiative over the top of the one that was saved, and would
+         announce a table that has been set for hours. */
+      if (dm && dm.resumed) {
+        if (DND.Log) {
+          DND.Log.system('Resumed — ' + (session.campaign && session.campaign.title
+            ? session.campaign.title : 'your saved game') + '.');
+          (dm.warnings || []).forEach(function (w) { DND.Log.system(w); });
+        }
+        replayTranscript();
+      } else {
+        if (DND.Log) DND.Log.system('The table is set. ' + (session.campaign && session.campaign.title ? session.campaign.title + '.' : ''));
+        /* The opening scene puts hostiles in the room. Roll for initiative
+           before anyone is asked to act, so the first turn has an action economy
+           and the monsters are in the order rather than watching from it. */
+        if (DND.Game.ensureEncounter(session) && DND.Log) {
+          DND.Log.system('Roll for initiative.');
+        }
       }
       renderAll();
       // If the opening turn belongs to AI seats, let them go until a human is up.
@@ -169,6 +183,21 @@
     } catch (e) {
       fatal(e);
     }
+  }
+
+  /**
+   * Put a resumed game's story back on the page.
+   *
+   * Without this, resuming showed an empty log above a party standing in the
+   * middle of a fight, which reads as though the save had lost everything.
+   */
+  function replayTranscript() {
+    if (!session || !DND.Log) return;
+    (session.state.transcript || []).slice(-40).forEach(function (line) {
+      if (!line) return;
+      var text = typeof line === 'string' ? line : (line.text || line.narration || '');
+      if (text) DND.Log.system(text);
+    });
   }
 
   function configureBackend(model) {
@@ -424,7 +453,15 @@
       (many ? ' <span class="count">' + group.moves.length + '</span>' : '') +
       (group.cost ? ' <span class="cost">' + esc(group.cost) + '</span>' : '') +
       (group.warn ? ' <span class="warn-mark" aria-hidden="true">\u26a0</span>' : '');
-    if (group.warn) b.setAttribute('title', group.warn);
+    /* One title carrying both facts. It used to be set only for the warning,
+       which meant the bare count pill — "Attack ③" — had no explanation at
+       all and read like a cost or a shortcut number rather than "three things
+       you could attack". */
+    var tip = [];
+    if (many) tip.push(group.moves.length + ' possible targets — pick one');
+    if (group.cost) tip.push('costs your ' + group.cost);
+    if (group.warn) tip.push(group.warn);
+    if (tip.length) b.setAttribute('title', tip.join(' · '));
     /* The first nine are reachable from the keyboard, which is how anyone who
        plays more than one session will want to use this. */
     if (index < 9) b.setAttribute('data-key', String(index + 1));
@@ -481,7 +518,16 @@
     cancel.onclick = function () { pendingVerb = null; refreshActionBar(); };
     row.appendChild(cancel);
 
-    bar.appendChild(row);
+    /* Immediately after the verb that was clicked, not at the end of the bar.
+       `flex-basis: 100%` makes it take the next line, so the chooser opens
+       directly beneath the button it belongs to — appending it to the bar put
+       it below every other verb and, on a tall bar, below the composer, which
+       broke the "pick a verb, then pick a target" gesture in two. */
+    if (sourceBtn && sourceBtn.parentNode === bar) {
+      bar.insertBefore(row, sourceBtn.nextSibling);
+    } else {
+      bar.appendChild(row);
+    }
     var first = row.querySelector('.target-btn');
     if (first) first.focus();
   }
@@ -521,6 +567,8 @@
       if (e.key === 'Escape') {
         var row = document.querySelector('.target-row');
         if (row) { refreshActionBar(); e.preventDefault(); return; }
+        /* Then the drawer, if it is what is in the way. */
+        if (contextOpen()) { closeContext(); e.preventDefault(); return; }
       }
 
       if (typing) return;
@@ -557,11 +605,25 @@
     catch (e) { return []; }
   }
 
-  function ctx() { return {}; }
+  /**
+   * What the engine needs to know about the scene that is not in the state.
+   *
+   * This returned an empty object, which quietly disabled every context-driven
+   * verb in the game: `travel` needs exits and so was never once offered, in a
+   * campaign with ten connected locations. Delegated to the engine so the bar
+   * offers moves with exactly the context the resolver will judge them by.
+   */
+  function ctx() {
+    if (!session || !DND.Game || !DND.Game.sceneCtx) return {};
+    return DND.Game.sceneCtx(session);
+  }
 
   function applyMove(actorId, move) {
     var command = DND.Dispatch.commandFromMove(session.state, actorId, move, { source: 'human' });
-    DND.Game.applyCommand(session, command).then(humanActed);
+    /* The same context the move was OFFERED with. Resolving without it meant
+       a travel the bar had just offered was answered with "there is nowhere
+       named to travel to". */
+    DND.Game.applyCommand(session, command, { ctx: ctx() }).then(humanActed);
   }
 
   /**
@@ -959,8 +1021,15 @@
 
     // context tabs
     Array.prototype.forEach.call(document.querySelectorAll('#context-tabs [role="tab"]'), function (tab) {
-      tab.onclick = function () { selectTab(tab.getAttribute('data-tab')); };
+      tab.onclick = function () {
+        selectTab(tab.getAttribute('data-tab'));
+        /* On a narrow screen the tabs live inside a drawer, and choosing one
+           should not leave the player staring at the drawer. */
+        if (isDrawerLayout()) closeContext();
+      };
     });
+
+    bindClick('context-toggle', function () { toggleContext(); });
 
     bindKeyboard();
 
@@ -971,6 +1040,39 @@
   }
 
   function bindClick(id, fn) { var el = $(id); if (el) el.onclick = fn; }
+
+  /* ------------------------------------------------------- the drawer --- */
+  /*
+   * Below 960px the context column is translated off-screen and only comes
+   * back when `body.context-open` is set. The stylesheet has always said so,
+   * and there was no button and nothing to set the class — so on a tablet the
+   * character sheet, the inventory, the journal and the AI-seat controls were
+   * all simply unreachable, with no indication they existed.
+   */
+  function isDrawerLayout() {
+    return typeof window.matchMedia === 'function' &&
+      window.matchMedia('(max-width: 60rem)').matches;
+  }
+
+  function contextOpen() { return document.body.classList.contains('context-open'); }
+
+  function openContext() {
+    document.body.classList.add('context-open');
+    var t = $('context-toggle');
+    if (t) { t.setAttribute('aria-expanded', 'true'); t.textContent = 'Close ✕'; }
+    /* Send focus into the drawer, or a keyboard player opens it and is left
+       with the focus still behind it. */
+    var tab = document.querySelector('#context-tabs [aria-selected="true"]');
+    if (tab && tab.focus) tab.focus();
+  }
+
+  function closeContext() {
+    document.body.classList.remove('context-open');
+    var t = $('context-toggle');
+    if (t) { t.setAttribute('aria-expanded', 'false'); t.textContent = 'Sheet ▸'; }
+  }
+
+  function toggleContext() { if (contextOpen()) closeContext(); else openContext(); }
 
   function selectTab(name) {
     S.view = name;

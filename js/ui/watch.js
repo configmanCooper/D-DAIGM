@@ -141,11 +141,15 @@
       ctlSel.appendChild(o);
     });
     ctlSel.value = App.isAiSeat(seat) ? 'ai' : 'human';
+    ctlSel.setAttribute('aria-label', name + ' — controlled by');
     ctlRow.appendChild(lbl); ctlRow.appendChild(ctlSel);
     box.appendChild(ctlRow);
 
     // model + persona (only meaningful when AI)
     var mSel = modelSelect(seat.id, seat.agent && (seat.agent.backend === 'copilot' ? 'copilot:' + seat.agent.model : seat.agent.model));
+    /* The visible <label> beside it is a sibling with no `for=`, so it names
+       nothing; and with four seats on screen "Model" would not say whose. */
+    mSel.setAttribute('aria-label', name + ' — model');
     var mRow = document.createElement('div');
     mRow.className = 'srow';
     var mLbl = document.createElement('label'); mLbl.textContent = 'Model';

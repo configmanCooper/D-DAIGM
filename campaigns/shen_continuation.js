@@ -314,8 +314,13 @@
 
     /* Ten open quests. */
     quests.forEach(function (q) {
-      Events.push(batch, 'quest', { questId: q.id, status: q.status },
-        'Open thread: ' + q.title);
+      /* The title and the notes travel with the event. Sending only the id
+         left the journal printing "screen-witnesses  open" — a slug and a
+         status — for a campaign whose threads all have written names. */
+      Events.push(batch, 'quest', {
+        questId: q.id, status: q.status, title: q.title,
+        objectives: q.objectives, note: q.note,
+      }, 'Open thread: ' + q.title);
     });
 
     /* Companion regard for Shen, with the reason recorded alongside the number. */

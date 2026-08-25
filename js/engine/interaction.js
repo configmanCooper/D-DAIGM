@@ -134,16 +134,20 @@
 
   /* What a given exploration verb actually tests, and how hard it is before
      the scene adjusts it. */
+  /* `cost` is what the move claims in the action bar AND what the resolver
+     spends. They used to be declared in two places — the label in legalMoves,
+     the (absent) spend in the resolver — so "Search the area · action" cost
+     nothing and a character could search the room and still attack. */
   var EXPLORE = {
-    search: { skill: 'investigation', band: 'medium', verbing: 'searching' },
-    investigate: { skill: 'investigation', band: 'medium', verbing: 'examining' },
-    perceive: { skill: 'perception', band: 'medium', verbing: 'watching' },
-    unlock: { skill: 'sleightOfHand', band: 'hard', verbing: 'picking the lock' },
-    disarm_trap: { skill: 'sleightOfHand', band: 'hard', verbing: 'disarming it' },
-    track: { skill: 'survival', band: 'medium', verbing: 'tracking' },
-    forage: { skill: 'survival', band: 'easy', verbing: 'foraging' },
-    read: { skill: 'investigation', band: 'easy', verbing: 'reading' },
-    interact: { skill: null, band: 'trivial', verbing: 'handling it' },
+    search: { skill: 'investigation', band: 'medium', verbing: 'searching', cost: 'action' },
+    investigate: { skill: 'investigation', band: 'medium', verbing: 'examining', cost: 'time' },
+    perceive: { skill: 'perception', band: 'medium', verbing: 'watching', cost: 'action' },
+    unlock: { skill: 'sleightOfHand', band: 'hard', verbing: 'picking the lock', cost: 'action' },
+    disarm_trap: { skill: 'sleightOfHand', band: 'hard', verbing: 'disarming it', cost: 'action' },
+    track: { skill: 'survival', band: 'medium', verbing: 'tracking', cost: 'time' },
+    forage: { skill: 'survival', band: 'easy', verbing: 'foraging', cost: 'time' },
+    read: { skill: 'investigation', band: 'easy', verbing: 'reading', cost: 'action' },
+    interact: { skill: null, band: 'trivial', verbing: 'handling it', cost: 'object' },
   };
 
   function resolveExploration(state, command, ctx) {
@@ -170,6 +174,14 @@
 
     var spec = EXPLORE[verb];
     if (!spec) return Events.refuse(b, 'unknown-verb', 'exploration does not handle ' + verb);
+
+    /* In a fight, an action costs an action. Search and Look-and-listen are
+       both offered labelled "action" and neither spent one, so a character
+       could search the room and still take a full attack — and keep searching
+       all round. Out of combat there is no economy to spend. */
+    if (state.combat && state.combat.active && spec.cost === 'action') {
+      Events.push(b, 'action_economy', { actorId: command.actorId, action: false }, '');
+    }
 
     if (!spec.skill) {
       Events.push(b, 'note', { text: verb, actorId: command.actorId },
@@ -354,7 +366,11 @@
     var a = actor(state, actorId);
     if (!a || downed(a)) return [];
     var inCombat = !!(state.combat && state.combat.active);
-    var moves = [
+    /* Both cost an action, so neither may be offered once the action is
+       spent — the bar used to keep offering Search after an attack, and the
+       resolver used to let it through. */
+    var spent = inCombat && a.runtime && a.runtime.turn && a.runtime.turn.action === false;
+    var moves = spent ? [] : [
       mv('search', 'Search the area', 'action'),
       mv('perceive', 'Look and listen', 'action'),
     ];

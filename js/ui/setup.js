@@ -68,6 +68,7 @@
     W = { campaign: null, seed: '', seats: [] };
     seatSeq = 0;
     renderCampaigns();
+    renderResume();
     renderDeathPolicies();
     addSeat();      // start with one seat
     var addBtn = document.getElementById('btn-add-seat');
@@ -80,6 +81,115 @@
   }
 
   function close() { var m = document.getElementById('modal-setup'); if (m) m.classList.add('hidden'); }
+
+  /* ----------------------------------------------------------- resume --- */
+  /**
+   * Offer the saved game back.
+   *
+   * The engine has had `Save.saveLocal` and `Save.loadLocal` since the first
+   * build, and the top bar has had a Save button — but nothing ever called
+   * `loadLocal`, so Save was a one-way door: a player could write a save and
+   * had no way in the interface to ever open it again.
+   */
+  function renderResume() {
+    var step = document.getElementById('setup-step-resume');
+    var host = document.getElementById('resume-card');
+    if (!step || !host) return;
+
+    var Save = global.DND && global.DND.Save;
+    if (!Save || !Save.hasLocal || !Save.hasLocal()) { step.hidden = true; return; }
+
+    var peek = null;
+    try { peek = JSON.parse(localStorage.getItem(Save.STORAGE_KEY)); } catch (e) { peek = null; }
+    if (!peek) { step.hidden = true; return; }
+
+    var title = peek.title || (peek.digest && peek.digest.campaign) || peek.campaignId || 'a saved game';
+    var when = peek.savedAt ? new Date(peek.savedAt) : null;
+    var whenText = when && !isNaN(when.getTime())
+      ? when.toLocaleString()
+      : 'at an unrecorded time';
+    var who = (peek.digest && peek.digest.sheets)
+      ? Object.keys(peek.digest.sheets).map(function (k) {
+        return (peek.digest.sheets[k] && peek.digest.sheets[k].name) || k;
+      }).filter(Boolean)
+      : [];
+
+    step.hidden = false;
+    host.innerHTML = '';
+
+    var card = document.createElement('button');
+    card.className = 'campaign-card resume-card';
+    card.type = 'button';
+    card.id = 'btn-resume';
+    card.innerHTML =
+      '<strong>Resume — ' + esc(String(title)) + '</strong>' +
+      '<span class="sub">Saved ' + esc(whenText) + '.</span>' +
+      (who.length ? '<span class="sub">' + esc(who.join(', ')) + '</span>' : '');
+    card.onclick = resumeGame;
+    host.appendChild(card);
+
+    var discard = document.createElement('button');
+    discard.className = 'ghost';
+    discard.type = 'button';
+    discard.id = 'btn-discard-save';
+    discard.textContent = 'Discard this save and start fresh';
+    discard.onclick = function () {
+      if (Save.clearLocal) Save.clearLocal();
+      renderResume();
+    };
+    host.appendChild(discard);
+  }
+
+  function resumeGame() {
+    var Save = global.DND && global.DND.Save;
+    var Game = global.DND && global.DND.Game;
+    var box = document.getElementById('setup-validation');
+    if (!Save || !Game) return;
+
+    var loaded;
+    try { loaded = Save.loadLocal(); }
+    catch (e) { loaded = null; }
+    if (!loaded) {
+      if (box) { box.className = 'validation'; box.textContent = 'That save could not be read.'; }
+      return;
+    }
+
+    /* Prefer the campaign the session recorded — a generated sandbox names
+       itself, and matching only on the static list threw that away. */
+    var known = campaigns().filter(function (c) {
+      return c.id === (loaded.campaign && loaded.campaign.id);
+    })[0];
+    var campaign = known || loaded.campaign || campaigns().filter(function (c) {
+      return c.id === loaded.state.campaignId;
+    })[0] || { id: loaded.state.campaignId || 'sandbox', title: 'Saved game' };
+
+    var session = Game.createSession({
+      state: loaded.state, store: loaded.store, campaign: campaign,
+    });
+    /* Rebuilt from the campaign, not restored from the save — the world's
+       shape is a definition, and only where you ARE was ever saved. */
+    session.locations = (campaign && campaign.locations) || null;
+    /* Carry the DM's working memory across, or the model resumes with no idea
+       what it has already narrated and repeats the opening scene. */
+    if (loaded.session) {
+      session.recentNarration = loaded.session.recentNarration || [];
+      session.pinned = loaded.session.pinned || [];
+      session.summaries = loaded.session.summaries || [];
+    }
+
+    close();
+    if (onBeginCb) {
+      onBeginCb(session, {
+        model: (document.getElementById('dm-model') || {}).value || '',
+        tone: (loaded.state.meta && loaded.state.meta.tone) || 'heroic',
+        difficulty: (loaded.state.meta && loaded.state.meta.difficulty) || 'standard',
+        deathPolicy: (loaded.state.meta && loaded.state.meta.deathPolicy) || 'standard',
+        limits: (loaded.state.meta && loaded.state.meta.contentLimits) || [],
+        resumed: true,
+        warnings: loaded.warnings || [],
+      });
+    }
+  }
 
   function renderCampaigns() {
     var host = document.getElementById('campaign-list');
@@ -191,22 +301,27 @@
           esc(p.name) + ' — ' + esc(p.raceId) + ' ' + esc(p.classId) + '</option>';
       }).join('');
 
+      /* Each control gets an explicit aria-label. The visible <label> here is
+         a sibling with no `for=`, so it names nothing as far as assistive
+         technology is concerned — and with up to four identical seat blocks on
+         screen, "Model" alone would not say whose model it is anyway. */
+      var seatLabel = esc(seat.name) + ' — ';
       box.innerHTML =
         '<div class="shead"><span class="stitle">' + esc(seat.name) + '</span>' +
           (W.seats.length > 1 ? '<button class="remove" type="button" data-act="remove">Remove</button>' : '') + '</div>' +
-        '<div class="fieldrow"><label>Name</label><input data-f="name" value="' + esc(seat.name) + '"></div>' +
+        '<div class="fieldrow"><label>Name</label><input data-f="name" aria-label="' + seatLabel + 'name" value="' + esc(seat.name) + '"></div>' +
         '<div class="fieldrow"><label>Controlled by</label>' +
-          '<select data-f="control"><option value="human"' + (seat.control === 'human' ? ' selected' : '') + '>A person</option>' +
+          '<select data-f="control" aria-label="' + seatLabel + 'controlled by"><option value="human"' + (seat.control === 'human' ? ' selected' : '') + '>A person</option>' +
           '<option value="ai"' + (seat.control === 'ai' ? ' selected' : '') + '>A model</option></select></div>' +
         '<div class="fieldrow ai-only"' + (seat.control === 'ai' ? '' : ' hidden') + '><label>Model</label>' +
-          '<select class="model-select" data-role="seat-model" data-f="model">' + modelOptions(seat.model) + '</select></div>' +
+          '<select class="model-select" data-role="seat-model" data-f="model" aria-label="' + seatLabel + 'model">' + modelOptions(seat.model) + '</select></div>' +
         '<div class="fieldrow ai-only"' + (seat.control === 'ai' ? '' : ' hidden') + '><label>Persona</label>' +
-          '<input data-f="persona" value="' + esc(seat.persona) + '" placeholder="Optional. e.g. cautious tactician"></div>' +
+          '<input data-f="persona" aria-label="' + seatLabel + 'persona" value="' + esc(seat.persona) + '" placeholder="Optional. e.g. cautious tactician"></div>' +
         '<div class="fieldrow"><label>Character</label>' +
-          '<select data-f="chartype"><option value="pregen"' + (seat.char.kind === 'pregen' ? ' selected' : '') + '>Pregenerated (fast path)</option>' +
+          '<select data-f="chartype" aria-label="' + seatLabel + 'character type"><option value="pregen"' + (seat.char.kind === 'pregen' ? ' selected' : '') + '>Pregenerated (fast path)</option>' +
           '<option value="build"' + (seat.char.kind === 'build' ? ' selected' : '') + '>Build a character</option></select></div>' +
         '<div class="fieldrow pregen-only"' + (seat.char.kind === 'pregen' ? '' : ' hidden') + '><label>Hero</label>' +
-          '<select data-f="pregen">' + pregenOpts + '</select></div>' +
+          '<select data-f="pregen" aria-label="' + seatLabel + 'hero">' + pregenOpts + '</select></div>' +
         '<div class="build-host"></div>';
 
       // wire fields
@@ -657,12 +772,19 @@
     if (!choice) { wrap.innerHTML = '<span class="pool-note">No class skill choices.</span>'; return; }
     var C = Chargen();
     var suggested = suggestedSkillsFor(b);
-    wrap.innerHTML = '<div class="pool-note">Choose ' + choice.count + ':</div>' + choice.from.map(function (sk) {
+    /* Not `choice.from` directly: a bard's is the sentinel ['any'], meaning
+       any skill in the game, and rendering it literally produced one checkbox
+       named "any" against a requirement to choose three — so a hand-built
+       bard could never satisfy validation and Begin stayed disabled. */
+    var pool = (C && C.skillsFor) ? C.skillsFor(cd) : choice.from;
+    var SK = (Data() && Data().SKILLS) || {};
+    var skillName = function (id) { return (SK[id] && SK[id].name) || id; };
+    wrap.innerHTML = '<div class="pool-note">Choose ' + choice.count + ':</div>' + pool.map(function (sk) {
       var on = b.skills.indexOf(sk) >= 0;
       var reason = (C && C.skillReason(sk, b.classId)) || '';
       var tag = suggested.indexOf(sk) >= 0 ? ' <span class="tag suggested">suggested</span>' : '';
       return '<label class="ctxtoggle skillrow"><input type="checkbox" data-sk="' + sk + '"' + (on ? ' checked' : '') + '> ' +
-        '<span class="skname">' + esc(sk) + tag + '</span>' +
+        '<span class="skname">' + esc(skillName(sk)) + tag + '</span>' +
         (reason ? '<span class="skwhy">' + esc(reason) + '</span>' : '') + '</label>';
     }).join('');
     wrap.querySelectorAll('[data-sk]').forEach(function (cb) {
@@ -809,6 +931,12 @@
          and nothing ever called applyTo — a labelled empty shell. */
       var built = buildShenContinuation(state, dm);
       if (built) { campaign = built.campaign; store = built.store; }
+    } else if (W.campaign.id === 'shen_chapter1') {
+      /* Offered from the first build and never implemented: it used to fall
+         through to the generic path below and produce one Shen in an unnamed
+         void with no NPCs, no locations and an empty log. */
+      var ch1 = buildShenChapterOne(state, dm);
+      if (ch1) { campaign = ch1.campaign; store = ch1.store; }
     } else if (W.campaign.id === 'sandbox' && Worldgen) {
       try {
         var opening = Worldgen.generateOpening(state, {
@@ -824,6 +952,13 @@
     }
 
     var session = Game.createSession({ state: state, store: store, campaign: campaign });
+    /* The gazetteer, so `travel` has somewhere to go. Definitions come from
+       the campaign and are rebuilt on load, exactly like the knowledge facts —
+       the save carries where you ARE, not what the world contains. Without
+       this, `ctx.exits` was always empty, `travel` was never offered, and
+       typing "I travel to Mirror Abbey" answered "there is nowhere named to
+       travel to" in a campaign with ten named places. */
+    session.locations = (campaign && campaign.locations) || null;
     if (W.opening && W.opening.scene) {
       session.locationName = W.opening.scene.name;
       session.timeOfDay = W.opening.scene.timeOfDay;
@@ -901,6 +1036,126 @@
       return { campaign: pub, store: store };
     } catch (e) {
       if (global.console) global.console.warn('could not resume the Shen campaign:', e && e.message);
+      return null;
+    }
+  }
+
+  /**
+   * Chapter I — the making of a paladin.
+   *
+   * This card was offered from the first build and was never implemented: it
+   * fell through to the generic path and produced one pregenerated Shen
+   * standing in an unnamed void with no NPCs, no locations, no quests and an
+   * empty log. It is the same campaign bible as the continuation, wound back
+   * to the start of the surviving record: Shen at home in Dunmere, at first
+   * level, with his mentor beside him and nothing yet gone wrong.
+   */
+  function buildShenChapterOne(state, dm) {
+    var C = global.DND.Campaigns;
+    var Knowledge = global.DND.Knowledge;
+    var State = global.DND.State;
+    var Character = global.DND.Character;
+    if (!C || !C.shenCooper || !Knowledge || !Character) {
+      if (global.console) global.console.warn('the Shen campaign data did not load');
+      return null;
+    }
+    try {
+      var pub = C.shenCooper;
+      var bible = C.shenCooperBible || {};
+      var store = Knowledge.makeStore();
+      Knowledge.defineFacts(store,
+        (bible.FACTS || []).concat(bible.EARNED || [], bible.SECRETS || []));
+      store.known = state.knowledge;
+
+      State.clearCast(state);
+      state.seats = [];
+      state.controllers = {};
+
+      /* Home, at the beginning. */
+      state.locationId = 'dunmere';
+      state.discoveredLocations = { dunmere: true };
+
+      /* Shen as the record first has him: a first-level paladin, before any
+         of it. The continuation's level-3 Shen is where the story ENDS up.
+
+         These records are already full layered characters (base/progression/
+         runtime), so the name and the class live under `base` — reading them
+         off the top level produced actors with empty names. */
+      var cast = [];
+      var chapterOne = [
+        { id: 'shen', levels: 1 },
+        { id: 'aldren', levels: 3 },
+      ];
+      chapterOne.forEach(function (entry) {
+        var c = pub.characters && pub.characters[entry.id];
+        var cb = c && c.base;
+        if (!cb) return;
+        var spec = {
+          name: cb.name, raceId: cb.raceId || 'human', subraceId: cb.subraceId || null,
+          classId: (cb.classes && cb.classes[0] && cb.classes[0].classId) || 'paladin',
+          levels: entry.levels,
+          backgroundId: cb.backgroundId || 'soldier',
+          abilities: cb.abilities,
+          proficiencies: cb.proficiencies || { skills: [] },
+        };
+        var layers = Character.buildFromSpec(spec);
+        if (cb.backstory) layers.base.backstory = cb.backstory;
+        State.addActor(state, {
+          id: entry.id, name: cb.name, side: 'party', kind: 'pc',
+          role: c.role || spec.classId,
+          base: layers.base, progression: layers.progression, runtime: layers.runtime,
+        });
+        cast.push(entry.id);
+      });
+      if (!cast.length) return null;
+
+      /* The people of Dunmere, so the town is a place and not a label. */
+      var here = ['darren-cooper', 'maera-venn'];
+      here.forEach(function (id) {
+        var n = pub.npcs && pub.npcs[id];
+        if (!n || (State.hasActor && State.hasActor(state, id))) return;
+        State.addActor(state, {
+          id: id, name: n.name, side: n.side || 'neutral', kind: 'npc',
+          role: n.role, persona: n.role,
+          base: {
+            name: n.name, abilities: n.abilities ||
+              { str: 10, dex: 10, con: 10, int: 11, wis: 12, cha: 11 },
+            proficiencies: { skills: [], saves: [] }, classes: [],
+          },
+          progression: { xp: 0, levels: [] },
+          runtime: {
+            hp: 9, hpMax: 9, tempHp: 0, conditions: {}, exhaustion: 0,
+            concentratingOn: null, attuned: [], equipped: {}, inventory: [],
+            deathSaves: { successes: 0, failures: 0 }, resources: {}, gold: 0, pos: null,
+          },
+        });
+      });
+      State.refreshAllDerived(state);
+
+      W.seats.forEach(function (seat, i) {
+        var actorId = cast[i];
+        if (!actorId) return;
+        State.addSeat(state, {
+          id: seat.id, name: seat.name, actorId: actorId,
+          control: seat.control === 'ai' ? 'playerAI' : 'human',
+          agent: seat.control === 'ai' ? agentFor(seat) : null,
+        });
+        seat.actorId = actorId;
+      });
+      cast.slice(W.seats.length).forEach(function (id) {
+        State.setController(state, id, { kind: 'companionPolicy', seatId: null, agent: null });
+      });
+      state.activeActorId = (state.seats[0] && state.seats[0].actorId) || cast[0];
+
+      var loc = pub.locations && pub.locations.dunmere;
+      W.shenScene = {
+        name: (loc && loc.name) || 'Dunmere',
+        timeOfDay: (loc && loc.timeOfDay) || 'day',
+        weather: (loc && loc.weather) || 'clear',
+      };
+      return { campaign: pub, store: store };
+    } catch (e) {
+      if (global.console) global.console.warn('could not begin Chapter I:', e && e.message);
       return null;
     }
   }

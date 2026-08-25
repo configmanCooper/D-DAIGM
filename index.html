@@ -57,6 +57,11 @@
       <div id="battle-view" hidden></div>
     </section>
 
+    <!-- The drawer handle for narrow screens. Below 960px the context column
+         slides off-screen entirely; without this button the sheet, inventory,
+         journal and AI seats were simply unreachable on a tablet. -->
+    <button type="button" id="context-toggle" aria-controls="context-col" aria-expanded="false">Sheet ▸</button>
+
     <!-- --------------------------------------------- RIGHT: context panel -->
     <section id="context-col" aria-label="Character context">
       <div id="context-tabs" role="tablist" aria-label="Context panels">
@@ -86,6 +91,14 @@
     <p class="sub">A tabletop the whole way down: the engine rolls every die, the model only
       finds the words. Up to four seats, each a person or a model. Nothing the party has not
       learned ever reaches the page.</p>
+
+    <!-- A saved game, if one exists. Hidden until the wizard finds one: the
+         game wrote saves to localStorage from the first build but never
+         offered a way back into them, so Save was a one-way door. -->
+    <div class="setup-step" id="setup-step-resume" hidden>
+      <h2>Carry on</h2>
+      <div id="resume-card"></div>
+    </div>
 
     <div class="setup-step" id="setup-step-campaign">
       <h2>1 · Choose a campaign</h2>

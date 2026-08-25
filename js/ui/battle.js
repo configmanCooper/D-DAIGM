@@ -23,11 +23,20 @@
      between it and the initiative rail. Every hit-test and every drawing
      routine reads this at call time, so they all follow. */
   var CELL_PX = 44;
-  var CELL_MIN = 26, CELL_MAX = 72;
+  /* 40, not 26: below about forty pixels the composited token art stops being
+     a creature and becomes a coloured dot with a letter on it. */
+  var CELL_MIN = 40, CELL_MAX = 72;
 
   /**
-   * Choose a cell size so the grid fills the space without needing to scroll,
-   * clamped so tokens stay legible on a big screen and readable on a small one.
+   * Choose a cell size so the grid fills the space, clamped so tokens stay
+   * legible on a big screen and readable on a small one.
+   *
+   * Biased toward WIDTH, and the wrap scrolls vertically when it must. Sizing
+   * by whichever dimension was smaller meant the height cap (46vh in combat)
+   * decided everything: cells collapsed to the floor, the canvas shrank to a
+   * postage stamp in a wide black field, and the token art — a clipped
+   * portrait disc with an allegiance rim and a hit-point arc — became an
+   * unreadable smudge with a letter on it.
    */
   function fitCell(ext) {
     var wrap = document.getElementById('battle-canvas-wrap');
@@ -36,7 +45,12 @@
     if (!w || !h) return 44;
     var byW = Math.floor(w / Math.max(1, ext.w));
     var byH = Math.floor(h / Math.max(1, ext.h));
-    return Math.max(CELL_MIN, Math.min(CELL_MAX, Math.min(byW, byH)));
+    /* Fit the whole battlefield on screen when that can be done at a size
+       where a token still reads as a creature; otherwise take the legible size
+       and let the panel scroll. Taking `min(byW, byH)` unconditionally let the
+       height cap decide everything and collapsed the cells to the floor. */
+    var cell = Math.min(byW, Math.max(byH, CELL_MIN));
+    return Math.max(CELL_MIN, Math.min(CELL_MAX, cell));
   }
 
   var sel = null;         // selected own actor id (for movement)
@@ -84,8 +98,11 @@
       if (p) { xs.push(p.x); ys.push(p.y); }
     });
     if (!xs.length) return { minX: 0, minY: 0, w: 12, h: 10 };
-    var minX = Math.min.apply(null, xs) - 2, maxX = Math.max.apply(null, xs) + 2;
-    var minY = Math.min.apply(null, ys) - 2, maxY = Math.max.apply(null, ys) + 2;
+    /* One cell of margin, not two. Two manufactured an 8x11 grid out of four
+       bandits standing together, and every wasted row drove the cell size —
+       and so the legibility of the tokens — further down. */
+    var minX = Math.min.apply(null, xs) - 1, maxX = Math.max.apply(null, xs) + 1;
+    var minY = Math.min.apply(null, ys) - 1, maxY = Math.max.apply(null, ys) + 1;
     return { minX: minX, minY: minY, w: (maxX - minX + 1), h: (maxY - minY + 1) };
   }
 
@@ -131,6 +148,28 @@
 
     renderInitiative(App, combat, actors);
     renderMirror(App, ext, actors, occ);
+    scrollActiveIntoView(ext, actors, combat.activeActorId);
+  }
+
+  /**
+   * Keep whoever is acting on screen.
+   *
+   * When the battlefield is taller than the panel, the map scrolls — and a
+   * player should never have to go looking for their own character to see what
+   * is happening to it.
+   */
+  function scrollActiveIntoView(ext, actors, activeId) {
+    var wrap = document.getElementById('battle-canvas-wrap');
+    var a = activeId && actors[activeId];
+    if (!wrap || !a || !a.pos) return;
+    if (wrap.scrollHeight <= wrap.clientHeight && wrap.scrollWidth <= wrap.clientWidth) return;
+
+    var cy = (a.pos.y - ext.minY) * CELL_PX + CELL_PX / 2;
+    var cx = (a.pos.x - ext.minX) * CELL_PX + CELL_PX / 2;
+    var wantTop = cy - wrap.clientHeight / 2;
+    var wantLeft = cx - wrap.clientWidth / 2;
+    wrap.scrollTop = Math.max(0, Math.min(wantTop, wrap.scrollHeight - wrap.clientHeight));
+    wrap.scrollLeft = Math.max(0, Math.min(wantLeft, wrap.scrollWidth - wrap.clientWidth));
   }
 
   function drawGrid(ctx, ext) {

@@ -197,6 +197,16 @@ async function main() {
        who has swung may still have a bonus action, and the game is right not
        to take it away from them. */
     t.section('the turn passes to everyone else');
+    /* Whether the sandbox opens with a fight is a roll of the dice, and "End
+       turn" only exists in combat. Asserting it unconditionally made this
+       suite fail roughly one run in ten on a peaceful opening, which reads as
+       flakiness rather than the deliberate variety it actually is. */
+    const inFight = await page.evaluate(() => {
+      const s = window.DND.App.session;
+      return !!(s.state.combat && s.state.combat.active);
+    });
+    t.ok(true, 'the opening scene is ' + (inFight ? 'a fight' : 'peaceful'));
+
     await page.evaluate(() => {
       const end = Array.from(document.querySelectorAll('#actionbar button'))
         .filter(b => /end turn/i.test(b.textContent))[0];
@@ -222,8 +232,13 @@ async function main() {
     });
     t.ok(turnState.epoch > 0, 'the turn epoch advances in the real game, not just in tests',
       '(' + turnState.epoch + ')');
-    t.ok(turnState.enemyActed || turnState.enemyDamage,
-      'the monsters take their own turns after the player takes theirs');
+    if (inFight) {
+      t.ok(turnState.enemyActed || turnState.enemyDamage,
+        'the monsters take their own turns after the player takes theirs');
+    } else {
+      t.ok(!!turnState.active, 'and somebody holds the initiative out of combat',
+        '(' + turnState.active + ')');
+    }
 
     t.section('typing a turn in your own words');
     const beforeType = await page.evaluate(() => window.DND.App.session.state.revision);

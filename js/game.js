@@ -229,12 +229,41 @@
    * Used by free text, by UI buttons, and by AI seats — the single path the
    * whole trust model depends on.
    */
+  /**
+   * What the resolvers need to know about the scene that is not in the state.
+   *
+   * Built here rather than at each call site so every path gets it — a button
+   * press, a typed sentence, an AI seat's decision. When only the UI supplied
+   * it (and it supplied nothing), `travel` was never offered and never
+   * resolved, in campaigns with ten connected locations.
+   */
+  function sceneCtx(session) {
+    var out = {};
+    var gaz = session.locations;
+    var here = gaz && session.state.locationId && gaz[session.state.locationId];
+    if (here && here.connections) {
+      out.exits = here.connections.map(function (id) {
+        var to = gaz[id];
+        return { id: id, name: (to && to.name) || id };
+      });
+    }
+    return out;
+  }
+
+  function withScene(session, ctx) {
+    var scene = sceneCtx(session);
+    if (!ctx) return scene;
+    Object.keys(scene).forEach(function (k) { if (ctx[k] == null) ctx[k] = scene[k]; });
+    return ctx;
+  }
+
   function applyCommand(session, command, opts) {
     opts = opts || {};
     session.busy = true;
     emit(session, 'thinking', { actorId: command.actorId, stage: 'resolving' });
 
-    var result = Dispatch.dispatch(session.state, session.history, command, opts.ctx);
+    var result = Dispatch.dispatch(session.state, session.history, command,
+      withScene(session, opts.ctx));
     session.busy = false;
 
     if (!result.ok) {
@@ -1109,6 +1138,9 @@
     derivedFor: derivedFor,
     selfView: selfView,
     optionsFor: optionsFor,
+    /* Exposed so the browser offers moves with the same scene context the
+       engine resolves them with. Two copies of this drifted apart once. */
+    sceneCtx: sceneCtx,
     submitText: submitText,
     applyCommand: applyCommand,
     narrateBatch: narrateBatch,

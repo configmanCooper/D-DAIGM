@@ -137,11 +137,17 @@ async function main() {
         .filter(b => !b.textContent.trim() && !b.getAttribute('aria-label') && !b.title)
         .length;
       out.imagesWithoutAlt = q('img').filter(i => !i.alt).length;
-      out.inputsWithoutLabel = q('input,select,textarea').filter(i => {
+      /* Named, not just counted: a bare number tells you there is a problem
+         and nothing about where, so it never got fixed. */
+      out.unlabelledInputs = q('input,select,textarea').filter(i => {
         if (i.getAttribute('aria-label') || i.getAttribute('aria-labelledby')) return false;
         if (i.id && document.querySelector('label[for="' + i.id + '"]')) return false;
         return !i.closest('label');
-      }).length;
+      }).map(i => i.tagName.toLowerCase() +
+        (i.id ? '#' + i.id : '') +
+        (i.name ? '[name=' + i.name + ']' : '') +
+        (i.placeholder ? ' "' + i.placeholder.slice(0, 30) + '"' : ''));
+      out.inputsWithoutLabel = out.unlabelledInputs.length;
       out.landmarks = q('main,nav,aside,header,footer,[role]').length;
       out.liveRegions = q('[aria-live]').length;
       out.focusable = q('button,a[href],input,select,textarea,[tabindex]:not([tabindex="-1"])').length;

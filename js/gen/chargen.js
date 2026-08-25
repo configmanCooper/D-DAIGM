@@ -586,6 +586,11 @@
     randomName: randomName,
     mergedAsi: mergedAsi,
     skillReason: skillReason,
+    /* Exposed because the setup wizard needs the same expansion of the bard's
+       `['any']` sentinel that generation does — it was rendering a single
+       checkbox labelled "any" against a requirement to choose three, so a
+       hand-built bard could never satisfy validation. */
+    skillsFor: function (cls) { return skillPool(Data(), cls); },
   };
 
   global.DND = global.DND || {};

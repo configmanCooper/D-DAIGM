@@ -40,9 +40,21 @@
       commandVersion: 1,
       rngAlgorithm: 'mulberry32',
       savedAt: new Date().toISOString(),
+      /* The caller passes a title (`saveLocal` sends the campaign's), and it
+         used to be dropped on the floor — so the resume screen had nothing to
+         name the save with but a bare campaign id. */
+      title: meta.title || (session.campaign && session.campaign.title) || '',
       note: meta.note || '',
       campaignId: state.campaignId,
       campaignVersion: (session.campaign && session.campaign.version) || null,
+      /* The identity of the campaign as the SESSION knows it, which is not
+         always `state.campaignId`: a generated sandbox keeps the generic id on
+         the state but gives the session its own id and title ("A matter at the
+         hollow barrow"). Without this, resuming a generated world came back as
+         a nameless generic sandbox. */
+      campaign: session.campaign
+        ? { id: session.campaign.id, title: session.campaign.title || '' }
+        : null,
 
       digest: buildDigest(session),
       state: snapshotState(state),
@@ -217,6 +229,10 @@
       store: store,
       session: blob.session || { recentNarration: [], pinned: [], summaries: [] },
       digest: blob.digest,
+      /* How the session knew its own campaign. A generated sandbox keeps the
+         generic id on the state but names itself something specific, and
+         without this a resumed world came back as a nameless sandbox. */
+      campaign: blob.campaign || null,
       warnings: warnings,
     };
   }

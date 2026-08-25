@@ -445,7 +445,17 @@
       state.quests = state.quests || {};
       var q = state.quests[e.questId] = state.quests[e.questId] || { id: e.questId, status: 'open', objectives: {} };
       if (e.status) q.status = e.status;
+      /* The written name of the thread. Without this the journal fell back to
+         the id and printed slugs like "screen-witnesses" at a campaign whose
+         quests all have titles. */
+      if (e.title) q.title = e.title;
       if (e.objectiveId) q.objectives[e.objectiveId] = e.objectiveStatus || 'done';
+      /* A seeded quest may arrive with its objectives already listed. */
+      if (e.objectives && typeof e.objectives === 'object') {
+        Object.keys(e.objectives).forEach(function (k) {
+          if (q.objectives[k] == null) q.objectives[k] = e.objectives[k];
+        });
+      }
       if (e.note) { q.notes = q.notes || []; q.notes.push(e.note); }
     },
 

@@ -461,4 +461,64 @@ t.section('a spell that boosts an ally refreshes the ALLY');
     'the ally\u2019s armour class actually goes up, not the caster\u2019s');
 }
 
+
+/* ---------------------------------------------------------------------- */
+t.section('an action in the action bar costs an action');
+/*
+ * "Search the area" and "Look and listen" were both offered labelled "action"
+ * and neither spent one, because the cost was declared in `legalMoves` and the
+ * spend was supposed to happen in the resolver, which never did it. A
+ * character could search the room and still take a full attack, then search
+ * again, all in the same turn. The cost now lives on the EXPLORE table, which
+ * both the offer and the resolver read.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+
+  const mk = (id, name, side) => ({
+    id, name, side,
+    base: {
+      name, raceId: 'human', classes: [{ classId: 'fighter', levels: 3 }],
+      abilities: { str: 16, dex: 14, con: 14, int: 10, wis: 12, cha: 10 },
+      proficiencies: { skills: ['investigation'], saves: [] },
+    },
+    progression: { xp: 900, levels: [{ level: 1, classId: 'fighter', hpGained: 10, choice: 'average' }] },
+    runtime: {
+      hp: 20, hpMax: 20, tempHp: 0, conditions: {}, exhaustion: 0, concentratingOn: null,
+      attuned: [], equipped: {}, inventory: [], deathSaves: { successes: 0, failures: 0 },
+      resources: {}, gold: 0, pos: { x: 1, y: 1 },
+      turn: { action: true, bonus: true, reaction: true, objectInteraction: true, movementRemaining: 30, surprised: false },
+    },
+  });
+
+  const st = State.create({ seed: 'search-economy' });
+  State.addActor(st, mk('hero', 'Hero', 'party'));
+  State.addActor(st, mk('foe', 'Foe', 'enemy'));
+  State.addSeat(st, { id: 'p1', name: 'P1', actorId: 'hero', control: 'human' });
+  State.refreshAllDerived(st);
+  st.combat = { active: true, order: [{ id: 'hero' }, { id: 'foe' }], turnIndex: 0, round: 1 };
+  st.activeActorId = 'hero';
+
+  const before = Dispatch.legalMoves(st, 'hero', {});
+  const search = before.filter(m => m.step && m.step.verb === 'search')[0];
+  t.ok(!!search, 'Search is offered while the action is unspent');
+  t.ok(before.some(m => m.step && m.step.verb === 'attack'), 'and so is Attack');
+
+  const r = Dispatch.dispatch(st, { past: [], future: [] },
+    Dispatch.commandFromMove(st, 'hero', search), {});
+  t.eq(r.ok, true, 'searching resolves');
+
+  t.eq(st.actors.hero.runtime.turn.action, false, 'and it spends the action');
+
+  const after = Dispatch.legalMoves(st, 'hero', {});
+  t.eq(after.some(m => m.step && m.step.verb === 'search'), false,
+    'so Search is no longer offered');
+  t.eq(after.some(m => m.step && m.step.verb === 'attack'), false,
+    'and neither is Attack — one action means one action');
+  t.eq(after.some(m => m.step && m.step.verb === 'move'), true,
+    'but movement is a separate budget and survives');
+}
+
 t.done();

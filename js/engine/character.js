@@ -733,7 +733,19 @@
     spec = spec || {};
     var classesIn = spec.classes || (spec.classId ? [{ classId: spec.classId, levels: spec.levels || 1, subclassId: spec.subclassId }] : []);
     var classes = classesIn.map(function (c) {
-      return { classId: c.classId, subclassId: c.subclassId || null, levels: c.levels || 1 };
+      var cd = cls(c.classId);
+      var subclassId = c.subclassId || null;
+      /* A cleric, sorcerer or warlock chooses at FIRST level in the 2014
+         rules, and nothing in the builder ever asked — so they arrived with
+         no subclass and none of its features, and the level-up prompt only
+         fires when a new class level exactly equals the subclass level, so the
+         choice was skipped permanently rather than deferred. The SRD carries a
+         single subclass per class, so there is one legal answer; taking it is
+         strictly better than leaving the character without one. */
+      if (!subclassId && cd && cd.subclassLevel && (c.levels || 1) >= cd.subclassLevel && cd.subclass) {
+        subclassId = cd.subclass.id || null;
+      }
+      return { classId: c.classId, subclassId: subclassId, levels: c.levels || 1 };
     });
 
     var firstClass = classes[0] ? cls(classes[0].classId) : null;

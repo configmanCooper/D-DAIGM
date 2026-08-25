@@ -199,6 +199,16 @@
     }
     active._narr.textContent = payload.text || active._narr.textContent;
     active.classList.remove('streaming');
+    /* Mechanical resolution and authored prose are not the same thing and
+       should not look the same. When no model wrote the line, what is on the
+       page is the engine's own summary — "Bandit A swings. The blow misses." —
+       and giving that the parchment-serif treatment reserved for the DM's
+       voice meant nothing on screen said "this is the story". */
+    if (payload.source === 'offline' || payload.source === 'system') {
+      active.classList.add('mechanical');
+    } else {
+      active.classList.remove('mechanical');
+    }
     if (payload.source && payload.source !== 'ollama' && payload.source !== 'copilot') {
       active.setAttribute('data-source', payload.source);
     }

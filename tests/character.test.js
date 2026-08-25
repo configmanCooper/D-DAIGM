@@ -236,4 +236,63 @@ let second = Character.derive(pBase, pProg, pRun, pEff);
 t.deep(second, first, 'two calls with the same inputs give identical output');
 t.ok(Object.isFrozen(pBase) && Object.isFrozen(pRun), 'inputs stayed frozen (derive never wrote to them)');
 
+
+/* ---------------------------------------------------------------------- */
+t.section('a subclass chosen at first level is actually granted');
+/*
+ * Cleric, sorcerer and warlock all choose at FIRST level in the 2014 rules.
+ * The character builder never asked, so they arrived with `subclassId: null`
+ * and none of the subclass's features — and because the level-up prompt only
+ * fires when a new class level exactly EQUALS the subclass level, the choice
+ * was skipped permanently rather than deferred to the next level.
+ */
+{
+  /* The real SRD tables, not this file's fixture. The fixture class table has
+     no subclasses at all, so testing against it would prove only that the
+     fixture is empty — which is very close to how a character with no subclass
+     went unnoticed in the first place. */
+  Character.setData({
+    CLASSES: require('../js/data/srd_classes.js').CLASSES,
+    ITEMS: require('../js/data/srd_items.js').ITEMS,
+  });
+
+  const at1 = ['cleric', 'sorcerer', 'warlock'];
+  at1.forEach(classId => {
+    const c = Character.buildFromSpec({
+      name: 'Test', raceId: 'human', classId, levels: 1, backgroundId: 'acolyte',
+      abilities: { str: 12, dex: 12, con: 14, int: 12, wis: 15, cha: 15 },
+      proficiencies: { skills: [] },
+    });
+    t.ok(!!c.base.classes[0].subclassId,
+      'a first-level ' + classId + ' has a subclass',
+      '(' + c.base.classes[0].subclassId + ')');
+  });
+
+  /* And not before it is due: a fighter picks at third. */
+  const f1 = Character.buildFromSpec({
+    name: 'Test', raceId: 'human', classId: 'fighter', levels: 1, backgroundId: 'soldier',
+    abilities: { str: 16, dex: 12, con: 14, int: 10, wis: 10, cha: 10 },
+    proficiencies: { skills: [] },
+  });
+  t.eq(f1.base.classes[0].subclassId, null,
+    'a first-level fighter has none, because none is due until third');
+
+  const f3 = Character.buildFromSpec({
+    name: 'Test', raceId: 'human', classId: 'fighter', levels: 3, backgroundId: 'soldier',
+    abilities: { str: 16, dex: 12, con: 14, int: 10, wis: 10, cha: 10 },
+    proficiencies: { skills: [] },
+  });
+  t.ok(!!f3.base.classes[0].subclassId, 'and a third-level fighter does',
+    '(' + f3.base.classes[0].subclassId + ')');
+
+  /* A caller who has already chosen keeps their choice. */
+  const chosen = Character.buildFromSpec({
+    name: 'Test', raceId: 'human', classId: 'cleric', levels: 1, backgroundId: 'acolyte',
+    abilities: { str: 12, dex: 12, con: 14, int: 12, wis: 15, cha: 15 },
+    proficiencies: { skills: [] }, subclassId: 'war',
+  });
+  t.eq(chosen.base.classes[0].subclassId, 'war',
+    'an explicit choice is never overwritten by the default');
+}
+
 t.done();

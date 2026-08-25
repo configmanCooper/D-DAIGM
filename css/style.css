@@ -134,7 +134,10 @@ button { cursor: pointer; }
 
 /* left */
 #party-col {
-  flex: 0 0 clamp(15rem, 20vw, 19rem); display: flex; flex-direction: column;
+  /* Narrower than it was (15–19rem): with a single-seat party it reserved a
+     wide column, held one card and left several hundred pixels of empty black
+     beside it, while squeezing the map and the log that needed the room. */
+  flex: 0 0 clamp(12rem, 16vw, 15rem); display: flex; flex-direction: column;
   background: var(--bg-2); border-right: 1px solid var(--line); min-height: 0;
 }
 #party-list { overflow-y: auto; padding: 0.6rem; min-height: 0; }
@@ -153,10 +156,13 @@ button { cursor: pointer; }
    46vh cap and the map's legend row printed straight over the first lines of
    the log beneath it. The canvas wrap scrolls internally instead. */
 body.in-combat #battle-view {
+  /* The tokens are legible because `fitCell` sizes from WIDTH, not because
+     the panel is tall — so this can stay modest and leave the log something
+     to read in. At 56vh the log was a clipped two-line sliver. */
   order: -1; flex: 0 0 auto; max-height: 46vh; overflow: hidden;
   border-bottom: 1px solid var(--line);
 }
-body.in-combat #log { flex: 1 1 auto; min-height: 6rem; }
+body.in-combat #log { flex: 1 1 auto; min-height: 9rem; }
 
 /* On a short window the map's 46vh, the log's minimum and a tall action bar
    together overflowed the column, pushing the composer off the bottom of the
@@ -278,14 +284,27 @@ body.show-keys .target-btn[data-key]::after { opacity: 1; transform: scale(1); }
 .pane.on { display: block; }
 
 /* ------------------------------------------------------- narrative log -- */
-.entry { margin-bottom: 1.1rem; }
+.entry { margin-bottom: 1.4rem; }
 .entry .speaker {
   font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase;
   color: var(--gold); margin-bottom: 0.15rem;
 }
+/* The DM's voice is the point of the product, so give it the measure and the
+   size prose actually needs. A 62ch line is about eleven words — the length
+   the eye tracks without losing its place — where a full-width panel ran to
+   twice that and read like a log file. */
 .entry.narration .body {
-  font-family: var(--serif); font-size: 1.05rem; line-height: 1.65; color: var(--ink);
+  font-family: var(--serif); font-size: 1.18rem; line-height: 1.7; color: var(--ink);
+  max-width: 62ch;
 }
+/* Engine-written resolution is not authored prose and should not wear its
+   clothes: no model chose these words, so they step back and let the lines a
+   model did write carry the parchment weight. */
+.entry.narration.mechanical .body {
+  font-family: inherit; font-size: 0.95rem; line-height: 1.55; color: var(--ink-dim);
+  max-width: 78ch;
+}
+.entry.narration.mechanical { margin-bottom: 0.8rem; }
 .entry.narration.streaming .body::after { content: "▍"; color: var(--gold); }
 .entry.speech { display: flex; gap: 0.6rem; align-items: flex-start; }
 .entry.speech canvas { flex: 0 0 auto; border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--bg); }
@@ -303,12 +322,19 @@ body.show-keys .target-btn[data-key]::after { opacity: 1; transform: scale(1); }
 .entry.refused { border-left-color: var(--blood); }
 .entry.refused::before { content: "✗ "; color: var(--blood); }
 
-/* the "what actually happened" mechanics block */
-.beats { margin-top: 0.5rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-2); }
+/* The "what actually happened" mechanics block.
+   Closed, it is a quiet line of text — it sits under EVERY turn, and a
+   full-width bordered box there was as heavy as the prose above it and pulled
+   the eye away from the story. The box only appears once it is opened, which
+   is when there is something in it to frame. */
+.beats { margin-top: 0.35rem; border: 1px solid transparent; border-radius: var(--radius); }
+.beats[open] { border-color: var(--line); background: var(--bg-2); }
 .beats > summary {
-  cursor: pointer; padding: 0.35rem 0.6rem; font-size: 0.78rem; color: var(--ink-dim);
-  list-style: none;
+  cursor: pointer; padding: 0.1rem 0; font-size: 0.75rem; color: var(--ink-faint);
+  list-style: none; display: inline-block;
 }
+.beats[open] > summary { padding: 0.35rem 0.6rem; color: var(--ink-dim); }
+.beats > summary:hover { color: var(--ink-dim); }
 .beats > summary::before { content: "▸ "; color: var(--gold); }
 .beats[open] > summary::before { content: "▾ "; }
 .beats .beat { padding: 0.2rem 0.7rem; font-size: 0.85rem; border-top: 1px solid var(--line); }
@@ -469,9 +495,12 @@ body.show-keys .target-btn[data-key]::after { opacity: 1; transform: scale(1); }
    wide dead gutter against the initiative rail. */
 #battle-canvas-wrap {
   flex: 1 1 auto; position: relative; min-width: 0; background: var(--bg);
-  overflow: auto; display: flex; align-items: center; justify-content: center;
+  overflow: auto; display: flex;
 }
-#battle-canvas { display: block; }
+/* `margin: auto` rather than `align-items: center`: flex centring clips the
+   top of anything taller than its container once it scrolls, which would hide
+   the front rank of a tall battlefield. */
+#battle-canvas { display: block; margin: auto; }
 .initiative { flex: 0 0 12rem; border-left: 1px solid var(--line); overflow-y: auto; padding: 0.5rem; background: var(--bg-2); }
 .init-row { display: flex; justify-content: space-between; padding: 0.25rem 0.4rem; border-radius: 3px; font-size: 0.85rem; }
 .init-row.active { background: var(--panel-2); border: 1px solid var(--gold); }
@@ -544,6 +573,17 @@ body.show-keys .target-btn[data-key]::after { opacity: 1; transform: scale(1); }
   #context-col { flex-basis: 16rem; }
 }
 
+/* The drawer handle, hidden entirely when the column is simply visible.
+   Declared BEFORE the media queries: this is the same specificity as the rule
+   that reveals it, so whichever comes last wins — and with this block sitting
+   below, `display: none` beat `display: inline-flex` and the handle was
+   invisible on every screen narrow enough to need it. */
+#context-toggle {
+  display: none; position: fixed; top: 0.55rem; right: 0.6rem; z-index: 41;
+  background: var(--panel-2); border: 1px solid var(--gold-dim); color: var(--ink);
+  border-radius: var(--radius); padding: 0.3rem 0.6rem; font-size: 0.8rem;
+}
+
 @media (max-width: 60rem) {
   /* The context panel becomes a drawer over the table rather than a sliver
      beside it. `#context-col` keeps its tablist, so nothing is lost. */
@@ -568,13 +608,6 @@ body.show-keys .target-btn[data-key]::after { opacity: 1; transform: scale(1); }
   }
   #party-list { display: flex; gap: 0.4rem; overflow-x: auto; }
   #party-list > * { flex: 0 0 13rem; }
-}
-
-/* The drawer handle, hidden entirely when the column is simply visible. */
-#context-toggle {
-  display: none; position: fixed; top: 0.55rem; right: 0.6rem; z-index: 41;
-  background: var(--panel-2); border: 1px solid var(--gold-dim); color: var(--ink);
-  border-radius: var(--radius); padding: 0.3rem 0.6rem; font-size: 0.8rem;
 }
 
 /* ----------------------------------------------------- reduced motion -- */
@@ -720,3 +753,26 @@ body.show-keys .target-btn[data-key]::after { opacity: 1; transform: scale(1); }
   background: transparent; color: var(--ink-dim); border-color: var(--line-2);
 }
 .death-actions button.ghost:hover { color: var(--ink); border-color: var(--gold-dim); }
+/* ------------------------------------------------------------- resume --- */
+/* The saved game, offered above the campaign list. Given the gold border the
+   campaign cards only get when selected, because on a return visit this is
+   almost always what the player came back for. */
+.resume-card {
+  display: block; width: 100%; text-align: left; margin-bottom: 0.5rem;
+  border-color: var(--gold); background: var(--panel-2);
+}
+.resume-card strong { display: block; color: var(--gold); font-family: var(--serif); font-size: 1.05rem; }
+.resume-card .sub { display: block; color: var(--ink-dim); font-size: 0.8rem; margin-top: 0.15rem; }
+#btn-discard-save { font-size: 0.8rem; }
+
+/* ------------------------------------------------------- form accents --- */
+/* Radios and checkboxes render in the operating system's own blue by default,
+   which is a cold, bright note against warm lamplight — most visible on the
+   death-policy chooser, where four of them sit in a row. */
+input[type="radio"], input[type="checkbox"] { accent-color: var(--gold); }
+
+/* ------------------------------------------------------ topbar rhythm --- */
+/* "Shen Cooper — Person   local ready · qwen3.5:4b" ran straight into the
+   Undo/Redo cluster and read as one run-on string. */
+#topbar .status-group { margin-right: 0.9rem; }
+#topbar { gap: 0.9rem; }
