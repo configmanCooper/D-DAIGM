@@ -17,7 +17,28 @@
 (function (global) {
   'use strict';
 
+  /* Set per render to fill whatever room the panel actually has. A fixed 44px
+     cell sized the canvas to the actors' extent, so a fight that started with
+     everyone bunched together drew a small square with a wide dead gutter
+     between it and the initiative rail. Every hit-test and every drawing
+     routine reads this at call time, so they all follow. */
   var CELL_PX = 44;
+  var CELL_MIN = 26, CELL_MAX = 72;
+
+  /**
+   * Choose a cell size so the grid fills the space without needing to scroll,
+   * clamped so tokens stay legible on a big screen and readable on a small one.
+   */
+  function fitCell(ext) {
+    var wrap = document.getElementById('battle-canvas-wrap');
+    if (!wrap) return 44;
+    var w = wrap.clientWidth, h = wrap.clientHeight;
+    if (!w || !h) return 44;
+    var byW = Math.floor(w / Math.max(1, ext.w));
+    var byH = Math.floor(h / Math.max(1, ext.h));
+    return Math.max(CELL_MIN, Math.min(CELL_MAX, Math.min(byW, byH)));
+  }
+
   var sel = null;         // selected own actor id (for movement)
   var aoe = null;         // { kind:'sphere'|'cone', radius, centre }
   var hostReady = false;
@@ -83,6 +104,7 @@
     var ext = extent(actors);
     lastGrid = ext;
     var canvas = document.getElementById('battle-canvas');
+    CELL_PX = fitCell(ext);
     canvas.width = ext.w * CELL_PX;
     canvas.height = ext.h * CELL_PX;
     var ctx = canvas.getContext('2d');
@@ -181,7 +203,22 @@
       if (Tokens && App) {
         try {
           var alle = App.allegianceOf(id);
-          var gm = Tokens.genomeForToken('battle:' + id, { kind: a.side === 'party' || a.side === 'ally' ? 'portrait' : 'creature', allegiance: alle });
+          /* Seed by SPECIES, not by actor id, and hand the generator the
+             creature's real visual block. Seeding per-actor meant three
+             zombies were three different random shapes and a dragon looked
+             like a goblin, because nothing ever told the art what it was
+             drawing. Now all zombies match each other and a dragon has wings.
+             The name is folded into the seed so two different monsters that
+             share a silhouette still differ. */
+          var look = a.appearance || {};
+          var seed = 'token:' + (look.monsterId || a.name || id);
+          var gm = Tokens.genomeForToken(seed, {
+            kind: look.kind || (a.side === 'party' || a.side === 'ally' ? 'portrait' : 'creature'),
+            allegiance: alle,
+            monsterId: look.monsterId || null,
+            visual: look.visual || null,
+            size: look.size || null,
+          });
           var pad = 4;
           var tctx = ctx;
           tctx.save();
@@ -193,9 +230,47 @@
             conditions: a.conditions || [],
           });
           tctx.restore();
+
+          /* A letter over the disc. At forty pixels a silhouette is a smudge,
+             and three Giant Spiders are the same smudge — the map could not
+             tell you WHICH wolf you were looking at, which is the one thing a
+             battle map exists to do. The letter matches the initiative list,
+             so the two read as one thing. */
+          drawTokenLabel(ctx, gx, gy, a);
         } catch (e) { fallbackToken(ctx, gx, gy, a); }
       } else { fallbackToken(ctx, gx, gy, a); }
     });
+  }
+
+  /**
+   * The short name a token wears: "A" for Wolf A, "Sh" for Shen Cooper.
+   *
+   * Drawn with a dark halo so it stays legible over any body colour the art
+   * generator happens to choose.
+   */
+  function tokenLabel(a) {
+    var name = String(a.name || '?');
+    var tail = /\s([A-Z0-9])$/.exec(name);        // "Wolf A" -> "A"
+    if (tail) return tail[1];
+    var words = name.split(/\s+/);
+    if (words.length > 1) return (words[0][0] + words[1][0]).toUpperCase();
+    return name.slice(0, 2);
+  }
+
+  function drawTokenLabel(ctx, gx, gy, a) {
+    var text = tokenLabel(a);
+    var cx = gx + CELL_PX / 2;
+    var cy = gy + CELL_PX / 2 + 1;
+    ctx.save();
+    ctx.font = '600 ' + Math.round(CELL_PX * 0.34) + 'px ui-sans-serif, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(8,6,2,0.85)';
+    ctx.strokeText(text, cx, cy);
+    ctx.fillStyle = a.dead ? '#8a8378' : '#f3ead6';
+    ctx.fillText(text, cx, cy);
+    ctx.restore();
   }
 
   function fallbackToken(ctx, gx, gy, a) {
@@ -277,8 +352,33 @@
     if (sel) App.battleMove(sel, sq);
   }
 
-  function show() { var h = document.getElementById('battle-view'); if (h) h.hidden = false; var n = document.getElementById('narrative-view'); if (n) n.hidden = true; render(); }
-  function hide() { var h = document.getElementById('battle-view'); if (h) h.hidden = true; var n = document.getElementById('narrative-view'); if (n) n.hidden = false; }
+  /**
+   * Show the map when a fight starts — WITHOUT taking the controls away.
+   *
+   * This used to hide the whole narrative view, which contains the action bar,
+   * the composer and End turn. The result was that the moment combat began a
+   * player had nothing to click but the map templates: genuinely stuck, in the
+   * one part of the game where being stuck matters most.
+   *
+   * Now the map takes the top of the centre column and the log shrinks to make
+   * room. The controls never leave.
+   */
+  function show() {
+    var h = document.getElementById('battle-view');
+    if (h) h.hidden = false;
+    var n = document.getElementById('narrative-view');
+    if (n) n.hidden = false;
+    document.body.classList.add('in-combat');
+    render();
+  }
+
+  function hide() {
+    var h = document.getElementById('battle-view');
+    if (h) h.hidden = true;
+    var n = document.getElementById('narrative-view');
+    if (n) n.hidden = false;
+    document.body.classList.remove('in-combat');
+  }
 
   var api = { render: render, show: show, hide: hide, select: function (id) { sel = id; } };
   global.DND = global.DND || {};

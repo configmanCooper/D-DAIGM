@@ -35,6 +35,29 @@
   var _data = { MONSTERS: {} };
   function setData(data) { data = data || {}; _data.MONSTERS = data.MONSTERS || _data.MONSTERS || {}; }
 
+  /**
+   * The monster table, however this file is running.
+   *
+   * `setData` was never called in production, so `_data.MONSTERS` was always
+   * empty and every `monsterId` lookup missed: a dragon, a zombie and a
+   * goblin all fell through to the default silhouette and were drawn as the
+   * same grey beast. The same lazy-load gap has now bitten this project three
+   * times, so this looks the data up itself rather than waiting to be handed
+   * it. `setData` still wins when a caller supplies one.
+   */
+  function monsters() {
+    if (Object.keys(_data.MONSTERS).length) return _data.MONSTERS;
+    var g = global.DND || {};
+    if (g.MONSTERS && Object.keys(g.MONSTERS).length) return g.MONSTERS;
+    if (typeof require !== 'undefined') {
+      try {
+        var m = require('../data/srd_monsters.js').MONSTERS;
+        if (m) { _data.MONSTERS = m; return m; }
+      } catch (e) { /* the browser path is the global above */ }
+    }
+    return _data.MONSTERS;
+  }
+
   function normSize(s) {
     s = String(s || 'medium').toLowerCase();
     return SIZE_SCALE[s] ? s : 'medium';
@@ -48,7 +71,7 @@
    */
   function genomeForMonster(seed, spec) {
     spec = spec || {};
-    var real = spec.monsterId && _data.MONSTERS[spec.monsterId];
+    var real = spec.monsterId && monsters()[spec.monsterId];
     var visual = spec.visual || (real && real.visual) || MONSTER_DEFAULTS;
     var silhouette = SILHOUETTES.indexOf(visual.silhouette) >= 0 ? visual.silhouette : MONSTER_DEFAULTS.silhouette;
     var base = Art.makeGenome(seed, { visual: visual, kind: 'creature', scheme: 'split' });

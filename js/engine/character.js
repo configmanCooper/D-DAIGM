@@ -826,7 +826,51 @@
       grantStartingKit(runtime, classes[0] && classes[0].classId);
     }
 
+    /* And a caster with no spells is not a caster. The generator picks a legal
+       list, but a character built by hand — or by any other path that did not
+       think to ask — arrived with a full set of slots and an empty page. Same
+       reasoning as the gear above: this belongs in the one function every
+       character goes through, not in whichever screen last remembered. */
+    if (spec.startingSpells !== false &&
+        !progression.preparedSpells.length && !progression.cantripsKnown.length) {
+      grantStartingSpells(base, progression, classes[0]);
+    }
+
     return { base: base, progression: progression, runtime: runtime };
+  }
+
+  /**
+   * Give a caster who was handed none a legal opening spell list.
+   *
+   * Defers to the character generator, which already knows each class's list,
+   * which levels it can actually cast, and how big a wizard's book should be.
+   * Resolved on call rather than aliased at load, because chargen.js loads
+   * after this file in the page.
+   */
+  function grantStartingSpells(base, progression, firstClass) {
+    if (!firstClass || !firstClass.classId) return;
+    var cd = cls(firstClass.classId);
+    if (!cd || !cd.spellcasting) return;
+
+    var Chargen = (global.DND && global.DND.Chargen) || null;
+    if (!Chargen && typeof require !== 'undefined') {
+      try { Chargen = require('../gen/chargen.js'); } catch (e) { Chargen = null; }
+    }
+    if (!Chargen || !Chargen.generate) return;
+
+    try {
+      var spec = Chargen.generate({
+        fixed: {
+          classId: firstClass.classId,
+          levels: firstClass.levels || 1,
+          raceId: base.raceId || undefined,
+        },
+      });
+      if (!spec) return;
+      progression.preparedSpells = (spec.spells || []).slice();
+      progression.cantripsKnown = (spec.cantrips || []).slice();
+      progression.spellbook = (spec.spellbook || spec.spells || []).slice();
+    } catch (e) { /* an empty caster is bad; a crash on character creation is worse */ }
   }
 
   function cloneJson(o) { return JSON.parse(JSON.stringify(o)); }

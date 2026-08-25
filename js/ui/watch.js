@@ -80,6 +80,7 @@
     runrow.className = 'seat-ctl';
     runrow.innerHTML = '<div class="srow"><label for="watch-steer">Steer all models</label></div>';
     var steer = document.createElement('textarea');
+    steer.setAttribute('aria-label', 'Steer all models');
     steer.id = 'watch-steer';
     steer.rows = 2;
     steer.placeholder = 'Optional. e.g. "press the attack", "try to talk your way out", "protect the wounded".';
@@ -106,6 +107,7 @@
     autoWrap.style.marginTop = '.5rem';
     var auto = document.createElement('input');
     auto.type = 'checkbox';
+    auto.setAttribute('aria-label', 'Export the session automatically when it ends');
     auto.id = 'watch-autoexport';
     try { auto.checked = localStorage.getItem(AUTOEXPORT_KEY) === '1'; } catch (e) { /* private mode */ }
     auto.onchange = function () {
@@ -154,6 +156,7 @@
     pRow.className = 'srow';
     var pLbl = document.createElement('label'); pLbl.textContent = 'Persona';
     var persona = document.createElement('input');
+      persona.setAttribute('aria-label', 'Persona for this seat');
     persona.type = 'text';
     persona.placeholder = 'Optional. e.g. "cautious tactician", "reckless zealot".';
     persona.value = (seat.agent && seat.agent.persona) || '';

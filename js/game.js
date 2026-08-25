@@ -590,7 +590,23 @@
     }
 
     var ring = explorationOrder(session);
-    if (!ring.length) return { ok: true, actorId: state.activeActorId };
+    if (!ring.length) {
+      /* Nobody is on their feet. Hand the turn to whoever is dying so their
+         death saves get rolled; if there is no one left at all, clear the
+         initiative so the loop stops with "nobody is acting" instead of
+         asking the last monster standing to act for ever. */
+      var dying = dyingOrder(session);
+      state.activeActorId = dying.length
+        ? dying[(dying.indexOf(state.activeActorId) + 1) % dying.length]
+        : null;
+      State.advanceTurnEpoch(session.state);
+      if (state.activeActorId) {
+        var open = Combat.startTurn(state, state.activeActorId, { alreadyStarted: true });
+        if (open && open.events.length) Events.commit(state, open);
+      }
+      emit(session, 'turn', { actorId: state.activeActorId, round: null });
+      return { ok: true, actorId: state.activeActorId };
+    }
     var at = ring.indexOf(state.activeActorId);
     state.activeActorId = ring[(at + 1) % ring.length];
     State.advanceTurnEpoch(state);
@@ -610,6 +626,45 @@
     });
   }
 
+  /**
+   * Party members who are down but not yet dead.
+   *
+   * When a fight ends with everyone on the floor, `explorationOrder` is empty
+   * — nobody has hit points — and the initiative had nowhere to go, so it
+   * stayed with whatever was holding it: the monster that put them there. The
+   * loop then asked that monster to act, over and over, out of combat, where
+   * there is no action economy to spend and no initiative to advance. A real
+   * playtest printed five consecutive Gelatinous Cube turns reading "It does
+   * not work." while an unconscious paladin's death saves went unrolled.
+   *
+   * These characters still have turns to take: a creature at 0 hit points
+   * rolls a death saving throw on each of its own turns, and that is how the
+   * scene resolves one way or the other.
+   */
+  function dyingOrder(session) {
+    var state = session.state;
+    var seated = (state.seats || []).map(function (s) { return s.actorId; });
+    var party = State.partyIds(state).filter(function (id) { return seated.indexOf(id) < 0; });
+    return seated.concat(party).filter(function (id) {
+      var a = state.actors[id];
+      return a && !a.runtime.dead && a.runtime.hp <= 0;
+    });
+  }
+
+  /**
+   * Who should hold the initiative out of combat.
+   *
+   * Anyone on their feet first; failing that, whoever is bleeding out, so
+   * their death saves resolve; failing that nobody, which stops the loop
+   * cleanly instead of parking it on a monster.
+   */
+  function outOfCombatHolder(session) {
+    var up = explorationOrder(session);
+    if (up.length) return up[0];
+    var dying = dyingOrder(session);
+    return dying.length ? dying[0] : null;
+  }
+
   function endEncounter(session, over) {
     var state = session.state;
     var batch = Combat.endEncounter
@@ -620,9 +675,9 @@
     State.advanceTurnEpoch(state);
 
     /* Whoever is up next out of combat should be a player, not the last
-       monster standing in the initiative order. */
-    var ring = explorationOrder(session);
-    if (ring.length) state.activeActorId = ring[0];
+       monster standing in the initiative order — and if nobody is on their
+       feet, whoever is bleeding out, so their death saves still resolve. */
+    state.activeActorId = outOfCombatHolder(session) || null;
     emit(session, 'encounterEnd', { winner: over.winner });
     return { ok: true, encounterOver: true, winner: over.winner, actorId: state.activeActorId };
   }
@@ -815,6 +870,10 @@
    */
   function advanceUntilHuman(session, opts) {
     opts = opts || {};
+    /* A fresh request clears any earlier Stop. Without this, pressing Stop
+       once left the flag set for the rest of the session and Play never
+       worked again. */
+    session.__stopRequested = false;
     var limit = opts.maxSteps || 40;
     /* How many goes the creature holding the initiative has already had. A
        creature that acts, and acts, and never finishes is the loop's worst
@@ -825,6 +884,11 @@
 
     function step(n) {
       if (n <= 0) return Promise.resolve({ stopped: 'step limit' });
+      /* A person asked the table to stop. Checked between every seat, because
+         a Stop that only takes effect when the loop happens to finish is not
+         a Stop: pressing it during an all-AI run still committed twenty turns
+         in under two seconds. */
+      if (session.__stopRequested) return Promise.resolve({ stopped: 'asked to stop' });
       var cur = currentController(session);
       if (!cur) return Promise.resolve({ stopped: 'nobody is acting' });
 

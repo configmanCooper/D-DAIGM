@@ -414,6 +414,13 @@
     b.method = 'standard';
     b.array = baseArrayFor(g.classId);
     if (g.backstory) { b.backstory = g.backstory; b.backstorySource = 'seed'; }
+    /* The generator picks a legal, castable spell list; this used to throw it
+       away, so every wizard, cleric and bard built through the wizard reached
+       the table with a full complement of spell slots and nothing to spend
+       them on. */
+    b.cantrips = (g.cantrips || []).slice();
+    b.spells = (g.spells || []).slice();
+    b.spellbook = (g.spellbook || []).slice();
     b.gen = { pinned: (pinned || []).slice(), classId: g.classId, raceId: g.raceId, synergy: g.generated && g.generated.synergy };
   }
 
@@ -739,6 +746,14 @@
       backgroundId: b.backgroundId, abilities: finalAb,
       proficiencies: { skills: skills },
       backstory: (b.backstory || '').trim(),
+      /* Carried through to buildFromSpec, which is what puts them on the
+         sheet. Dropping them here was the other half of the same bug: the
+         generator chose a legal spell list and the wizard silently binned it,
+         so every caster built through this screen arrived with a full set of
+         slots and nothing to cast. */
+      cantrips: (b.cantrips || []).slice(),
+      spells: (b.spells || []).slice(),
+      spellbook: (b.spellbook || []).slice(),
     };
   }
 
@@ -849,6 +864,12 @@
       State.clearCast(state);
 
       C.shenContinuation.applyTo(state, store);
+      /* The campaign fixture seats a default player on Shen so a headless
+         load is immediately playable. The wizard is about to seat the real
+         players, and leaving the fixture's seat behind meant every session
+         had one seat more than was asked for, with Shen seated twice. */
+      state.seats = [];
+      state.controllers = {};
       State.refreshAllDerived(state);
 
       /* Seat the wizard's players onto the campaign's own characters, in the

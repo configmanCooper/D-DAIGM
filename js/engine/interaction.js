@@ -736,7 +736,14 @@
 
   /** The item table, however this file is running. */
   function itemTable(ctx) {
+    /* The data modules publish to DND.Data, not to DND directly. Reading
+       DND.ITEMS found nothing in the BROWSER — and the Node equire
+       fallback below quietly saved every test, so buying, selling and
+       drinking a healing potion all worked in the suite and did nothing in
+       the actual game. The same fixture-versus-reality trap as the armour
+       bug, one namespace deeper. */
     return (ctx && ctx.data && ctx.data.ITEMS) ||
+      (global.DND && global.DND.Data && global.DND.Data.ITEMS) ||
       (global.DND && global.DND.ITEMS) ||
       (typeof require !== 'undefined' ? require('../data/srd_items.js').ITEMS : null);
   }
@@ -762,7 +769,10 @@
     if (!c) return RARITY_PRICE[def.rarity] != null ? RARITY_PRICE[def.rarity] : Infinity;
     if (typeof c === 'number') return c;
     var rate = COIN_IN_GOLD[String(c.unit || 'gp').toLowerCase()] || 1;
-    return Math.max(0, Math.round((c.quantity || 0) * rate));
+    /* The data writes qty; reading quantity gave undefined and priced
+       every item in the game at zero gold. */
+    var qty = c.qty != null ? c.qty : c.quantity;
+    return Math.max(0, Math.round((qty || 0) * rate));
   }
 
   /* Rough going rates for magic items, which the SRD deliberately does not
@@ -799,9 +809,7 @@
 
   function healDiceFor(entry, ctx) {
     if (!entry) return null;
-    var ITEMS = (ctx && ctx.data && ctx.data.ITEMS) ||
-      (global.DND && global.DND.ITEMS) ||
-      (typeof require !== 'undefined' ? require('../data/srd_items.js').ITEMS : null);
+    var ITEMS = itemTable(ctx);
     var def = ITEMS && ITEMS[entry.id];
     var mech = def && def.mech;
     if (!mech || mech.type !== 'healing') return null;
@@ -1279,7 +1287,12 @@
     var a = actor(state, actorId);
     if (!a || downed(a)) return [];
     var d = derivedOf(state, actorId);
-    var known = (d && d.spellcasting && (d.spellcasting.available || d.spellcasting.prepared)) || [];
+    var sc = (d && d.spellcasting) || {};
+    /* Cantrips are not "prepared" and were therefore never offered, so the one
+       thing a caster can do every single round without spending anything was
+       missing from the action bar entirely. They come first: at low levels a
+       cantrip IS the caster's attack. */
+    var known = (sc.cantripsKnown || []).concat(sc.available || sc.prepared || []);
     if (!known.length) return [];
     var SPELLS = spellData(ctx);
     var moves = [];

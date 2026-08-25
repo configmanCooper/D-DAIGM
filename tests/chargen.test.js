@@ -16,6 +16,7 @@ const Character = require('../js/engine/character.js');
 const State = require('../js/engine/state.js');
 const Events = require('../js/engine/events.js');
 const Backstory = require('../js/ai/backstory.js');
+const SKILL_TABLE = require('../js/data/srd_rules.js').SKILLS;
 const Backend = require('../js/ai/backend.js');
 const DATA = {
   RACES: require('../js/data/srd_races.js').RACES,
@@ -80,8 +81,15 @@ for (let i = 0; i < 25; i++) {
   t.ok(!!DATA.CLASSES[c.classId], 'and a real class');
   t.ok(c.skills.length > 0, 'and skills');
   t.ok(!!c.backstory, 'and a backstory seed');
-  const pool = DATA.CLASSES[c.classId].skillChoices.from;
+  /* Compare against the pool the class can really draw from, not the raw
+     field: the bard's is the sentinel ['any'], meaning any skill in the game.
+     Testing against the literal array made "no skills at all" pass this check
+     vacuously, which is how a bard with zero proficiencies went unnoticed. */
+  const raw = DATA.CLASSES[c.classId].skillChoices.from;
+  const pool = raw.indexOf('any') >= 0 ? Object.keys(SKILL_TABLE) : raw;
   t.ok(c.skills.every(s => pool.indexOf(s) >= 0), 'whose skills are legal for the class');
+  t.eq(c.skills.length, DATA.CLASSES[c.classId].skillChoices.count,
+    'and number exactly what the class chooses');
 }
 t.ok(Object.keys(seen).length >= 5, 'random generation actually varies the class',
   '(' + Object.keys(seen).length + ' distinct in 25)');
@@ -408,4 +416,42 @@ function runCasterTests() {
       t.ok(LevelUp.validate(options, bogus).length > 0, 'a spell that does not exist is rejected');
     }
   }
+}
+/* ---------------------------------------------------------------------- */
+t.section('every random character is one the setup screen will accept');
+/*
+ * "Surprise me" must never produce a character the Begin button refuses. The
+ * bard's skill list is the sentinel ['any'] — a bard picks any three skills in
+ * the game — and the generator read that array as a list of skill ids, so a
+ * generated bard came away with a single proficiency in a skill called "any".
+ * That is two short of the three the class is owed, so setup.js's validate()
+ * disabled Begin, and the sheet showed a skill that does not exist. It struck
+ * about one random character in thirteen, which made it look like flakiness in
+ * the browser suite rather than the certainty it actually was for bards.
+ */
+{
+  const SKILLS = require('../js/data/srd_rules.js').SKILLS;
+  const CLASSES = DATA.CLASSES;
+  let checked = 0, short = 0, bogus = 0, bards = 0;
+  const seen = {};
+  for (let i = 0; i < 1200; i++) {
+    const g = Chargen.generate({ seed: 'validity-' + i });
+    const cd = CLASSES[g.classId];
+    if (!cd || !cd.skillChoices) continue;
+    checked++;
+    seen[g.classId] = true;
+    if (g.classId === 'bard') bards++;
+    if ((g.skills || []).length !== cd.skillChoices.count) short++;
+    (g.skills || []).forEach(s => { if (!SKILLS[s]) bogus++; });
+  }
+  t.ok(checked > 500, 'enough random characters to be meaningful', '(' + checked + ')');
+  t.ok(bards > 0, 'and bards among them, since the bug was theirs alone', '(' + bards + ')');
+  t.eq(short, 0, 'every generated character has exactly the skills its class chooses');
+  t.eq(bogus, 0, 'and no character is proficient in a skill that does not exist');
+
+  const bard = Chargen.generate({ fixed: { classId: 'bard' }, seed: 'bard-1' });
+  t.eq(bard.skills.length, 3, 'a bard chooses three skills');
+  t.eq(bard.skills.indexOf('any'), -1, 'and none of them is the "any" sentinel');
+  t.eq(bard.skills.filter(s => !SKILLS[s]).length, 0, 'all three are real skills');
+  t.eq(new Set(bard.skills).size, 3, 'and they are three different ones');
 }

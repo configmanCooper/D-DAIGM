@@ -18,7 +18,15 @@
   function req(p) { return typeof require !== 'undefined' ? require(p) : null; }
   var RNG = (global.DND && global.DND.RNG) || (req('../rng.js') || {}).RNG;
   var Dice = (global.DND && global.DND.Dice) || req('./dice.js');
-  var Chargen = (global.DND && global.DND.Chargen) || req('../gen/chargen.js');
+  /* Resolved on use, not at load: chargen.js comes after this file in the
+     page's script order, so an alias taken here is null for the whole session
+     and the level-up recommendations silently vanish in the browser while
+     working perfectly under Node. 	ests/ui.test.js checks that no module
+     re-introduces this. */
+  function chargen() {
+    return (global.DND && global.DND.Chargen) ||
+      (typeof require !== 'undefined' ? req('../gen/chargen.js') : null);
+  }
 
   var _data;
   function Data() {
@@ -225,6 +233,7 @@
    * player does almost every time.
    */
   function recommendedAsi(base, progression, classId) {
+    var Chargen = chargen();
     var build = (Chargen && Chargen.BUILDS && Chargen.BUILDS[classId]) || null;
     var order = build ? build.priority : ABIL;
     for (var i = 0; i < order.length; i++) {

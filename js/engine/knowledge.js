@@ -260,6 +260,14 @@
         dead: !!(a.runtime && a.runtime.dead),
         /* An observer sees what someone is carrying openly, not their pack. */
         visibleGear: own ? null : (a.visibleGear || []),
+        /* What the creature LOOKS like. This belongs in the observation
+           precisely because appearance is the one thing an observer always
+           has — and the interface was drawing every monster as the same grey
+           blob because the only sanctioned door to the world does not hand
+           out a shape, so a dragon and a goblin were indistinguishable on the
+           map. Nothing secret is here: the name already is, and a silhouette
+           says less than a name. */
+        appearance: appearanceOf(a),
       };
     });
 
@@ -301,6 +309,25 @@
       out.mustNotName = forbiddenNames(store, opts.partyId || 'party', state);
     }
     return out;
+  }
+
+  /**
+   * The visual identity of a creature, for anything that has to draw it.
+   *
+   * monsterId lets the art generator look up the real SRD visual block
+   * (silhouette, palette, features, size), so an undead reads as undead and a
+   * dragon has wings. Falling back to the actor's own kind keeps player
+   * characters and unstatted NPCs working.
+   */
+  function appearanceOf(a) {
+    var block = a.statblock || (a.runtime && a.runtime.statblock) || null;
+    return {
+      kind: (a.side === 'party' || a.side === 'ally' || a.kind === 'pc' || a.kind === 'npc')
+        ? 'portrait' : 'creature',
+      monsterId: (block && (block.id || block.monsterId)) || a.monsterId || null,
+      visual: (block && block.visual) || a.visual || null,
+      size: (block && block.size) || null,
+    };
   }
 
   function healthBand(a) {

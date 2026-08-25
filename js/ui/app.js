@@ -234,6 +234,12 @@
     renderAll();
     updateTopbar();
     toggleCombatView();
+    /* A death used to leave a seat with no character and no way forward: no
+       legal actions, no offer of resurrection, no replacement, nothing. The
+       engine raises a flag when that happens; this is what answers it. */
+    if (DND.Mortal && session) {
+      DND.Mortal.check(session, function () { renderAll(); updateTopbar(); });
+    }
   }
 
   function setTurnHint(p) {
@@ -329,32 +335,220 @@
   /* Every action button is built from the engine's legal moves; nothing here is
      hard-coded. Canvas clicks in the battle map are the only other action path,
      and they too go back through legalMoves. */
+  /**
+   * The action bar: what this character can do, right now.
+   *
+   * It used to be one flat button per legal move, which is a combinatorial
+   * explosion — every verb times every target. A fight with three wolves and a
+   * hobgoblin produced twenty-five buttons: "Attack Wolf A", "Attack Wolf B",
+   * "Grapple Wolf A", "Off-hand strike Wolf C"… a wall with no hierarchy, in
+   * which the one thing a player almost always wants (attack the nearest
+   * thing) looked exactly like the thing they almost never want.
+   *
+   * So it is two steps now: pick the VERB, then pick the TARGET. A verb with
+   * one possible target skips the second step entirely, which is the common
+   * case out of combat and in a duel. Grouping also means the bar stays the
+   * same size whether there is one enemy or six.
+   */
   function refreshActionBar() {
     var bar = $('actionbar');
     if (!bar || !session) return;
     bar.innerHTML = '';
+    pendingVerb = null;
     var actorId = actingId();
     if (!actorId) return;
     var ctrl = DND.State ? DND.State.controllerFor(session.state, actorId) : { kind: 'human' };
     if (ctrl.kind !== 'human') return;   // do not offer buttons for an AI/DM turn
+
     var moves = legalMovesFor(actorId);
-    orderForDisplay(moves, observationFor(actorId)).slice(0, 24).forEach(function (m) {
-      var b = document.createElement('button');
-      b.className = 'action-btn' + (m.warn ? ' warn' : '');
-      b.type = 'button';
-      var label = m.what || (m.family + ' · ' + (m.step && m.step.verb));
-      b.innerHTML = esc(label) + (m.cost ? ' <span class="cost">' + esc(m.cost) + '</span>' : '') +
-        (m.warn ? ' <span class="warn-mark" title="' + esc(m.warn) + '">⚠</span>' : '');
-      if (m.warn) b.setAttribute('title', m.warn);
-      b.onclick = function () { applyMove(actorId, m); };
-      bar.appendChild(b);
-    });
     if (!moves.length) {
       var note = document.createElement('span');
       note.className = 'hint';
       note.textContent = 'No engine-legal actions right now — try describing what you do.';
       bar.appendChild(note);
+      return;
     }
+
+    var groups = groupMoves(orderForDisplay(moves, observationFor(actorId)));
+    groups.forEach(function (g, i) {
+      bar.appendChild(verbButton(actorId, g, i));
+    });
+  }
+
+  /* Which verb is waiting for a target, if any. */
+  var pendingVerb = null;
+
+  /**
+   * Collapse moves that differ only by target into one entry.
+   *
+   * The label is taken from the verb rather than from any one move, so a group
+   * reads "Attack" and not "Attack Wolf A".
+   */
+  function groupMoves(moves) {
+    var byKey = {}, order = [];
+    moves.forEach(function (m) {
+      var verb = (m.step && m.step.verb) || m.family;
+      var key = m.family + ':' + verb;
+      if (!byKey[key]) {
+        byKey[key] = {
+          key: key, verb: verb, family: m.family,
+          label: verbLabel(m, verb), cost: m.cost, warn: m.warn,
+          moves: [],
+        };
+        order.push(byKey[key]);
+      }
+      byKey[key].moves.push(m);
+    });
+    return order;
+  }
+
+  /* "Attack Wolf A" -> "Attack". A move with no target keeps its own words. */
+  function verbLabel(move, verb) {
+    var what = move.what || verb;
+    var targets = (move.step && move.step.targetIds) || [];
+    if (!targets.length) return what;
+    var name = actorName(targets[0]);
+    if (!name) return what;
+    var trimmed = what.replace(new RegExp('\\s*' + escapeRe(name) + '\\s*$'), '').trim();
+    return trimmed || what;
+  }
+
+  function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  function verbButton(actorId, group, index) {
+    var b = document.createElement('button');
+    b.className = 'action-btn' + (group.warn ? ' warn' : '') + ' fam-' + esc(group.family);
+    b.type = 'button';
+    var many = group.moves.length > 1;
+    b.innerHTML = esc(group.label) +
+      (many ? ' <span class="count">' + group.moves.length + '</span>' : '') +
+      (group.cost ? ' <span class="cost">' + esc(group.cost) + '</span>' : '') +
+      (group.warn ? ' <span class="warn-mark" aria-hidden="true">\u26a0</span>' : '');
+    if (group.warn) b.setAttribute('title', group.warn);
+    /* The first nine are reachable from the keyboard, which is how anyone who
+       plays more than one session will want to use this. */
+    if (index < 9) b.setAttribute('data-key', String(index + 1));
+    b.setAttribute('aria-label', group.label +
+      (many ? ' — ' + group.moves.length + ' targets' : '') +
+      (group.cost ? ', costs a ' + group.cost : ''));
+
+    b.onclick = function () {
+      if (!many) { applyMove(actorId, group.moves[0]); return; }
+      showTargets(actorId, group, b);
+    };
+    return b;
+  }
+
+  /**
+   * The second step: which of them.
+   *
+   * Rendered inline under the bar rather than as a floating menu, because a
+   * menu that can be positioned wrongly is worse than a row that cannot.
+   */
+  function showTargets(actorId, group, sourceBtn) {
+    var bar = $('actionbar');
+    var existing = bar.querySelector('.target-row');
+    if (existing) existing.parentNode.removeChild(existing);
+    if (pendingVerb === group.key) { pendingVerb = null; return; }   // click again to close
+    pendingVerb = group.key;
+
+    var row = document.createElement('div');
+    row.className = 'target-row';
+    row.setAttribute('role', 'group');
+    row.setAttribute('aria-label', group.label + ' — choose a target');
+
+    var lead = document.createElement('span');
+    lead.className = 'target-lead';
+    lead.textContent = group.label + ':';
+    row.appendChild(lead);
+
+    group.moves.forEach(function (m, i) {
+      var t = document.createElement('button');
+      t.className = 'target-btn';
+      t.type = 'button';
+      var ids = (m.step && m.step.targetIds) || [];
+      var name = ids.map(actorName).filter(Boolean).join(' & ') || m.what;
+      t.innerHTML = esc(name) + healthTag(ids[0]);
+      if (i < 9) t.setAttribute('data-key', String(i + 1));
+      t.onclick = function () { applyMove(actorId, m); };
+      row.appendChild(t);
+    });
+
+    var cancel = document.createElement('button');
+    cancel.className = 'target-btn cancel';
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    cancel.onclick = function () { pendingVerb = null; refreshActionBar(); };
+    row.appendChild(cancel);
+
+    bar.appendChild(row);
+    var first = row.querySelector('.target-btn');
+    if (first) first.focus();
+  }
+
+  /* How badly hurt a target looks, so choosing one is an informed decision
+     rather than a guess at a name. Bands, never exact numbers, for anyone who
+     is not on your own side. */
+  function healthTag(id) {
+    if (!id || !session) return '';
+    var obs = observationFor(actingId());
+    var seen = obs && obs.actors && obs.actors[id];
+    if (!seen) return '';
+    if (seen.hp != null && seen.hpMax) {
+      return ' <span class="tgt-hp">' + seen.hp + '/' + seen.hpMax + '</span>';
+    }
+    if (seen.health) return ' <span class="tgt-hp">' + esc(seen.health) + '</span>';
+    return '';
+  }
+
+  /**
+   * Playing without the mouse.
+   *
+   * Holding Alt reveals a number on each action, and Alt+number takes it. The
+   * numbers are hidden until asked for because a permanent badge on every
+   * button is clutter for the majority who point and click, and invisible
+   * shortcuts are no shortcuts at all — the reveal is what teaches them.
+   *
+   * Escape backs out of a target choice, which is the one place the interface
+   * can otherwise trap you mid-decision.
+   */
+  function bindKeyboard() {
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Alt') document.body.classList.add('show-keys');
+
+      var typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || '');
+
+      if (e.key === 'Escape') {
+        var row = document.querySelector('.target-row');
+        if (row) { refreshActionBar(); e.preventDefault(); return; }
+      }
+
+      if (typing) return;
+
+      if (e.altKey && /^[1-9]$/.test(e.key)) {
+        /* A target row, if one is open, owns the numbers — otherwise the
+           choice you are in the middle of would be ignored in favour of
+           starting a different one. */
+        var scope = document.querySelector('.target-row') || $('actionbar');
+        if (!scope) return;
+        var btn = scope.querySelector('[data-key="' + e.key + '"]');
+        if (btn) { btn.click(); e.preventDefault(); }
+        return;
+      }
+
+      /* Enter from anywhere focuses the composer, which is where a player
+         who wants to say something in their own words is heading. */
+      if (e.key === 'Enter' && !e.shiftKey) {
+        var say = $('say');
+        if (say && document.activeElement !== say) { say.focus(); e.preventDefault(); }
+      }
+    });
+
+    document.addEventListener('keyup', function (e) {
+      if (e.key === 'Alt') document.body.classList.remove('show-keys');
+    });
+    /* Alt-tabbing away leaves the key stuck down otherwise. */
+    window.addEventListener('blur', function () { document.body.classList.remove('show-keys'); });
   }
 
   function legalMovesFor(actorId) {
@@ -670,26 +864,81 @@
 
   /* --------------------------------------------------------- battle --- */
 
+  /**
+   * An attack made by clicking the map.
+   *
+   * Three things were wrong here and each was invisible:
+   *
+   *   · The clicked target was ignored. The resolver reads `targetIds`; this
+   *     set `target` and `targetId`, neither of which anything consults, so
+   *     clicking the wolf on the right attacked whichever enemy happened to be
+   *     first in the legal-move list.
+   *   · Anybody could act. The map lets you select any ally, so a player could
+   *     click a companion and take a turn with them while the initiative sat
+   *     on someone else entirely.
+   *   · It ended with `afterTurn`, which repaints, rather than `humanActed`,
+   *     which passes the turn. Attacking from the map therefore never let the
+   *     monsters reply.
+   */
   function battleAttack(sel, targetId) {
     if (!session || !sel || !targetId) return;
+
+    if (!isMyTurn(sel)) {
+      if (DND.Log) DND.Log.system('It is not ' + (actorName(sel) || 'their') + '\u2019s turn.');
+      return;
+    }
+
     var moves = legalMovesFor(sel).filter(function (m) { return m.family === 'combat'; });
-    if (!moves.length) { if (DND.Log) DND.Log.system('No attack is available from here.'); return; }
-    var m = moves[0];
-    var step = Object.assign({}, m.step, { target: targetId, targetId: targetId });
+    /* Prefer a move that already names this target, so a multiattack or a
+       special strike aimed at that creature is used in preference to a
+       generic one aimed elsewhere. */
+    var m = moves.filter(function (x) {
+      var ids = (x.step && x.step.targetIds) || [];
+      return ids.indexOf(targetId) >= 0 && x.step.verb === 'attack';
+    })[0] || moves.filter(function (x) { return x.step && x.step.verb === 'attack'; })[0] || moves[0];
+
+    if (!m) { if (DND.Log) DND.Log.system('No attack is available from here.'); return; }
+
+    var step = Object.assign({}, m.step, { targetIds: [targetId] });
     var move = Object.assign({}, m, { step: step });
     var command = DND.Dispatch.commandFromMove(session.state, sel, move, { source: 'human' });
-    DND.Game.applyCommand(session, command).then(afterTurn);
+    DND.Game.applyCommand(session, command).then(humanActed);
+  }
+
+  /**
+   * Is it this character's turn, and is this seat a person's to play?
+   *
+   * Out of combat the spotlight is soft and anyone the player controls may
+   * speak; in a fight the initiative decides, and clicking a companion's token
+   * must not let you take their turn.
+   */
+  function isMyTurn(id) {
+    if (!session) return false;
+    var st = session.state;
+    if (st.combat && st.combat.active && st.activeActorId !== id) return false;
+    var ctrl = DND.State ? DND.State.controllerFor(st, id) : { kind: 'human' };
+    return !ctrl || ctrl.kind === 'human';
   }
 
   function battleMove(sel, sq) {
     if (!session || !sel || !sq) return;
+    /* Same turn check as attacking: the map lets you select any ally, and
+       moving someone else's token on their behalf is no more legal than
+       swinging their sword. */
+    if (!isMyTurn(sel)) {
+      if (DND.Log) DND.Log.system('It is not ' + (actorName(sel) || 'their') + '\u2019s turn.');
+      return;
+    }
     var moves = legalMovesFor(sel).filter(function (m) { return m.family === 'movement'; });
     if (!moves.length) return;
     var m = moves[0];
     var step = Object.assign({}, m.step, { point: sq });
     var move = Object.assign({}, m, { step: step });
     var command = DND.Dispatch.commandFromMove(session.state, sel, move, { source: 'human' });
-    DND.Game.applyCommand(session, command).then(afterTurn);
+    /* Moving does not usually end a turn, so this repaints rather than
+       passing the initiative on — but it must go through the same door, or a
+       move that DID spend the last of the economy would strand the table. */
+    DND.Game.applyCommand(session, command).then(humanActed);
   }
 
   /* ============================================================ chrome = */
@@ -713,8 +962,9 @@
       tab.onclick = function () { selectTab(tab.getAttribute('data-tab')); };
     });
 
-    bindClick('btn-undo', function () { if (session) { DND.Game.undo(session); afterTurn(); } });
-    bindClick('btn-redo', function () { if (session) { DND.Game.redo(session); afterTurn(); } });
+    bindKeyboard();
+
+    bindClick('btn-undo', function () { if (session) { DND.Game.undo(session); afterTurn(); } });    bindClick('btn-redo', function () { if (session) { DND.Game.redo(session); afterTurn(); } });
     bindClick('btn-save', function () { doSave(); });
     bindClick('btn-export', function () { doExport(); });
     bindClick('btn-new', function () { DND.Setup && DND.Setup.open(onBegin); });
@@ -771,7 +1021,8 @@
     // the one sanctioned door to a controlled character's raw layers
     layersFor: layersFor, deathPolicy: deathPolicy,
     // models
-    availableModels: availableModels, copilotModels: copilotModels,
+    availableModels: availableModels,
+    refresh: function () { afterTurn(); }, copilotModels: copilotModels,
     // turn affordances
     retryNarration: retryNarration, undoTurn: undoTurn,
     // inventory / level

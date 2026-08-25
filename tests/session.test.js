@@ -144,11 +144,28 @@ async function main() {
     t.section('taking a turn by clicking a button');
     const before = await page.evaluate(() => window.DND.App.session.state.revision);
 
-    await page.evaluate(() => {
-      const b = Array.from(document.querySelectorAll('#actionbar button'))
-        .filter(x => /attack/i.test(x.textContent))[0];
-      b.click();
-    });
+    /* The action bar is deliberately two-step: pick a verb, then pick who it
+       lands on. A single flat list meant every verb was repeated once per
+       possible target, which at a table of four against six goblins was
+       twenty-five near-identical buttons. Driving it the way a person does
+       also keeps this test honest about the target chooser existing.
+
+       These go through real hit-tested clicks on element handles rather than
+       `evaluate(el => el.click())`. The scripted form dispatches straight at
+       the node and ignores anything covering it, which is precisely how an
+       empty full-screen dialog sat over the whole page swallowing every real
+       click while this suite reported green. */
+    const verb = (await Promise.all((await page.$$('#actionbar button')).map(async h =>
+      ({ h, text: await page.evaluate(e => e.textContent, h) }))))
+      .filter(x => /attack/i.test(x.text))[0];
+    t.ok(!!verb, 'the action bar offers an attack verb');
+    if (verb) await verb.h.click();
+    await wait(300);
+
+    const targetHandles = await page.$$('#actionbar .target-btn');
+    t.ok(targetHandles.length > 0, 'choosing a verb offers something to aim it at',
+      '(' + targetHandles.length + ')');
+    if (targetHandles.length) await targetHandles[0].click();
     await wait(2500);
 
     const afterClick = await page.evaluate(() => {
@@ -266,6 +283,32 @@ async function main() {
 
     await page.screenshot({ path: path.join(SHOTS, 'shot-4-panels.png') });
 
+    t.section('nothing is covering the controls');
+    /* The regression that made this worth asserting: `<div class="modal" hidden>`
+       does not hide, because the `hidden` attribute only carries the browser's
+       own `display: none` and any class selector outranks it. The empty death
+       dialog therefore covered the entire page from first paint, and every real
+       click on Save, Export, Undo or the composer hit the dialog instead. The
+       suite stayed green because scripted `.click()` ignores what is on top.
+
+       So: ask the browser what would actually receive the click. */
+    const blocked = await page.evaluate(() => {
+      const ids = ['btn-undo', 'btn-save', 'btn-export', 'say'];
+      const out = [];
+      ids.forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) { out.push(id + ' (missing)'); return; }
+        const b = el.getBoundingClientRect();
+        const top = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+        if (top !== el && !el.contains(top)) {
+          out.push(id + ' covered by ' + (top ? (top.id || top.className || top.tagName) : 'nothing'));
+        }
+      });
+      return out;
+    });
+    t.eq(blocked.length, 0, 'every top-bar control actually receives its own clicks',
+      blocked.join('; '));
+
     /* ------------------------------------------------------------- undo -- */
     t.section('undo');
     const preUndo = await page.evaluate(() => {
@@ -298,14 +341,18 @@ async function main() {
 
     const newest = fresh
       .map(f => ({ f, m: fs.statSync(path.join(exportDir, f)).mtimeMs }))
-      .sort((a, b) => b.m - a.m)[0];
+      .sort((a, b) => b.m - a.m)[0] || null;
     /* Only files this click produced. Looking at the newest file in the whole
        folder made the test depend on whatever else happened to be writing
-       there — a playtest log running in another window failed it. */
-    t.ok(/\.(json|md)$/.test(newest.f), 'and the newest file is a save or a transcript',
-      '(' + newest.f + ')');
+       there — a playtest log running in another window failed it.
 
-    if (/\.json$/.test(newest.f)) {
+       Guarded because an export that writes nothing used to crash the runner
+       here with a TypeError, which buried the real failure above under a
+       stack trace and stopped every later assertion from running. */
+    t.ok(newest && /\.(json|md)$/.test(newest.f), 'and the newest file is a save or a transcript',
+      '(' + (newest ? newest.f : 'nothing written') + ')');
+
+    if (newest && /\.json$/.test(newest.f)) {
       const blob = JSON.parse(fs.readFileSync(path.join(exportDir, newest.f), 'utf8'));
       t.eq(blob.format, 'aethertable-save', 'the export is a well-formed save');
       t.ok(!!blob.digest, 'it carries a human-readable digest');

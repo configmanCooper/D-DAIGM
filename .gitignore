@@ -30,3 +30,7 @@ _source/
 # Python bytecode from the one-off SRD extraction scripts
 __pycache__/
 *.pyc
+
+# UI screenshots written by tests/shots.js, regenerated on demand
+shots/
+shots[0-9]/

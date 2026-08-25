@@ -34,7 +34,19 @@
 
   function req(p) { return typeof require !== 'undefined' ? require(p) : null; }
   var Events = (global.DND && global.DND.Events) || req('./events.js');
-  var Chargen = (global.DND && global.DND.Chargen) || req('../gen/chargen.js');
+  /**
+   * Resolved when it is USED, not when this file loads.
+   *
+   * chargen.js comes after this file in the page's script order, so an alias
+   * taken at module scope was null for the whole session — and building a
+   * replacement character after a death threw "Cannot read properties of
+   * null". The classic no-build-step load-order trap: the alias reads as
+   * correct and simply is not there yet.
+   */
+  function chargen() {
+    return (global.DND && global.DND.Chargen) ||
+      (typeof require !== 'undefined' ? req('../gen/chargen.js') : null);
+  }
   var Character = (global.DND && global.DND.Character) || req('./character.js');
   var RNG = (global.DND && global.DND.RNG) || (req('../rng.js') || {}).RNG;
 
@@ -332,6 +344,8 @@
       ? Math.max(1, Math.round(levels.reduce(function (x, y) { return x + y; }, 0) / levels.length))
       : 1;
 
+    var Chargen = chargen();
+    if (!Chargen) return { ok: false, error: 'no character generator available' };
     var spec = Chargen.generate({
       rng: rng,
       fixed: Object.assign({ levels: level }, opts.fixed || {}),

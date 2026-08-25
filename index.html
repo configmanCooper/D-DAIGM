@@ -77,7 +77,10 @@
 <!-- ------------------------------------------------------- SETUP WIZARD -->
 <!-- Built and driven by js/ui/setup.js. Static so the model <select> below can
      be checked without running the page: its first option is always local. -->
-<div class="modal" id="modal-setup" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+<!-- Someone has died and the table has to decide what that means. -->
+  <div class="modal" id="modal-death" role="dialog" aria-modal="true" aria-label="Someone has died" hidden></div>
+
+  <div class="modal" id="modal-setup" role="dialog" aria-modal="true" aria-labelledby="setup-title">
   <div class="box" id="setup-box">
     <h1 id="setup-title">AETHERTABLE</h1>
     <p class="sub">A tabletop the whole way down: the engine rolls every die, the model only
@@ -241,6 +244,7 @@
 <script src="js/ui/watch.js"></script>
 <script src="js/ui/levelup.js"></script>
 <script src="js/ui/setup.js"></script>
+<script src="js/ui/death.js"></script>
 <script src="js/ui/app.js"></script>
 
 </body>

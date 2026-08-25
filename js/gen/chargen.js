@@ -24,7 +24,22 @@
   function Data() {
     if (_data) return _data;
     var g = global.DND && global.DND.Data;
-    if (g && g.RACES && g.CLASSES) { _data = g; return _data; }
+    if (g && g.RACES && g.CLASSES) {
+      _data = g;
+      /* A partially-populated namespace is the normal case under Node, where
+         whichever module loaded first may have registered RACES and CLASSES
+         and nothing else. Taking it as-is and caching it left SKILLS missing,
+         which is not obvious at the call site and fails silently. Top up from
+         the modules that own the missing tables. */
+      if (!_data.SKILLS && typeof require !== 'undefined') {
+        try {
+          var r = require('../data/srd_rules.js');
+          if (!_data.SKILLS) _data.SKILLS = r.SKILLS;
+          if (!_data.BACKGROUNDS) _data.BACKGROUNDS = r.BACKGROUNDS;
+        } catch (e) { /* browser: srd_rules.js populates DND.Data directly */ }
+      }
+      return _data;
+    }
     if (typeof require !== 'undefined') {
       try {
         _data = {
@@ -42,6 +57,14 @@
 
   var ABIL = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
   var STANDARD_ARRAY = [15, 14, 13, 12, 10, 8];
+
+  /* The eighteen skills of the 2014 ruleset, as a last-resort pool for a class
+     whose choices are "any" when the skill table cannot be reached. */
+  var ALL_SKILLS = [
+    'acrobatics', 'animalHandling', 'arcana', 'athletics', 'deception', 'history',
+    'insight', 'intimidation', 'investigation', 'medicine', 'nature', 'perception',
+    'performance', 'persuasion', 'religion', 'sleightOfHand', 'stealth', 'survival',
+  ];
 
   /* ------------------------------------------------------ recommendations -- */
 
@@ -188,8 +211,8 @@
           (cls.savingThrows || []).map(upper).join(' and ') + '.' +
           (cls.subclassLevel ? ' You choose a subclass at level ' + cls.subclassLevel + '.' : '');
         /* Only recommend skills the class can actually take. */
-        var allowed = cls.skillChoices && cls.skillChoices.from;
-        if (allowed) {
+        var allowed = skillPool(D, cls);
+        if (allowed.length) {
           out.skills = out.skills.filter(function (s) { return allowed.indexOf(s) >= 0; });
           while (out.skills.length < (cls.skillChoices.count || 2)) {
             var next = allowed.filter(function (s) { return out.skills.indexOf(s) < 0; })[0];
@@ -234,6 +257,27 @@
         (D.BACKGROUNDS[out.background].feature.name || '') || '';
     }
     return out;
+  }
+
+  /**
+   * The skills a class may actually choose from.
+   *
+   * Most classes list them explicitly. The bard's list is the single sentinel
+   * `['any']`, because a bard picks any three skills in the game — and every
+   * caller here treated that array as a list of skill ids. So a generated bard
+   * came away with exactly one proficiency, in a skill literally named "any":
+   * short of the three the class is owed, which left the Begin button disabled
+   * on roughly one random character in thirteen, and nonsense on the sheet for
+   * anyone who got that far.
+   */
+  function skillPool(D, cls) {
+    var from = (cls && cls.skillChoices && cls.skillChoices.from) || [];
+    if (from.indexOf('any') < 0) return from.slice();
+    var all = Object.keys((D && D.SKILLS) || {});
+    /* Never return an empty pool: doing so would hand the bard no skills at
+       all, which is worse than the bug this replaced. The 2014 skill list is
+       fixed by the ruleset, so a literal is a safe last resort. */
+    return all.length ? all : ALL_SKILLS.slice();
   }
 
   function skillReason(skill, classId) {
@@ -353,7 +397,7 @@
     var cls = (D.CLASSES || {})[classId] || {};
     var skills = fixed.skills;
     if (!skills) {
-      var pool = (cls.skillChoices && cls.skillChoices.from) || [];
+      var pool = skillPool(D, cls);
       var want = (cls.skillChoices && cls.skillChoices.count) || 2;
       skills = build.skills.filter(function (s) { return pool.indexOf(s) >= 0; }).slice(0, want);
       var rest = pool.filter(function (s) { return skills.indexOf(s) < 0; });

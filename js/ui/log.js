@@ -98,7 +98,10 @@
     var det = document.createElement('details');
     det.className = 'beats';
     var sum = document.createElement('summary');
-    sum.textContent = 'What actually happened (' + beats.length + ' step' + (beats.length === 1 ? '' : 's') + ')';
+    /* Terse, because this label sits under EVERY turn. "What actually
+       happened (3 steps)" is a sentence where a word will do; three of them
+       stacked made the log read as more chrome than story. */
+    sum.textContent = beats.length + ' roll' + (beats.length === 1 ? '' : 's');
     det.appendChild(sum);
 
     beats.forEach(function (b) {
@@ -111,20 +114,31 @@
     (batch.events || []).filter(function (ev) { return ev.kind === 'roll'; }).forEach(function (ev) {
       det.appendChild(rollBlock(ev));
     });
-    e.appendChild(det);
 
-    // per-turn tools: retry the words, undo the turn
+    /* Per-turn tools live beside the roll count rather than on their own row.
+       They matter, but they are a rare click and were taking a third of the
+       column: two full-width buttons under every single line of prose. They
+       are icon-sized now, and only reveal their words on hover or focus. */
     var tools = document.createElement('div');
     tools.className = 'turn-tools';
+    tools.appendChild(det);
+
     var retry = document.createElement('button');
     retry.type = 'button';
-    retry.textContent = '↻ Retry narration';
-    retry.title = 'Rewrite the prose — the dice do not move';
+    retry.className = 'turn-tool';
+    retry.innerHTML = '\u21bb<span class="tt-label">Retry the words</span>';
+    retry.title = 'Rewrite the prose \u2014 the dice do not move';
+    retry.setAttribute('aria-label', 'Retry narration');
     retry.onclick = function () { if (App) App.retryNarration(commandId); };
+
     var undo = document.createElement('button');
     undo.type = 'button';
-    undo.textContent = '↶ Undo this turn';
+    undo.className = 'turn-tool';
+    undo.innerHTML = '\u21b6<span class="tt-label">Undo this turn</span>';
+    undo.title = 'Take this turn back';
+    undo.setAttribute('aria-label', 'Undo this turn');
     undo.onclick = function () { if (App) App.undoTurn(commandId); };
+
     tools.appendChild(retry);
     tools.appendChild(undo);
     e.appendChild(tools);

@@ -288,4 +288,74 @@ t.section('the policy is actually enforced through combat, not just described');
     'the same rolls under a gritty campaign do kill');
 }
 
+
+/* ---------------------------------------------------------------------- */
+t.section('a party wipe does not park the initiative on a monster');
+/*
+ * When every party member is down, explorationOrder is empty — nobody has hit
+ * points — so the initiative had nowhere to go and simply stayed where it was:
+ * with the monster that had just floored them. The turn loop then asked that
+ * monster to act, out of combat, where there is no action economy to spend and
+ * no initiative to advance. A real playtest printed five consecutive
+ * Gelatinous Cube turns reading "It does not work." while the unconscious
+ * paladin's death saves went unrolled.
+ */
+{
+  const Game = require('../js/game.js');
+  const st = scene('standard', { solo: true, heroHp: 20 });
+
+  // Put the hero on the floor, out of combat, with the foe holding the turn.
+  const b = Events.makeBatch({ commandId: 'wipe' });
+  Events.push(b, 'hp', { targetId: 'hero', delta: -100 }, 'down');
+  Events.commit(st, b);
+  st.combat = { active: false, order: [], turnIndex: 0, round: 1 };
+  st.activeActorId = 'foe';
+
+  const session = { state: st, campaign: { id: 'test' }, listeners: {}, history: [], future: [] };
+
+  t.eq(st.actors.hero.runtime.hp, 0, 'the hero is down');
+  t.eq(!!st.actors.hero.runtime.dead, false, 'but not dead');
+
+  const moved = Game.advanceTurn(session, {});
+  t.eq(moved.ok, true, 'the turn still advances');
+  t.eq(moved.actorId === 'foe', false,
+    'and it does not stay with the monster that floored the party',
+    '(went to ' + moved.actorId + ')');
+  t.eq(moved.actorId, 'hero',
+    'it goes to the dying character, whose turn is when death saves are rolled');
+
+  /* Rolling those saves is the whole point: the scene has to resolve one way
+     or the other rather than sitting still. */
+  let rounds = 0;
+  while (rounds < 12 && !st.actors.hero.runtime.dead && st.actors.hero.runtime.hp <= 0 &&
+         !st.actors.hero.runtime.stable) {
+    Game.advanceTurn(session, {});
+    rounds++;
+  }
+  const ds = st.actors.hero.runtime.deathSaves;
+  t.ok(ds.successes > 0 || ds.failures > 0 || st.actors.hero.runtime.dead || st.actors.hero.runtime.stable,
+    'death saves actually get rolled out of combat',
+    '(' + ds.successes + ' ✓ / ' + ds.failures + ' ✗' +
+    (st.actors.hero.runtime.dead ? ', died' : '') +
+    (st.actors.hero.runtime.stable ? ', stabilised' : '') + ')');
+  t.ok(rounds < 12, 'and the scene resolves rather than spinning', '(' + rounds + ' turns)');
+}
+
+t.section('with everyone truly dead the loop stops instead of spinning');
+{
+  const Game = require('../js/game.js');
+  const st = scene('standard', { solo: true, heroHp: 20 });
+  const b = Events.makeBatch({ commandId: 'kill' });
+  Events.push(b, 'hp', { targetId: 'hero', delta: -100 }, 'down');
+  Events.commit(st, b);
+  st.actors.hero.runtime.dead = true;
+  st.combat = { active: false, order: [], turnIndex: 0, round: 1 };
+  st.activeActorId = 'foe';
+  const session = { state: st, campaign: { id: 'test' }, listeners: {}, history: [], future: [] };
+
+  const moved = Game.advanceTurn(session, {});
+  t.eq(moved.actorId, null,
+    'the initiative is cleared rather than handed to the surviving monster');
+}
+
 t.done();

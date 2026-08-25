@@ -158,4 +158,48 @@ t.section('css meets the accessibility floor');
     'style.css pairs colour with a ::before glyph/label (no colour-only indicators)');
 }
 
+/* -------------------------------------------- module load order is safe -- */
+/**
+ * A module that takes `var X = global.DND.X` at load time gets `undefined` if
+ * its provider's script tag comes LATER in the page. There is no build step to
+ * catch it and no error at the time: the alias is simply null for the whole
+ * session, and whatever depends on it silently does nothing. It behaves
+ * perfectly under Node, where `require` resolves on demand — so the tests pass
+ * and the game is broken.
+ *
+ * That is exactly how building a replacement character after a death came to
+ * throw "Cannot read properties of null", and how the level-up recommendations
+ * came to be missing in the browser while every suite was green.
+ */
+t.section('no module aliases something that loads after it');
+{
+  const html = read('index.html');
+  const order = [...html.matchAll(/<script src="([^"]+)"/g)].map(m => m[1]);
+  const position = {};
+  order.forEach((file, i) => { position[file] = i; });
+
+  const problems = [];
+  order.forEach(file => {
+    if (file.indexOf('js/') !== 0) return;
+    let src;
+    try { src = read(file); } catch (e) { return; }
+    /* Only the head matters. An alias taken inside a function body resolves
+       when that function runs, which is always late enough. */
+    const head = src.slice(0, 3000);
+    [...head.matchAll(/var (\w+) = \(global\.DND && global\.DND\.(\w+)\)/g)].forEach(m => {
+      const prop = m[2];
+      const owner = order.filter(o => {
+        if (o.indexOf('js/') !== 0) return false;
+        try { return read(o).indexOf('global.DND.' + prop + ' =') >= 0; } catch (e) { return false; }
+      })[0];
+      if (owner && position[owner] > position[file]) {
+        problems.push(file + ' aliases DND.' + prop + ', but ' + owner + ' loads later');
+      }
+    });
+  });
+
+  t.deep(problems, [],
+    'every module-scope DND alias is provided by a script that loads earlier');
+}
+
 t.done();
