@@ -455,3 +455,66 @@ t.section('every random character is one the setup screen will accept');
   t.eq(bard.skills.filter(s => !SKILLS[s]).length, 0, 'all three are real skills');
   t.eq(new Set(bard.skills).size, 3, 'and they are three different ones');
 }
+
+/* ---------------------------------------------------------------------- */
+t.section('a generated caster can actually take a turn in a fight');
+/*
+ * Found by playing, not by reading. Spells were drawn purely at random from
+ * the class list, which produced a level-three wizard whose entire repertoire
+ * was Rope Trick, Continual Flame, Mirror Image and Levitate, with Dancing
+ * Lights, Minor Illusion and True Strike for cantrips — not a single point of
+ * damage anywhere in it. That character cannot do anything on its turn but
+ * hit someone with a stick, and across a four-hundred-turn playthrough it
+ * meant the whole magic system went unexercised.
+ *
+ * The classifier matters as much as the fix: two separate callers decided
+ * whether a spell was offensive by looking for `mech.damage` and `mech.attack`,
+ * fields which do not exist. The real shape is `mech.effects[]`, and reading
+ * the wrong one returns false for every spell in the game — Acid Splash and
+ * Shocking Grasp both read as harmless.
+ */
+{
+  const Spells = require('../js/data/srd_spells.js');
+  const Character = require('../js/engine/character.js');
+
+  t.ok(Spells.isOffensive(Spells.SPELLS['acid-splash']), 'Acid Splash can hurt somebody');
+  t.ok(Spells.isOffensive(Spells.SPELLS['shocking-grasp']), 'so can Shocking Grasp');
+  t.ok(Spells.isOffensive(Spells.SPELLS['magic-missile']), 'and Magic Missile');
+  t.ok(Spells.isOffensive(Spells.SPELLS.fireball), 'and Fireball');
+  t.eq(Spells.isOffensive(Spells.SPELLS['cure-wounds']), false, 'Cure Wounds cannot');
+  t.eq(Spells.isOffensive(Spells.SPELLS.light), false, 'and neither can Light');
+  t.ok(Spells.isHealing(Spells.SPELLS['cure-wounds']), 'Cure Wounds is healing');
+  t.eq(Spells.isHealing(Spells.SPELLS.sleep), false,
+    'Sleep is not healing, whatever its hit-point pool suggests');
+
+  const offensive = Object.keys(Spells.SPELLS).filter(k => Spells.isOffensive(Spells.SPELLS[k]));
+  t.ok(offensive.length > 50, 'the classifier finds the damaging spells in the data',
+    '(' + offensive.length + ' of ' + Object.keys(Spells.SPELLS).length + ')');
+
+  let checked = 0, helpless = 0;
+  const examples = [];
+  ['wizard', 'cleric', 'sorcerer', 'bard', 'druid', 'warlock'].forEach(classId => {
+    for (let i = 0; i < 25; i++) {
+      const c = Character.buildFromSpec({
+        name: classId + '-' + i, raceId: 'human', classId, levels: 1 + (i % 5),
+        backgroundId: 'sage',
+        abilities: { str: 10, dex: 14, con: 13, int: 16, wis: 16, cha: 16 },
+        proficiencies: { skills: [] },
+      });
+      checked++;
+      const canFight =
+        (c.progression.cantripsKnown || []).some(id => Spells.isOffensive(Spells.SPELLS[id])) ||
+        (c.progression.preparedSpells || []).some(id => Spells.isOffensive(Spells.SPELLS[id]));
+      if (!canFight) {
+        helpless++;
+        if (examples.length < 2) {
+          examples.push(classId + ': ' + (c.progression.cantripsKnown || []).join(',') +
+            ' / ' + (c.progression.preparedSpells || []).join(','));
+        }
+      }
+    }
+  });
+  t.ok(checked > 100, 'enough generated casters to be meaningful', '(' + checked + ')');
+  t.eq(helpless, 0, 'every one of them has some way to hurt an enemy',
+    examples.join(' | '));
+}

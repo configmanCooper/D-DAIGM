@@ -838,14 +838,24 @@
 
     var ring = explorationOrder(session);
     if (!ring.length) {
-      /* Nobody is on their feet. Hand the turn to whoever is dying so their
-         death saves get rolled; if there is no one left at all, clear the
-         initiative so the loop stops with "nobody is acting" instead of
-         asking the last monster standing to act for ever. */
+      /* Nobody is on their feet. Hand the turn to whoever is still rolling
+         death saves so the scene resolves; if everyone left is stable or dead,
+         there is nothing to resolve by taking turns. */
       var dying = dyingOrder(session);
-      state.activeActorId = dying.length
-        ? dying[(dying.indexOf(state.activeActorId) + 1) % dying.length]
-        : null;
+      if (!dying.length) {
+        /* A party lying stable at zero hit points is not a stalemate in the
+           2014 rules: a stable creature that takes no further damage regains
+           one hit point after 1d4 hours. Sitting on the initiative waiting for
+           it burned forty loop steps a call and a thousand revisions a minute
+           while nothing whatever happened. Let the time pass. */
+        var down = downedParty(session);
+        if (down.length) return wakeTheStable(session, down);
+        state.activeActorId = null;
+        State.advanceTurnEpoch(state);
+        emit(session, 'turn', { actorId: null, round: null });
+        return { ok: true, actorId: null };
+      }
+      state.activeActorId = dying[(dying.indexOf(state.activeActorId) + 1) % dying.length];
       State.advanceTurnEpoch(session.state);
       if (state.activeActorId) {
         var open = Combat.startTurn(state, state.activeActorId, { alreadyStarted: true });
@@ -874,25 +884,37 @@
   }
 
   /**
-   * Party members who are down but not yet dead.
+   * Party members who are down but not yet dead, and who still have something
+   * to resolve — that is, who are still rolling death saves.
    *
    * When a fight ends with everyone on the floor, `explorationOrder` is empty
    * — nobody has hit points — and the initiative had nowhere to go, so it
    * stayed with whatever was holding it: the monster that put them there. The
    * loop then asked that monster to act, over and over, out of combat, where
-   * there is no action economy to spend and no initiative to advance. A real
-   * playtest printed five consecutive Gelatinous Cube turns reading "It does
-   * not work." while an unconscious paladin's death saves went unrolled.
+   * there is no action economy to spend and no initiative to advance.
    *
-   * These characters still have turns to take: a creature at 0 hit points
-   * rolls a death saving throw on each of its own turns, and that is how the
-   * scene resolves one way or the other.
+   * STABLE characters are excluded. A stabilised creature rolls no more death
+   * saves, so handing it the turn achieves nothing at all — and a party that
+   * was entirely stable at zero hit points span the loop for ever, burning
+   * forty steps a call and climbing a thousand revisions a minute while
+   * absolutely nothing happened.
    */
   function dyingOrder(session) {
     var state = session.state;
     var seated = (state.seats || []).map(function (s) { return s.actorId; });
     var party = State.partyIds(state).filter(function (id) { return seated.indexOf(id) < 0; });
     return seated.concat(party).filter(function (id) {
+      var a = state.actors[id];
+      return a && !a.runtime.dead && a.runtime.hp <= 0 && !a.runtime.stable;
+    });
+  }
+
+  /**
+   * Everyone who is down, whether or not they are still rolling.
+   */
+  function downedParty(session) {
+    var state = session.state;
+    return State.partyIds(state).filter(function (id) {
       var a = state.actors[id];
       return a && !a.runtime.dead && a.runtime.hp <= 0;
     });
@@ -910,6 +932,37 @@
     if (up.length) return up[0];
     var dying = dyingOrder(session);
     return dying.length ? dying[0] : null;
+  }
+
+  /**
+   * Hours pass, and the stable wake at one hit point.
+   *
+   * PHB, "Stabilizing a Creature": a stable creature that takes no further
+   * damage regains 1 hit point after 1d4 hours. It is the rule that stops a
+   * party lying unconscious in a field from being the permanent end of a
+   * campaign — and without it the turn loop had nothing to advance and span.
+   */
+  function wakeTheStable(session, down) {
+    var state = session.state;
+    var hours = 1 + Math.floor((state.rng ? state.rng.next() : Math.random()) * 4);
+    var batch = Events.makeBatch({ commandId: 'wake:' + state.revision, actorId: null });
+    Events.push(batch, 'time', { minutes: hours * 60 },
+      'Hours pass. ' + (hours === 1 ? 'An hour' : hours + ' hours') + ', by the light.');
+    down.forEach(function (id) {
+      var a = state.actors[id];
+      if (!a || a.runtime.dead) return;
+      Events.push(batch, 'revive', { actorId: id, hp: 1 },
+        (a.name || id) + ' comes round, barely.');
+    });
+    Events.commit(state, batch);
+    State.refreshAllDerived(state);
+
+    var ring = explorationOrder(session);
+    state.activeActorId = ring.length ? ring[0] : null;
+    State.advanceTurnEpoch(state);
+    emit(session, 'turn', { actorId: state.activeActorId, round: null });
+    emit(session, 'partyRecovered', { hours: hours, who: down.slice() });
+    return { ok: true, actorId: state.activeActorId, recovered: down.length };
   }
 
   function endEncounter(session, over) {

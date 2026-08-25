@@ -17461,5 +17461,47 @@
     }
   }
 };
-  return { SPELLS: SPELLS };
+  /**
+   * Does this spell do something to an enemy?
+   *
+   * The shape is `mech.effects[]`, where each effect has a `kind` — attack,
+   * save, auto, heal, area, condition — and damaging ones carry a `damage`
+   * array. Guessing at top-level `mech.damage` or `mech.attack` fields, which
+   * is what two separate callers did, returns false for every spell in the
+   * game: Acid Splash and Shocking Grasp both read as harmless, so a
+   * generated caster could be handed a repertoire with nothing in it that
+   * hurts anybody, and a companion policy never found a spell worth casting.
+   *
+   * Lives here because this module owns the shape.
+   */
+  function isOffensive(spell) {
+    var fx = (spell && spell.mech && spell.mech.effects) || [];
+    for (var i = 0; i < fx.length; i++) {
+      var e = fx[i];
+      if (!e) continue;
+      if (e.damage && e.damage.length) return true;
+      if (e.kind === 'attack') return true;
+      if (e.kind === 'auto' && e.perDart) return true;
+      if (e.kind === 'save' && (e.condition || e.damage)) return true;
+      if (e.kind === 'condition' && e.hostile !== false) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Does this spell put hit points back?
+   *
+   * `hp_pool` is deliberately NOT healing: it is Sleep's targeting mechanic —
+   * a pool of hit points that decides who drops — and counting it made Sleep
+   * read as a healing spell, which is the opposite of what it does.
+   */
+  function isHealing(spell) {
+    var fx = (spell && spell.mech && spell.mech.effects) || [];
+    for (var i = 0; i < fx.length; i++) {
+      if (fx[i] && fx[i].kind === 'heal') return true;
+    }
+    return false;
+  }
+
+  return { SPELLS: SPELLS, isOffensive: isOffensive, isHealing: isHealing };
 });

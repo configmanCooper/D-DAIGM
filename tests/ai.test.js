@@ -245,8 +245,101 @@ return Referee.parse('I attack the Gate-Born', obs, options, { actorId: 'shen' }
   .then(runOfflineTests)
   .then(runStreamSafetyTests)
   .then(runSeatSpeechTests)
+  .then(runCasterPolicyTests)
   .then(() => t.done())
   .catch(err => { console.error(err); process.exit(1); });
+
+/* ------------------------------------------------ a caster should cast -- */
+/**
+ * The fallback policy — the one that runs every companion and every seat with
+ * no model behind it — went straight for `attack`. A wizard companion
+ * therefore spent every fight poking with a quarterstaff while holding Magic
+ * Missile, and a cleric never healed anybody who was merely wounded. Across a
+ * four-hundred-turn playthrough this produced one spell cast and not a single
+ * spell slot spent: the whole magic system, present and unplayed.
+ */
+function runCasterPolicyTests() {
+  const State = require('../js/engine/state.js');
+  const Character = require('../js/engine/character.js');
+  const Knowledge = require('../js/engine/knowledge.js');
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+  const PlayerAgent = require('../js/ai/player_agent.js');
+  const MONSTERS = require('../js/data/srd_monsters.js').MONSTERS;
+
+  t.section('a caster companion casts');
+
+  function fight(classId, foeKey, foeHp) {
+    const st = State.create({ seed: 'caster-' + classId });
+    const c = Character.buildFromSpec({
+      name: 'Caster', raceId: 'human', classId, levels: 3, backgroundId: 'sage',
+      abilities: { str: 8, dex: 15, con: 13, int: 17, wis: 17, cha: 17 },
+      proficiencies: { skills: [] },
+    });
+    c.runtime.pos = { x: 2, y: 2 };
+    State.addActor(st, {
+      id: 'pc1', name: 'Caster', side: 'party', kind: 'pc', role: classId,
+      base: c.base, progression: c.progression, runtime: c.runtime,
+    });
+    const sb = MONSTERS[foeKey] || MONSTERS.goblin;
+    State.addActor(st, {
+      id: 'foe1', name: sb.name, side: 'enemy', kind: 'monster', statblock: sb,
+      base: {
+        name: sb.name, abilities: sb.abilities || {},
+        proficiencies: { skills: [], saves: [] }, classes: [],
+      },
+      progression: { xp: 0, levels: [] },
+      runtime: {
+        hp: foeHp, hpMax: sb.hp || foeHp, tempHp: 0, conditions: {}, exhaustion: 0,
+        concentratingOn: null, attuned: [], equipped: {}, inventory: [],
+        deathSaves: { successes: 0, failures: 0 }, resources: {}, gold: 0,
+        pos: { x: 4, y: 2 },
+      },
+    });
+    State.addSeat(st, { id: 'p1', name: 'P', actorId: 'pc1', control: 'human' });
+    State.refreshAllDerived(st);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: [{ id: 'pc1' }, { id: 'foe1' }] };
+    st.activeActorId = 'pc1';
+    st.actors.pc1.runtime.turn = {
+      action: true, bonus: true, reaction: true, objectInteraction: true,
+      movementRemaining: 30, surprised: false, mountedThisMove: false,
+    };
+    const store = Knowledge.makeStore();
+    store.known = st.knowledge;
+    return { st, store };
+  }
+
+  /* The move list must tell a chooser what kind of spell each one is, or every
+     cast looks identical and the first — always a cantrip — always wins. */
+  const tagged = fight('wizard', 'orc', 15);
+  const casts = (Dispatch.legalMoves(tagged.st, 'pc1', {}) || [])
+    .filter(m => m.step && m.step.verb === 'cast');
+  t.ok(casts.length > 0, 'a wizard is offered spells', '(' + casts.length + ')');
+  t.ok(casts.every(m => typeof m.spellLevel === 'number'),
+    'and every spell move says what level it is');
+  t.ok(casts.some(m => m.offensive), 'at least one of which can hurt somebody',
+    '(' + casts.filter(m => m.offensive).map(m => m.what).join(', ') + ')');
+
+  return PlayerAgent.takeTurn(tagged.st, { past: [], future: [] }, tagged.store, 'pc1',
+    { forcePolicy: true })
+    .then(turn => {
+      const what = (turn.chosen && turn.chosen.move && turn.chosen.move.what) || '';
+      t.ok(/^Cast /.test(what), 'a wizard facing a healthy orc casts rather than swings',
+        '(' + what + ')');
+      t.ok(Object.keys(tagged.st.actors.pc1.runtime.slotsSpent || {}).length > 0,
+        'and spends a spell slot doing it',
+        '(' + JSON.stringify(tagged.st.actors.pc1.runtime.slotsSpent) + ')');
+
+      /* Against something nearly dead, a cantrip is the right call — no slot. */
+      const easy = fight('wizard', 'goblin', 1);
+      return PlayerAgent.takeTurn(easy.st, { past: [], future: [] }, easy.store, 'pc1',
+        { forcePolicy: true }).then(t2 => {
+        const w2 = (t2.chosen && t2.chosen.move && t2.chosen.move.what) || '';
+        t.ok(w2.length > 0, 'and it still takes a turn against a dying enemy', '(' + w2 + ')');
+      });
+    });
+}
 
 /* ------------------------------------------------- streaming is gated -- */
 /**

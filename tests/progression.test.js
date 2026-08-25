@@ -262,4 +262,58 @@ t.section('experience survives a save and reload');
   t.eq(loaded.state.actors.p1.progression.xp, xp, 'and it survives a save/load round trip');
 }
 
+
+/* ---------------------------------------------------------------------- */
+t.section('"choose for me" never suggests an illegal improvement');
+/*
+ * Found by a four-hundred-turn playthrough, not by reading: `recommendedAsi`
+ * offered +2 to a score of 19 (taking it to 21) because the score was odd, and
+ * fell back to Constitution without checking whether Constitution was itself
+ * already 20. The level-up screen's own validator then rejected its own
+ * recommendation, so a character with any maxed ability simply could not level
+ * up — "choose for me" failed and there was nothing to tell the player why.
+ */
+{
+  const Character = require('../js/engine/character.js');
+
+  const at = (abilities, label) => {
+    const c = Character.buildFromSpec({
+      name: 'T', raceId: 'human', classId: 'fighter', levels: 3,
+      backgroundId: 'soldier', abilities,
+      proficiencies: { skills: ['athletics'] },
+    });
+    c.progression.xp = 6500;
+    const options = LevelUp.optionsFor(c.base, c.progression, {});
+    const choices = LevelUp.autoChoose(c.base, c.progression, options, {});
+    const errors = LevelUp.validate(options, choices);
+    t.eq(errors.length, 0, label + ': the automatic choice is legal',
+      errors.join('; ') || '(' + JSON.stringify(choices.asi) + ')');
+    return { options, choices, character: c };
+  };
+
+  at({ str: 17, dex: 14, con: 15, int: 10, wis: 12, cha: 10 }, 'an ordinary character');
+  at({ str: 19, dex: 14, con: 15, int: 10, wis: 12, cha: 10 }, 'one ability at 19');
+  at({ str: 20, dex: 14, con: 15, int: 10, wis: 12, cha: 10 }, 'one ability at 20');
+  at({ str: 20, dex: 20, con: 20, int: 20, wis: 20, cha: 20 }, 'every ability at 20');
+  at({ str: 20, dex: 20, con: 20, int: 20, wis: 20, cha: 19 }, 'all but one at 20');
+
+  /* And the improvement it picks must actually be worth having. */
+  const ordinary = at({ str: 17, dex: 14, con: 15, int: 10, wis: 12, cha: 10 },
+    'an ordinary fighter, again');
+  t.deep(ordinary.choices.asi.abilities, ['str'],
+    'a fighter puts the points into Strength');
+
+  /* A fully capped character gets an empty improvement rather than an illegal
+     one, and the level still applies. */
+  const capped = at({ str: 20, dex: 20, con: 20, int: 20, wis: 20, cha: 20 },
+    'every ability at 20, again');
+  t.eq((capped.choices.asi.abilities || []).length, 0,
+    'a fully capped character is offered no improvement at all');
+  const batch = LevelUp.applyLevel(capped.character.base, capped.character.progression,
+    capped.options, capped.choices, { actorId: 'pc1' });
+  t.ok(!!batch, 'and the level-up still produces events');
+  t.ok((batch.events || []).some(e => e.kind === 'level'),
+    'including the level itself');
+}
+
 t.done();

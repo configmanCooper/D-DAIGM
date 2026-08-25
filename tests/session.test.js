@@ -35,6 +35,23 @@ const SHOTS = __dirname;
 
 const wait = ms => new Promise(r => setTimeout(r, ms));
 
+/**
+ * Wait for a condition in the page rather than for a fixed number of
+ * milliseconds. Under full-suite load the model and the monsters' turns take
+ * longer than any constant short enough to be worth using, and assertions
+ * failed for timing rather than for anything they were meant to check.
+ */
+async function waitFor(page, fn, timeoutMs) {
+  const deadline = Date.now() + (timeoutMs || 15000);
+  for (;;) {
+    let ok = false;
+    try { ok = await page.evaluate(fn); } catch (e) { ok = false; }
+    if (ok) return true;
+    if (Date.now() > deadline) return false;
+    await wait(250);
+  }
+}
+
 async function main() {
   if (!CHROME) { console.log('  no Chrome found; skipping.'); process.exit(0); }
   try { await (await fetch(URL + 'api/status')).json(); }
@@ -212,7 +229,14 @@ async function main() {
         .filter(b => /end turn/i.test(b.textContent))[0];
       if (end) end.click();
     });
-    await wait(3500);
+    /* Wait for the turn to actually pass rather than sleeping a fixed time.
+       Under full-suite load the DM and the monsters' turns take longer than
+       any constant that is short enough to be worth using, and this assertion
+       failed for timing rather than for anything about the turn loop. */
+    await waitFor(page, () => {
+      const s = window.DND.App.session;
+      return s.state.turnEpoch > 0;
+    }, 20000);
 
     const turnState = await page.evaluate(() => {
       const s = window.DND.App.session;
@@ -299,6 +323,29 @@ async function main() {
     await page.screenshot({ path: path.join(SHOTS, 'shot-4-panels.png') });
 
     t.section('nothing is covering the controls');
+    /* A death opens a modal that deliberately blocks the table until the party
+       decides what it means. That is correct behaviour, and a test that walks
+       past it is testing a screen no player would be looking at — so answer it
+       first, the way a person would. */
+    const deathOpen = await page.evaluate(() => {
+      const m = document.getElementById('modal-death');
+      return !!(m && !m.hidden);
+    });
+    if (deathOpen) {
+      const answered = await page.evaluate(() => {
+        const btn = document.getElementById('death-replace') ||
+          document.getElementById('death-accept');
+        if (!btn) return null;
+        const label = btn.textContent.trim();
+        btn.click();
+        return label;
+      });
+      t.ok(!!answered, 'a death that happened was resolvable', '(' + answered + ')');
+      await wait(1500);
+    } else {
+      t.ok(true, 'nobody died this run');
+    }
+
     /* The regression that made this worth asserting: `<div class="modal" hidden>`
        does not hide, because the `hidden` attribute only carries the browser's
        own `display: none` and any class selector outranks it. The empty death

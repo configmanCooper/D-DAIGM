@@ -484,11 +484,78 @@
     var spellbook = null;
     if (classId === 'wizard') {
       spellbook = choose(pool, 6 + Math.max(0, levels - 1) * 2, rng, SPELLS);
+      /* The book is what a wizard prepares FROM, so if nothing in it can hurt
+         anybody then no prepared slate drawn from it can either — which is how
+         a wizard ended up with Expeditious Retreat, False Life, Arcane Lock
+         and Blindness/Deafness and no way to take a turn in a fight. */
+      spellbook = ensureAttack(spellbook, pool, SPELLS, maxSpellLevel, rng, spellbook.length);
       pool = spellbook;
     }
     var spells = choose(pool, spellCount, rng, SPELLS);
 
+    /* A caster needs something to DO in a fight.
+       Drawing purely at random produced a level-three wizard whose entire
+       repertoire was Rope Trick, Continual Flame, Mirror Image and Levitate,
+       with Dancing Lights, Minor Illusion and True Strike for cantrips: not a
+       single point of damage anywhere in it. That character cannot take a turn
+       in combat, and across a four-hundred-turn playthrough it meant the magic
+       system went almost entirely unused. So: guarantee an attack cantrip and,
+       for a class that has them, at least one spell that does something to an
+       enemy. */
+    cantrips = ensureAttack(cantrips, onList, SPELLS, 0, rng, cantripCount);
+    if (spellCount > 0) {
+      spells = ensureAttack(spells, pool, SPELLS, maxSpellLevel, rng, spellCount);
+      if (spellbook && spells.some(function (id) { return spellbook.indexOf(id) < 0; })) {
+        spells.forEach(function (id) {
+          if (spellbook.indexOf(id) < 0) spellbook.push(id);
+        });
+      }
+    }
+
     return { cantrips: cantrips, spells: spells, spellbook: spellbook };
+  }
+
+  /**
+   * Make sure a spell list contains at least one spell that hurts somebody.
+   *
+   * Swaps the least useful pick for an offensive one rather than growing the
+   * list, so the counts the class table dictates are preserved.
+   */
+  function ensureAttack(chosen, pool, SPELLS, atLevel, rng, want) {
+    if (!want || !chosen.length) return chosen;
+    var hasAttack = chosen.some(function (id) { return isOffensive(SPELLS[id]); });
+    if (hasAttack) return chosen;
+
+    var candidates = (pool || []).filter(function (id) {
+      var sp = SPELLS[id];
+      if (!sp || chosen.indexOf(id) >= 0) return false;
+      if (atLevel === 0) return sp.level === 0 && isOffensive(sp);
+      return sp.level > 0 && sp.level <= atLevel && isOffensive(sp);
+    });
+    if (!candidates.length) return chosen;
+
+    rng.shuffle(candidates);
+    var out = chosen.slice();
+    out[out.length - 1] = candidates[0];
+    return out;
+  }
+
+  /** Does this spell do something to an enemy?
+   *  Delegated to the spell data, which owns the shape — two separate hand
+   *  written versions of this both read fields that do not exist. */
+  function isOffensive(sp) {
+    var S = spellModule();
+    if (S && S.isOffensive) return S.isOffensive(sp);
+    return false;
+  }
+
+  function spellModule() {
+    var g = (typeof globalThis !== 'undefined' ? globalThis : this);
+    if (g.DND && g.DND.Data && g.DND.Data.isOffensive) return g.DND.Data;
+    if (typeof require !== 'undefined') {
+      try { return require('../data/srd_spells.js'); } catch (e) { return null; }
+    }
+    return null;
   }
 
   /**

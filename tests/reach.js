@@ -48,6 +48,10 @@ function hero(id, name, opts) {
     proficiencies: { skills: ['athletics', 'perception', 'investigation', 'persuasion'] },
   });
   c.runtime.pos = opts.pos || { x: 2, y: 2 };
+  /* With a purse. Buying is only offered for things the character can afford —
+     otherwise the bar fills with buttons that refuse on click — so a penniless
+     probe reports `buy` as unreachable when it is merely unaffordable. */
+  c.runtime.gold = opts.gold == null ? 200 : opts.gold;
   return { id, name, side: opts.side || 'party', kind: 'pc', base: c.base, progression: c.progression, runtime: c.runtime };
 }
 

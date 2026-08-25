@@ -1190,7 +1190,12 @@
         { itemId: g.uid || g.id }));
     });
 
-    /* Anything for sale. */
+    /* Anything for sale that this character could actually pay for.
+       Offering everything on the shelf produced a bar full of buttons that
+       refused on click — a hundred "you cannot afford that" refusals in a
+       four-hundred-turn run — which teaches a player that Buy does not work
+       rather than that they are poor. */
+    var purse = (a.runtime && a.runtime.gold) || 0;
     (ctx.merchants || []).forEach(function (m) {
       (m.sells || []).forEach(function (id) {
         var def = table[id] || {};
@@ -1198,9 +1203,9 @@
            `{qty, unit}`, which stringified to "[object Object]" in the button
            and told a player nothing about what they were about to spend. */
         var gp = priceOf(def);
-        var price = (gp != null && isFinite(gp)) ? gp + ' gp' : null;
+        if (!isFinite(gp) || gp > purse) return;
         moves.push(mv('buy', 'Buy ' + (def.name || id) +
-          (price ? ' (' + price + ')' : '') + ' from ' + (m.name || 'the trader'), 'time',
+          ' (' + gp + ' gp) from ' + (m.name || 'the trader'), 'time',
         { itemId: id, targetIds: m.actorId ? [m.actorId] : [] }));
       });
     });
@@ -1606,13 +1611,14 @@
           var hurt = target.runtime.hpMax && target.runtime.hp < target.runtime.hpMax;
           if (!hurt && allies.length > 1) return;    // no point healing the unhurt
           var dying = target.runtime.hp <= 0;
-          moves.push(mv('cast', 'Cast ' + name + ' on ' + (target.name || id) +
+          var m = mv('cast', 'Cast ' + name + ' on ' + (target.name || id) +
             (dying ? ' \u2014 they are dying' : ''), 'action',
-            { spellId: spellId, targetIds: [id] },
-            dying ? 'they are at zero hit points and making death saves' : null));
+          { spellId: spellId, targetIds: [id] },
+          dying ? 'they are at zero hit points and making death saves' : null);
+          moves.push(tagSpell(m, spell));
         });
       } else {
-        moves.push(mv('cast', 'Cast ' + name, 'action', { spellId: spellId }));
+        moves.push(tagSpell(mv('cast', 'Cast ' + name, 'action', { spellId: spellId }), spell));
       }
     });
 
@@ -1730,6 +1736,36 @@
     var out = { step: step, what: what, cost: cost };
     if (warn) out.warn = warn;
     return out;
+  }
+
+  /**
+   * Mark a spell move with what a chooser needs to tell spells apart.
+   *
+   * Without this, every cast looked the same to a policy: a cantrip and a
+   * fireball were both "an action that casts something", so the fallback took
+   * whichever came first — which was always a cantrip — and no spell slot was
+   * ever spent by anyone the engine ran. The UI ignores these; they cost
+   * nothing and they make good play possible.
+   */
+  function tagSpell(m, spell) {
+    if (!m || !spell) return m;
+    m.spellLevel = spell.level || 0;
+    m.cantrip = (spell.level || 0) === 0;
+    /* The spell data owns the shape of `mech.effects`; guessing at top-level
+       `mech.damage` / `mech.attack` fields here read false for every spell in
+       the game, so no policy could ever find one worth casting. */
+    var S = spellModuleFor();
+    m.offensive = !!(S && S.isOffensive && S.isOffensive(spell));
+    m.concentration = !!(spell.mech && spell.mech.concentration);
+    return m;
+  }
+
+  function spellModuleFor() {
+    if (global.DND && global.DND.Data && global.DND.Data.isOffensive) return global.DND.Data;
+    if (typeof require !== 'undefined') {
+      try { return require('../data/srd_spells.js'); } catch (e) { return null; }
+    }
+    return null;
   }
 
   function trim(s, n) {

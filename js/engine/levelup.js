@@ -232,22 +232,56 @@
    * weight in 5e), then move to the next priority. This is what an experienced
    * player does almost every time.
    */
+  /**
+   * What to spend an ability score improvement on.
+   *
+   * Every branch here must respect the cap of 20, which none of them did: a
+   * score of 19 was recommended for +2 (taking it to 21) because it is odd,
+   * and the last resort recommended Constitution without checking whether
+   * Constitution was itself already 20. The level-up screen's own validator
+   * then rejected its own recommendation, so "choose for me" simply failed —
+   * and a character with any maxed stat could not level up at all.
+   */
   function recommendedAsi(base, progression, classId) {
     var Chargen = chargen();
     var build = (Chargen && Chargen.BUILDS && Chargen.BUILDS[classId]) || null;
-    var order = build ? build.priority : ABIL;
+    var order = (build ? build.priority : ABIL).slice();
+    /* Anything not in the class's priority list is still a legal home for the
+       points, and is better than an illegal one. */
+    ABIL.forEach(function (a) { if (order.indexOf(a) < 0) order.push(a); });
+
+    var score = function (a) { return currentScore(base, progression, a); };
+
+    /* Best: +2 to a priority ability that can take all of it. */
     for (var i = 0; i < order.length; i++) {
-      var a = order[i];
-      var cur = currentScore(base, progression, a);
-      if (cur < 20 && cur % 2 === 1) return { mode: 'plus2', abilities: [a], why: 'Rounds ' + a.toUpperCase() + ' up to an even number, which is where the modifier actually changes.' };
-    }
-    for (var j = 0; j < order.length; j++) {
-      var b = order[j];
-      if (currentScore(base, progression, b) < 20) {
-        return { mode: 'plus2', abilities: [b], why: 'Your highest-priority ability that is not yet capped.' };
+      if (score(order[i]) + 2 <= 20) {
+        return {
+          mode: 'plus2', abilities: [order[i]],
+          why: 'Two points into ' + order[i].toUpperCase() +
+            ', which is what this class wants most and has room for.',
+        };
       }
     }
-    return { mode: 'plus2', abilities: ['con'], why: 'Everything else is at 20; Constitution is never wasted.' };
+
+    /* Failing that, +1 to two abilities that each have room — which is how an
+       odd score at 19 gets rounded up without going over. */
+    var singles = order.filter(function (a) { return score(a) + 1 <= 20; });
+    if (singles.length >= 2) {
+      return {
+        mode: 'plus1', abilities: [singles[0], singles[1]],
+        why: 'A point each into ' + singles[0].toUpperCase() + ' and ' +
+          singles[1].toUpperCase() + ' — neither has room for two.',
+      };
+    }
+
+    /* Everything is at 20, or only one ability has a single point of room and
+       there is nothing to pair it with. The 2014 rules have no way to spend
+       half an improvement, so there is nothing legal to recommend — and saying
+       so is better than recommending something the validator will reject. */
+    return {
+      mode: 'plus2', abilities: [], capped: true,
+      why: 'There is no legal improvement left: every ability is at or within a point of 20.',
+    };
   }
 
   function spellChoicesFor(cls, classId, base, progression, newClassLevel) {
@@ -420,6 +454,11 @@
       if (!g.required) return;
       var v = choices[g.id];
       if (g.id === 'asi') {
+        /* A character with every ability at 20 has no legal improvement to
+           make. Demanding one meant such a character could not level up at
+           all — the screen rejected its own recommendation. */
+        var recAsi = g.recommended || {};
+        if (recAsi.capped && (!v || !v.abilities || !v.abilities.length)) return;
         if (!v || !v.abilities || !v.abilities.length) { errors.push('choose an ability score improvement'); return; }
         if (v.mode === 'plus2' && v.abilities.length !== 1) errors.push('a +2 goes to exactly one ability');
         if (v.mode === 'plus1' && v.abilities.length !== 2) errors.push('two abilities take +1 each');
