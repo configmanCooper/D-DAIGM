@@ -469,4 +469,59 @@ t.eq(folded.actors.gateborn.runtime.hp, liveHp,
   'folding the event log reproduces the same hit points');
 t.eq(folded.revision, g.revision, 'and the same revision');
 
+/* ------------------------------------------------ commit is trustworthy -- */
+/* These are the invariants the whole engine rests on. Each one has been
+   violated at least once, and each failure was silent. */
+t.section('committing a batch keeps the world consistent');
+{
+  const Ch = require('../js/engine/character.js');
+  const CG = require('../js/gen/chargen.js');
+  const { RNG: R } = require('../js/rng.js');
+
+  /* A cleric built by the generator, because the bug that prompted this only
+     appeared with real data: preparedSpells and spellbook were the SAME array,
+     so merging one key rewrote the other straight back and preparing spells
+     silently did nothing. */
+  const c = Ch.buildFromSpec(CG.generate({ rng: new R('commit'), fixed: { classId: 'cleric', levels: 5 } }));
+  t.ok(c.progression.preparedSpells !== c.progression.spellbook,
+    'a built character\u2019s prepared list and spellbook are separate arrays');
+
+  const s = State.create({ seed: 'commit' });
+  State.addActor(s, {
+    id: 'a', name: 'A', side: 'party', kind: 'pc',
+    base: c.base, progression: c.progression, runtime: c.runtime,
+  });
+  const b = Events.makeBatch({ commandId: 'p1', actorId: 'a' });
+  b.events.push({ kind: 'prepare_spells', actorId: 'a', spells: ['NEW'] });
+  Events.commit(s, b);
+  t.deep(s.actors.a.progression.preparedSpells, ['NEW'], 'a committed change is actually in the world');
+
+  /* And the merge must not depend on nobody ever aliasing again. */
+  const shared = ['old'];
+  const s2 = State.create({ seed: 'alias' });
+  State.addActor(s2, {
+    id: 'a', name: 'A', side: 'party', kind: 'pc',
+    base: { name: 'A', abilities: {}, classes: [] },
+    progression: { levels: [], preparedSpells: shared, spellbook: shared },
+    runtime: { hp: 9, hpMax: 9, conditions: {}, inventory: [], deathSaves: {} },
+  });
+  const b2 = Events.makeBatch({ commandId: 'p2', actorId: 'a' });
+  b2.events.push({ kind: 'prepare_spells', actorId: 'a', spells: ['NEW'] });
+  Events.commit(s2, b2);
+  t.deep(s2.actors.a.progression.preparedSpells, ['NEW'],
+    'two keys sharing one array cannot make a commit undo itself');
+
+  /* Anything holding a reference across a commit must see the new world.
+     Nothing does today; it reads as obviously correct and would fail
+     silently, which is the worst combination. */
+  const held = s2.actors.a;
+  const heldRuntime = s2.actors.a.runtime;
+  const b3 = Events.makeBatch({ commandId: 'p3', actorId: 'a' });
+  b3.events.push({ kind: 'hp', targetId: 'a', delta: -3 });
+  Events.commit(s2, b3);
+  t.eq(held, s2.actors.a, 'an actor keeps its identity across a commit');
+  t.eq(heldRuntime, s2.actors.a.runtime, 'and so does its runtime');
+  t.eq(held.runtime.hp, 6, 'so a held reference sees the change');
+}
+
 t.done();

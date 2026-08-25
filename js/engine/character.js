@@ -293,7 +293,13 @@
     if (wornArmor) {
       contribs.push({
         type: 'base', source: armorItem.id || 'armor',
-        value: wornArmor.base + Math.min(mods.dex, wornArmor.maxDex),
+        /* Heavy armour ignores Dexterity ENTIRELY — it does not cap the bonus
+           at zero. `Math.min(dex, 0)` let a negative modifier through, so a
+           Strength-built fighter in plate with Dex 6 derived AC 16 instead of
+           18: the armour was actively making them easier to hit. */
+        value: wornArmor.maxDex === 0
+          ? wornArmor.base
+          : wornArmor.base + Math.min(mods.dex, wornArmor.maxDex),
         requires: function () { return true; },
       });
     }
@@ -373,9 +379,19 @@
       var entry = { source: c.source, type: c.type, value: val, applied: true };
       breakdown.push(entry);
       if (c.type === 'base') bases.push({ v: val, e: entry });
-      else if (c.type === 'add') adds.push(val);
+      else if (c.type === 'add' || c.type === 'bonus') adds.push(val);
       else if (c.type === 'set') sets.push(val);
       else if (c.type === 'floor') floors.push(val);
+      else {
+        /* A contribution nobody knows how to apply must SAY it was not
+           applied. Silently marking it `applied: true` and then ignoring it is
+           how a +2 AC spell came to change the breakdown, read correctly on
+           the sheet, and leave the number the engine rolls against untouched.
+           "bonus" is now understood — it is the obvious word and was the one
+           actually being used — and anything still unrecognised is flagged. */
+        entry.applied = false;
+        entry.ignored = 'unknown AC contribution type: ' + c.type;
+      }
     });
 
     var best = null;
@@ -645,6 +661,74 @@
      Convenience constructor for fixtures and campaign seeds: a compact spec in,
      the three fully-formed layers out. Per-level hit points are materialised
      here — the actual numbers, stored — so derive() never has to re-decide them. */
+  /**
+   * The gear a new character starts with.
+   *
+   * This lived in the setup wizard, which meant it only applied to characters
+   * made by clicking through the browser. Anything else that built a
+   * character from a spec — a replacement after a death, a playtest party, an
+   * AI-generated companion — got a level-5 fighter carrying nothing at all,
+   * who was then refused every attack for having no weapon.
+   *
+   * It belongs here, in the one function every path goes through.
+   *
+   * These are the SRD starting kits reduced to what actually matters
+   * mechanically: something to fight with, something to wear, and a way back
+   * from a bad roll.
+   */
+  var STARTING_KITS = {
+    barbarian: { weapon: 'greataxe', armor: null, extra: ['handaxe'] },
+    bard: { weapon: 'rapier', armor: 'leather-armor', extra: [] },
+    cleric: { weapon: 'mace', armor: 'scale-mail', shield: 'shield', extra: [] },
+    druid: { weapon: 'scimitar', armor: 'leather-armor', shield: 'shield', extra: [] },
+    fighter: { weapon: 'longsword', armor: 'chain-mail', shield: 'shield', extra: [] },
+    monk: { weapon: 'shortsword', armor: null, extra: ['dart'] },
+    paladin: { weapon: 'longsword', armor: 'chain-mail', shield: 'shield', extra: [] },
+    ranger: { weapon: 'longbow', armor: 'studded-leather-armor', extra: ['shortsword'] },
+    rogue: { weapon: 'shortsword', armor: 'leather-armor', extra: ['dagger'] },
+    sorcerer: { weapon: 'dagger', armor: null, extra: ['quarterstaff'] },
+    warlock: { weapon: 'dagger', armor: 'leather-armor', extra: [] },
+    wizard: { weapon: 'quarterstaff', armor: null, extra: ['dagger'] },
+  };
+
+  function grantStartingKit(runtime, classId) {
+    var ITEMS = table('ITEMS') || {};
+    var kit = STARTING_KITS[classId] || STARTING_KITS.fighter;
+    var inv = runtime.inventory = runtime.inventory || [];
+    var equipped = runtime.equipped = runtime.equipped || {};
+
+    function give(id, slot) {
+      if (!id) return;
+      var item = ITEMS[id];
+      if (!item) return;
+      if (inv.some(function (x) { return x.id === id; })) return;
+      inv.push({
+        uid: id, id: id, name: item.name || id,
+        slot: slot || null, equipped: !!slot,
+        damage: item.damage || null, ac: item.ac || null,
+        properties: item.properties || [], weight: item.weight || 0,
+      });
+      if (slot) equipped[slot] = id;
+    }
+
+    give(kit.weapon, 'mainHand');
+    give(kit.armor, 'armor');
+    give(kit.shield, 'shield');
+    (kit.extra || []).forEach(function (id) { give(id, null); });
+
+    /* One healing potion, because a first fight that ends in a dead character
+       because nobody thought to sell them one is nobody's idea of fun. */
+    if (ITEMS['potion-of-healing'] && !inv.some(function (x) { return x.id === 'potion-of-healing'; })) {
+      inv.push({
+        uid: 'potion-of-healing', id: 'potion-of-healing',
+        name: ITEMS['potion-of-healing'].name || 'Potion of Healing',
+        heal: '2d4+2', consumable: true, weight: 0.5,
+      });
+    }
+    if (!runtime.gold) runtime.gold = 15;
+    return runtime;
+  }
+
   function buildFromSpec(spec) {
     spec = spec || {};
     var classesIn = spec.classes || (spec.classId ? [{ classId: spec.classId, levels: spec.levels || 1, subclassId: spec.subclassId }] : []);
@@ -666,8 +750,15 @@
       alignment: spec.alignment || 'N',
       speed: spec.speed,
     };
-    if ((!base.proficiencies.saves || !base.proficiencies.saves.length) && firstClass && firstClass.saves) {
-      base.proficiencies.saves = firstClass.saves.slice();
+    /* The class data calls this savingThrows; this read saves, which does
+       not exist, so NO generated character ever had a saving-throw
+       proficiency. A level-5 fighter rolled Strength saves at +3 instead of
+       +6 — every save in every fight, for every character the game made
+       itself. Both spellings are accepted so a hand-written campaign
+       character using either still works. */
+    var classSaves = firstClass && (firstClass.savingThrows || firstClass.saves);
+    if ((!base.proficiencies.saves || !base.proficiencies.saves.length) && classSaves) {
+      base.proficiencies.saves = classSaves.slice();
     }
 
     /* Materialise the per-level HP in the order the classes were taken; the very
@@ -699,12 +790,18 @@
          `spec.spells` and this only ever read `spec.preparedSpells`, so every
          auto-created caster reached the table with a full set of slots and an
          empty spell list. */
-      preparedSpells: spec.preparedSpells || spec.spells || [],
+      preparedSpells: (spec.preparedSpells || spec.spells || []).slice(),
       /* A wizard prepares from their book, not from the class list, so the
          book has to exist from the moment the character does — otherwise
-         their first long rest finds an empty pool and prepares nothing. */
-      spellbook: spec.spellbook || spec.spells || spec.preparedSpells || [],
-      cantripsKnown: spec.cantripsKnown || spec.cantrips || [],
+         their first long rest finds an empty pool and prepares nothing.
+
+         Every list is COPIED, never aliased. Falling through to the same
+         source array left `preparedSpells` and `spellbook` as one array
+         wearing two names: preparing today's spells silently rewrote the
+         spellbook, and a merge that visited both keys fought itself and
+         reverted the change entirely. */
+      spellbook: (spec.spellbook || spec.spells || spec.preparedSpells || []).slice(),
+      cantripsKnown: (spec.cantripsKnown || spec.cantrips || []).slice(),
       fightingStyles: spec.fightingStyles || [],
       expertise: spec.expertise || [],
     };
@@ -721,6 +818,13 @@
       deathSaves: { successes: 0, failures: 0 }, stable: false, dead: false, inspiration: false,
       gold: spec.gold || 0, pos: spec.pos || null, turn: null,
     }, spec.runtime || {});
+
+    /* Unless the caller is explicitly supplying gear (a saved game, a campaign
+       character with a hand-written loadout), give them the class kit. alse
+       opts out; anything else opts in. */
+    if (spec.startingKit !== false && !(spec.runtime && spec.runtime.inventory && spec.runtime.inventory.length)) {
+      grantStartingKit(runtime, classes[0] && classes[0].classId);
+    }
 
     return { base: base, progression: progression, runtime: runtime };
   }
@@ -741,6 +845,8 @@
     derive: derive,
     levelUp: levelUp,
     buildFromSpec: buildFromSpec,
+    grantStartingKit: grantStartingKit,
+    STARTING_KITS: STARTING_KITS,
   };
 
   global.DND = global.DND || {};

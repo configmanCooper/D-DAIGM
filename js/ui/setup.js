@@ -742,63 +742,11 @@
     };
   }
 
-  /* A newly made character should not be standing there empty-handed. These
-     are the SRD starting kits reduced to what actually matters mechanically:
-     something to fight with, something to wear, and a way back from a bad
-     roll. Without this a new fighter had no weapon and the inventory panel
-     read "Nothing carried." */
-  var STARTING_KITS = {
-    barbarian: { weapon: 'greataxe', armor: null, extra: ['handaxe'] },
-    bard: { weapon: 'rapier', armor: 'leather-armor', extra: [] },
-    cleric: { weapon: 'mace', armor: 'scale-mail', shield: 'shield', extra: [] },
-    druid: { weapon: 'scimitar', armor: 'leather-armor', shield: 'shield', extra: [] },
-    fighter: { weapon: 'longsword', armor: 'chain-mail', shield: 'shield', extra: [] },
-    monk: { weapon: 'shortsword', armor: null, extra: ['dart'] },
-    paladin: { weapon: 'longsword', armor: 'chain-mail', shield: 'shield', extra: [] },
-    ranger: { weapon: 'longbow', armor: 'studded-leather-armor', extra: ['shortsword'] },
-    rogue: { weapon: 'shortsword', armor: 'leather-armor', extra: ['dagger'] },
-    sorcerer: { weapon: 'dagger', armor: null, extra: ['quarterstaff'] },
-    warlock: { weapon: 'dagger', armor: 'leather-armor', extra: [] },
-    wizard: { weapon: 'quarterstaff', armor: null, extra: ['dagger'] },
-  };
-
-  function grantStartingKit(layers, classId) {
-    var ITEMS = (Data() && Data().ITEMS) || {};
-    var kit = STARTING_KITS[classId] || STARTING_KITS.fighter;
-    var inv = layers.runtime.inventory = layers.runtime.inventory || [];
-    var equipped = layers.runtime.equipped = layers.runtime.equipped || {};
-
-    function give(id, slot) {
-      if (!id) return;
-      var item = ITEMS[id];
-      if (!item) return;
-      var uid = id;
-      inv.push({
-        uid: uid, id: id, name: item.name || id,
-        slot: slot || null, equipped: !!slot,
-        damage: item.damage || null, ac: item.ac || null,
-        properties: item.properties || [], weight: item.weight || 0,
-      });
-      if (slot) equipped[slot] = uid;
-    }
-
-    give(kit.weapon, 'mainHand');
-    give(kit.armor, 'armor');
-    give(kit.shield, 'shield');
-    (kit.extra || []).forEach(function (id) { give(id, null); });
-
-    /* One healing potion, because a first fight that ends in a dead character
-       because nobody thought to sell them one is nobody's idea of fun. */
-    if (ITEMS['potion-of-healing']) {
-      inv.push({
-        uid: 'potion-of-healing', id: 'potion-of-healing',
-        name: ITEMS['potion-of-healing'].name || 'Potion of Healing',
-        heal: '2d4+2', consumable: true, weight: 0.5,
-      });
-    }
-    if (!layers.runtime.gold) layers.runtime.gold = 15;
-    return layers;
-  }
+  /* Starting gear now lives in Character.buildFromSpec, so every path that
+     makes a character gets it — the wizard, a replacement after a death, an
+     AI-generated companion. Keeping a second copy here is how the engine
+     came to hand out naked level-5 fighters to everything except this
+     screen. */
 
   function buildSession(dm) {
     var State = global.DND.State, Character = global.DND.Character, Game = global.DND.Game;
@@ -814,7 +762,6 @@
     W.seats.forEach(function (seat, i) {
       var spec = specFor(seat);
       var layers = Character.buildFromSpec(spec);
-      grantStartingKit(layers, spec.classId);
       /* The Dungeon Master receives this through partySummary() and may bring
          it back in play; without it a written backstory would be lost between
          the wizard and the table. */

@@ -15960,6 +15960,98 @@
       "glow": true,
       "notes": "well-made magical item carrying an unmistakable aura"
     }
+  },
+  "potion-of-healing": {
+    "id": "potion-of-healing",
+    "name": "Potion of Healing",
+    "category": "magic-item",
+    "subcategory": "potion",
+    "cost": { "quantity": 50, "unit": "gp" },
+    "weight": 0.5,
+    "rarity": "common",
+    "attunement": false,
+    "damage": null,
+    "properties": [],
+    "ac": null,
+    "armorType": null,
+    "acFormula": null,
+    "text": "You regain 2d4 + 2 hit points when you drink this potion. The potion's red liquid glimmers when agitated.",
+    "mech": { "type": "healing", "dice": "2d4", "bonus": 2, "consumable": true },
+    "visual": {
+      "palette": ["#8c2f39", "#d2455a", "#ffd8dc"],
+      "iconShape": "potion",
+      "glow": true,
+      "notes": "glass vial of red liquid that glimmers when shaken"
+    }
+  },
+  "potion-of-greater-healing": {
+    "id": "potion-of-greater-healing",
+    "name": "Potion of Greater Healing",
+    "category": "magic-item",
+    "subcategory": "potion",
+    "cost": { "quantity": 100, "unit": "gp" },
+    "weight": 0.5,
+    "rarity": "uncommon",
+    "attunement": false,
+    "damage": null,
+    "properties": [],
+    "ac": null,
+    "armorType": null,
+    "acFormula": null,
+    "text": "You regain 4d4 + 4 hit points when you drink this potion.",
+    "mech": { "type": "healing", "dice": "4d4", "bonus": 4, "consumable": true },
+    "visual": {
+      "palette": ["#8c2f39", "#e05264", "#ffe2e6"],
+      "iconShape": "potion",
+      "glow": true,
+      "notes": "glass vial of deep red liquid"
+    }
+  },
+  "potion-of-superior-healing": {
+    "id": "potion-of-superior-healing",
+    "name": "Potion of Superior Healing",
+    "category": "magic-item",
+    "subcategory": "potion",
+    "cost": { "quantity": 500, "unit": "gp" },
+    "weight": 0.5,
+    "rarity": "rare",
+    "attunement": false,
+    "damage": null,
+    "properties": [],
+    "ac": null,
+    "armorType": null,
+    "acFormula": null,
+    "text": "You regain 8d4 + 8 hit points when you drink this potion.",
+    "mech": { "type": "healing", "dice": "8d4", "bonus": 8, "consumable": true },
+    "visual": {
+      "palette": ["#8c2f39", "#f06276", "#fff0f2"],
+      "iconShape": "potion",
+      "glow": true,
+      "notes": "heavy vial of luminous crimson"
+    }
+  },
+  "potion-of-supreme-healing": {
+    "id": "potion-of-supreme-healing",
+    "name": "Potion of Supreme Healing",
+    "category": "magic-item",
+    "subcategory": "potion",
+    "cost": { "quantity": 5000, "unit": "gp" },
+    "weight": 0.5,
+    "rarity": "very-rare",
+    "attunement": false,
+    "damage": null,
+    "properties": [],
+    "ac": null,
+    "armorType": null,
+    "acFormula": null,
+    "text": "You regain 10d4 + 20 hit points when you drink this potion.",
+    "mech": { "type": "healing", "dice": "10d4", "bonus": 20, "consumable": true },
+    "visual": {
+      "palette": ["#8c2f39", "#ff7d8e", "#fffafb"],
+      "iconShape": "potion",
+      "glow": true,
+      "notes": "brilliant vial that lights the hand holding it"
+    }
   }
 };
   return { ITEMS: ITEMS };

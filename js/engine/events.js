@@ -29,7 +29,7 @@
     'roll',              // a die was rolled; carries the full explanation
     'hp',                // current HP changed (damage or healing)
     'temp_hp',           // temporary HP set (takes-highest, never additive)
-    'condition_add', 'condition_remove',
+    'condition_add', 'condition_remove', 'condition_tick',
     'effect_add', 'effect_remove',
     'concentration_start', 'concentration_end',
     'encounter_end',     // initiative is put away; exploration time resumes
@@ -40,6 +40,7 @@
     'action_economy',    // an action, bonus action, reaction, object interaction or movement was spent this turn
     'move',
     'item_gain', 'item_lose', 'item_equip', 'item_unequip', 'item_attune', 'item_unattune',
+    'location_item_remove',   // something taken off the floor of a room
     'gold',
     'knowledge',         // an observer learned a fact — the ONLY way knowledge spreads
     'relationship',
@@ -107,6 +108,11 @@
     return (state.actors && state.actors[id]) || null;
   }
 
+  /* Being any of these ends concentration outright. */
+  var CONCENTRATION_BREAKING = {
+    incapacitated: 1, stunned: 1, paralyzed: 1, petrified: 1, unconscious: 1,
+  };
+
   var APPLY = {
     roll: function () { /* a record, not a change */ },
     note: function () { },
@@ -170,6 +176,18 @@
       if (e.condition === 'exhaustion') {
         a.runtime.exhaustion = Math.max(0, Math.min(6, (a.runtime.exhaustion || 0) + (e.levels || 1)));
       }
+      /* Concentration ends the instant you are incapacitated (PHB 203). This
+         was never wired up, so a stunned or unconscious caster went on
+         concentrating on a spell they could not possibly be maintaining. */
+      if (CONCENTRATION_BREAKING[e.condition]) a.runtime.concentratingOn = null;
+    },
+
+    /* One round closer to ending. Kept distinct from condition_add so a tick
+       cannot accidentally re-apply exhaustion or reset a source. */
+    condition_tick: function (state, e) {
+      var a = actor(state, e.targetId);
+      if (!a || !a.runtime.conditions || !a.runtime.conditions[e.condition]) return;
+      a.runtime.conditions[e.condition].rounds = e.rounds;
     },
 
     condition_remove: function (state, e) {
@@ -325,6 +343,17 @@
       if (typeof e.movementUsed === 'number') {
         a.runtime.turn.movementRemaining = Math.max(0, a.runtime.turn.movementRemaining - e.movementUsed);
       }
+    },
+
+    /* Something picked up is no longer lying there. Kept separate from
+       item_gain so a room's contents and a character's pack are never
+       accidentally the same list. */
+    location_item_remove: function (state, e) {
+      var loc = (state.locations || {})[e.locationId];
+      if (!loc || !loc.items) return;
+      loc.items = loc.items.filter(function (it) {
+        return (it.uid || it.id) !== e.uid;
+      });
     },
 
     item_gain: function (state, e) {
@@ -658,6 +687,7 @@
        mention of any of them. Every path into the world passes through this
        function; that is the only place the invariant holds. */
     recordMilestones(state, batch);
+    refreshTouched(state, batch);
     return { ok: true, revision: state.revision };
   }
 
@@ -676,8 +706,21 @@
      a successful apply, and the RNG has already been rolled by the time we
      get here — rolling it again on a draft would produce different numbers
      than the ones the resolver reported. */
+  /* Everything an applier may write to. Anything NOT listed here is shared
+     with the live state by reference, so an applier that mutates it writes
+     straight through the draft and breaks atomicity — a later failure in the
+     same batch discards the draft and leaves that write behind.
+     `relationships` and `discoveredLocations` were exactly that: both are
+     mutated in place by appliers and both were missing, so a batch that failed
+     halfway still permanently changed how an NPC felt about you.
+
+     The rule for adding an event kind: if your applier touches `state.X`, X
+     belongs here. `tests/core.test.js` checks this list against what the
+     appliers actually reference, so a new event kind cannot quietly reopen
+     the hole. */
   var DRAFT_KEYS = ['actors', 'locations', 'combat', 'knowledge', 'clock', 'flags',
-    'quests', 'party', 'factions', 'zones', 'effects', 'initiative'];
+    'quests', 'party', 'factions', 'zones', 'effects', 'initiative',
+    'relationships', 'discoveredLocations'];
 
   function draftOf(state) {
     var draft = Object.create(Object.getPrototypeOf(state) || Object.prototype);
@@ -703,8 +746,8 @@
   }
 
   /**
-   * Move one branch of the draft into the live state, keeping the container's
-   * identity where there is one.
+   * Move one branch of the draft into the live state, keeping the identity of
+   * every container that already exists.
    *
    * Replacing `state.knowledge` with a fresh object looks harmless and is not:
    * a knowledge store holds `store.known = state.knowledge` as a live alias, so
@@ -712,34 +755,81 @@
    * object. Reveals were committed to the log and to the state, and the store
    * that everything reads went on insisting nobody knew anything.
    *
-   * So containers are refilled in place rather than replaced. Anything holding
-   * a reference keeps seeing the current world.
+   * The same trap sits one level deeper. A shallow refill replaces every actor
+   * OBJECT, so anything holding `var a = state.actors[id]` across a commit
+   * silently reads a stale copy — the world moves on and their `a` does not.
+   * Nothing in the codebase does that today, but it reads as obviously correct
+   * and would fail silently, which is the worst combination. So identity is
+   * preserved all the way down: after a commit, every reference anyone was
+   * already holding still sees the current world.
+   *
+   * The state is JSON-serialisable by construction (snapshots use
+   * JSON.stringify), so there are no cycles to guard against.
    */
   function adoptInto(state, key, next) {
-    var cur = state[key];
-    /* Identical object: the draft shares this branch with the live state
-       rather than copying it (the log and the RNG are shared on purpose).
-       Refilling it "in place" would clear the very array we are copying from,
-       which emptied the event log on every single commit — replaying a
-       session reproduced only its last turn. */
-    if (cur === next) return;
-    if (Array.isArray(cur) && Array.isArray(next)) {
+    state[key] = merge(state[key], next, { seen: new Map(), used: new Set() });
+  }
+
+  /**
+   * Merge the draft into the live state, preserving object identity.
+   *
+   * Two bookkeeping structures, for two different aliasing hazards:
+   *
+   *   `seen`  one DRAFT object reachable by several paths must produce the
+   *           same result each time, or the second visit undoes the first.
+   *   `used`  one LIVE object reachable by several paths can only be the
+   *           target of one merge. A character whose `preparedSpells` and
+   *           `spellbook` were the same array is exactly that shape: merging
+   *           the first key rewrote the shared array and merging the second
+   *           rewrote it straight back, so preparing spells appeared to
+   *           succeed and silently changed nothing.
+   *
+   * When a live object is already claimed, the draft's own object is adopted
+   * instead. Identity is lost for that one node — which is the correct
+   * trade, because the alternative is corruption — and the draft is discarded
+   * immediately afterwards, so nothing else can still be pointing at it.
+   *
+   * The aliasing that prompted this is fixed at source; this makes the commit
+   * path not depend on nobody ever reintroducing it.
+   */
+  function merge(cur, next, ctx) {
+    /* Identical: the draft shares this branch with the live state rather than
+       copying it (the log and the RNG are shared on purpose). Refilling it "in
+       place" would clear the very array we are copying from, which emptied the
+       event log on every single commit. */
+    if (cur === next) return next;
+    if (next === null || typeof next !== 'object') return next;
+
+    if (ctx.seen.has(next)) return ctx.seen.get(next);
+
+    var canReuse = cur && typeof cur === 'object' &&
+      Array.isArray(cur) === Array.isArray(next) && !ctx.used.has(cur);
+
+    if (!canReuse) {
+      ctx.seen.set(next, next);
+      return next;
+    }
+
+    ctx.seen.set(next, cur);
+    ctx.used.add(cur);
+
+    if (Array.isArray(next)) {
+      /* `next` may be an alias of `cur`; copy before clearing. */
+      var copy = next.slice();
       cur.length = 0;
-      for (var i = 0; i < next.length; i++) cur.push(next[i]);
-      return;
+      for (var i = 0; i < copy.length; i++) cur.push(copy[i]);
+      return cur;
     }
-    if (cur && next && typeof cur === 'object' && typeof next === 'object' &&
-      !Array.isArray(cur) && !Array.isArray(next)) {
-      for (var gone in cur) {
-        if (Object.prototype.hasOwnProperty.call(cur, gone) &&
-          !Object.prototype.hasOwnProperty.call(next, gone)) delete cur[gone];
-      }
-      for (var k in next) {
-        if (Object.prototype.hasOwnProperty.call(next, k)) cur[k] = next[k];
-      }
-      return;
+
+    for (var gone in cur) {
+      if (Object.prototype.hasOwnProperty.call(cur, gone) &&
+        !Object.prototype.hasOwnProperty.call(next, gone)) delete cur[gone];
     }
-    state[key] = next;
+    for (var k in next) {
+      if (!Object.prototype.hasOwnProperty.call(next, k)) continue;
+      cur[k] = merge(cur[k], next[k], ctx);
+    }
+    return cur;
   }
 
   function deepCopy(v) {
@@ -793,6 +883,51 @@
       }
     });
     return lines;
+  }
+
+  /**
+   * Re-derive anyone whose sheet this batch could have changed.
+   *
+   * `derivedCache` folds equipment, active effects and conditions into AC,
+   * saves, ability modifiers and maximum hit points — and combat reads the
+   * cache, not a fresh derive. Only three places ever refreshed it, so a
+   * Shield of Faith raised the number on the sheet and not the number the
+   * engine rolled against: casting +2 AC on yourself changed nothing whatever
+   * about how hard you were to hit.
+   *
+   * Done here so no caller has to remember. Only actors actually named by the
+   * batch are re-derived, so the cost is one or two characters a turn rather
+   * than the whole table.
+   */
+  var RESHAPES_SHEET = {
+    effect_add: 1, effect_remove: 1,
+    item_equip: 1, item_unequip: 1, item_attune: 1, item_unattune: 1,
+    item_gain: 1, item_lose: 1,
+    condition_add: 1, condition_remove: 1,
+    level: 1, prepare_spells: 1, ability_change: 1, exhaustion: 1,
+  };
+
+  function refreshTouched(state, batch) {
+    var State = (global.DND && global.DND.State) ||
+      (typeof require !== 'undefined' ? require('./state.js') : null);
+    if (!State || !State.refreshDerived) return;
+
+    var who = null;
+    (batch.events || []).forEach(function (e) {
+      if (!RESHAPES_SHEET[e.kind]) return;
+      var id = e.actorId || e.targetId;
+      if (!id) return;
+      who = who || {};
+      who[id] = true;
+    });
+    if (!who) return;
+
+    Object.keys(who).forEach(function (id) {
+      if (!state.actors[id]) return;
+      /* A failure to re-derive must not undo a committed turn; the cache being
+         briefly stale is far better than losing the batch. */
+      try { State.refreshDerived(state, id); } catch (err) { /* keep the turn */ }
+    });
   }
 
   /** Rebuild state by folding the log — used by tests and by undo. */

@@ -32,7 +32,7 @@
   /* The verbs the engine actually knows how to resolve. The referee is
      constrained to this list by enum, so it cannot invent a mechanic. */
   var VERBS = {
-    combat: ['attack', 'grapple', 'shove', 'dodge', 'disengage', 'dash', 'help', 'hide',
+    combat: ['attack', 'multiattack', 'grapple', 'shove', 'dodge', 'disengage', 'dash', 'help', 'hide',
       'ready', 'opportunity_attack', 'two_weapon_attack', 'unarmed_strike', 'escape_grapple'],
     movement: ['move', 'stand_up', 'drop_prone', 'climb', 'swim', 'jump', 'crawl', 'mount', 'dismount'],
     spell: ['cast', 'dismiss_concentration', 'counterspell', 'ritual_cast'],

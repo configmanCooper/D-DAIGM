@@ -218,9 +218,40 @@
      means "unconstrained", not "may do nothing" — reading it the other way left
      an out-of-combat character with no legal moves at all, which silently
      stalled every AI seat in exploration. */
-  function canAct(a) { var t = turnOf(a); return t ? !!t.action : true; }
-  function canBonus(a) { var t = turnOf(a); return t ? !!t.bonus : true; }
-  function canReact(a) { var t = turnOf(a); return t ? !!t.reaction : true; }
+  /**
+   * Conditions that stop a creature acting at all.
+   *
+   * 2014: an incapacitated creature can take no actions and no reactions, and
+   * stunned, paralyzed, petrified and unconscious all include incapacitated.
+   * None of this was checked — the gates looked only at whether the turn's
+   * action flag was still set — so a stunned creature took its turn normally
+   * and every condition that should end a fight was decoration.
+   */
+  var INCAPACITATING = {
+    incapacitated: 1, stunned: 1, paralyzed: 1, petrified: 1, unconscious: 1,
+  };
+
+  function incapacitated(a) {
+    var c = a && a.runtime && a.runtime.conditions;
+    if (!c) return false;
+    for (var k in INCAPACITATING) {
+      if (Object.prototype.hasOwnProperty.call(c, k) && c[k]) return true;
+    }
+    return false;
+  }
+
+  function canAct(a) {
+    if (incapacitated(a)) return false;
+    var t = turnOf(a); return t ? !!t.action : true;
+  }
+  function canBonus(a) {
+    if (incapacitated(a)) return false;
+    var t = turnOf(a); return t ? !!t.bonus : true;
+  }
+  function canReact(a) {
+    if (incapacitated(a)) return false;
+    var t = turnOf(a); return t ? !!t.reaction : true;
+  }
   function movementLeft(a) {
     var t = turnOf(a);
     if (t) return t.movementRemaining;
@@ -302,6 +333,12 @@
     if (!a) return b;
     var name = a.name || actorId;
 
+    /* Anything that lasts "until the start of your next turn" ends now.
+       Nothing ever drove expiry, so Dodge lasted the entire fight, a
+       one-round condition was permanent, and every duration in the game was
+       decoration. */
+    expireConditions(state, actorId, b);
+
     /* A Help lasts until the start of the helped creature's next turn (PHB
        192). Without an expiry the grant simply sat there: eighteen Helps in a
        long playtest produced six used and twelve permanent standing bonuses
@@ -356,6 +393,75 @@
       }
     }
     return b;
+  }
+
+  /**
+   * End whatever ran out at the start of this creature's turn.
+   *
+   * ndsOn has always been recorded on every condition and never read, so
+   * "until the start of your next turn" meant "for ever": a Dodge taken in
+   * round one was still granting disadvantage in round nine.
+   *
+   * A condition that ends on a saving throw gets one here, at the DC that
+   * applied it — the other half of the same omission, which made every
+   * save-ends effect permanent too.
+   */
+  function expireConditions(state, actorId, b) {
+    var a = actor(state, actorId);
+    var conds = a && a.runtime && a.runtime.conditions;
+    if (!conds) return b;
+    var name = a.name || actorId;
+
+    Object.keys(conds).forEach(function (key) {
+      var c = conds[key] || {};
+      var ends = c.endsOn;
+
+      if (ends === 'start_of_next_turn' || ends === 'end_of_next_turn') {
+        Events.push(b, 'condition_remove', { targetId: actorId, condition: key },
+          name + ' is no longer ' + key + '.');
+        return;
+      }
+
+      if (typeof c.rounds === 'number') {
+        if (c.rounds <= 1) {
+          Events.push(b, 'condition_remove', { targetId: actorId, condition: key },
+            name + ' is no longer ' + key + '.');
+        } else {
+          Events.push(b, 'condition_tick', { targetId: actorId, condition: key, rounds: c.rounds - 1 }, '');
+        }
+        return;
+      }
+
+      if (ends === 'save' && c.saveDc) {
+        var d = derivedOf(state, actorId);
+        var save = Rules.savingThrow
+          ? Rules.savingThrow(d, c.saveAbility || 'con',
+            withEffects(state, actorId, 'save', { rng: state.rng, dc: c.saveDc },
+              { saveAbility: c.saveAbility || 'con' }))
+          : { success: false };
+        Events.push(b, 'roll', {
+          rollKind: 'save', actorId: actorId, ability: c.saveAbility || 'con',
+          dc: c.saveDc, success: save.success, total: save.total,
+        }, name + ' fights off ' + key + ': ' + (save.success ? 'they shake it off.' : 'it holds.'));
+        if (save.success) {
+          Events.push(b, 'condition_remove', { targetId: actorId, condition: key }, '');
+        }
+      }
+    });
+    return b;
+  }
+
+  function derivedOf(state, id) {
+    var a = actor(state, id);
+    if (!a) return null;
+    if (a.derivedCache) return a.derivedCache;
+    var Character = (global.DND && global.DND.Character) ||
+      (typeof require !== 'undefined' ? require('./character.js') : null);
+    if (!Character || !Character.derive) return null;
+    try {
+      return Character.derive(a.base, a.progression, a.runtime,
+        (state.effects || []).filter(function (e) { return e.targetId === id; }));
+    } catch (e) { return null; }
   }
 
   /** Unconscious and dying: at zero hit points, not yet stable, not yet dead. */
@@ -576,9 +682,25 @@
     var rt = t.runtime;
     var name = t.name || targetId;
     var hp = rt.hp, hpMax = rt.hpMax;
+
+    /* What the target is made of, applied before anything else touches the
+       number — resistance halves, vulnerability doubles, immunity cancels, and
+       all of it happens before temporary hit points absorb the remainder.
+       Doing this here rather than at the attack site means a spell, a trap or
+       a falling rock is judged by the same rule as a sword. */
+    if (opts.damageType) {
+      var adjusted = applyDamageType(state, targetId, amount, opts.damageType);
+      if (adjusted.note) beats.push(adjusted.note);
+      amount = adjusted.total;
+    }
+
     var temp = rt.tempHp || 0;
     var toTemp = Math.min(temp, amount);
     var toHp = amount - toTemp;
+    /* Concentration is tested against the damage TAKEN, not the damage that
+       reached hit points. Temporary hit points absorbing a blow does not spare
+       the caster the save (PHB 203, "whenever you take damage"). */
+    var damageTaken = amount;
 
     if (toTemp > 0) {
       events.push(Events.makeEvent('temp_hp', { targetId: targetId, amount: temp - toTemp, set: true }));
@@ -628,9 +750,14 @@
         return { events: events, beats: beats, dead: true };
       }
       beats.push(name + ' drops.');
-    } else if (rt.concentratingOn && opts.concentrationDerived && toHp > 0) {
-      /* Still up but concentrating: a Constitution save or the effect ends. */
-      var check = Rules.concentrationCheck(opts.concentrationDerived, toHp, { rng: state.rng });
+    } else if (rt.concentratingOn && damageTaken > 0) {
+      /* Still up but concentrating: a Constitution save or the effect ends.
+         The derived sheet used to have to be handed in by the caller, and no
+         caller ever did — so damage never once broke concentration and every
+         concentration spell in the game lasted until its duration ran out,
+         whatever happened to the caster. It is looked up here instead. */
+      var conDerived = (opts.concentrationDerived) || derivedOf(state, targetId);
+      var check = Rules.concentrationCheck(conDerived, damageTaken, { rng: state.rng });
       events.push(Events.makeEvent('roll', { of: 'concentration', actorId: targetId, dc: check.dc, result: check.save }));
       if (!check.success) {
         events.push(Events.makeEvent('concentration_end', { actorId: targetId, reason: 'failed save' }));
@@ -753,11 +880,13 @@
      * conditions were being applied faithfully and then never read.
      */
     var stance = attackAdvantage(state, attacker, target, ctx);
-    var roll = Dice.attack({
+    /* Bless, Bane, exhaustion and anything else currently on the attacker are
+       folded in here rather than being computed and thrown away. */
+    var roll = Dice.attack(withEffects(state, attackerId, 'attack', {
       rng: state.rng, mod: profile.toHit || 0, ac: ac,
       advantage: stance.advantage, disadvantage: stance.disadvantage,
       critRange: profile.critRange || 20,
-    });
+    }, ctx));
     if (stance.why.length) b.beats.push(stance.why.join(' '));
     /* A Help is spent whether it helped or not — that is the point of it being
        one ally's whole action rather than a standing bonus. */
@@ -799,16 +928,12 @@
       if (total < 0) total = 0;
     }
     Events.push(b, 'roll', { of: 'damage', actorId: attackerId, targetId: targetId, result: dmg });
-    /* Resistance, immunity and vulnerability were derived onto every sheet and
-       then never consulted, so a skeleton took full damage from a club and a
-       fire elemental burned. Applied here, once, where damage becomes hit
-       points — before the death-save and massive-damage arithmetic that
-       depends on the real number. */
-    var adjusted = applyDamageType(state, targetId, total, profile.damageType);
-    if (adjusted.note) b.beats.push(adjusted.note);
-    total = adjusted.total;
-
+    /* Resistance, immunity and vulnerability are applied inside damageEvents,
+       where every source of damage passes through — a spell, a trap or a
+       falling rock is judged by the same rule as a sword. Applying it here as
+       well halved resistant damage twice. */
     var chain = damageEvents(state, targetId, total, {
+      damageType: profile.damageType,
       crit: roll.isCrit,
       concentrationDerived: ctx && ctx.targetConcentrationDerived,
     });
@@ -827,6 +952,44 @@
    * why this counts sources into two buckets and then compares them rather
    * than tracking a running total.
    */
+  /**
+   * Collect every active effect that bears on a roll, and fold it into the
+   * options the dice take.
+   *
+   * `Effects.modifiersFor` has always computed this correctly and nothing ever
+   * called it — it was referenced only inside its own file. So Bless added
+   * nothing to an attack, Bane subtracted nothing, Guidance did not help a
+   * check, and exhaustion imposed no disadvantage. Every one of those spells
+   * was pure narration.
+   *
+   * Advantage and disadvantage cancel here the same way they do everywhere
+   * else: any of each leaves a plain d20.
+   */
+  function withEffects(state, actorId, rollType, opts, ctx) {
+    opts = opts || {};
+    var Effects = (global.DND && global.DND.Effects) ||
+      (typeof require !== 'undefined' ? require('./effects.js') : null);
+    if (!Effects || !Effects.modifiersFor) return opts;
+
+    var mods;
+    try { mods = Effects.modifiersFor(state, actorId, rollType, ctx || {}); }
+    catch (e) { return opts; }
+    if (!mods) return opts;
+
+    if (mods.flat) opts.mod = (opts.mod || 0) + mods.flat;
+    if (mods.dice && mods.dice.length) {
+      /* Several sources of bonus dice stack as separate rolls; the dice
+         notation joins them. */
+      opts.bonusDice = (opts.bonusDice ? opts.bonusDice + '+' : '') + mods.dice.join('+');
+    }
+    var adv = (mods.advantage || []).length > 0;
+    var dis = (mods.disadvantage || []).length > 0;
+    if (adv && !dis) opts.advantage = true;
+    if (dis && !adv) opts.disadvantage = true;
+    if (adv && dis) { opts.advantage = false; opts.disadvantage = false; }
+    return opts;
+  }
+
   function attackAdvantage(state, attacker, target, ctx) {
     var adv = [], dis = [];
     var ac = (attacker.runtime && attacker.runtime.conditions) || {};
@@ -928,6 +1091,20 @@
    * `hiddenFrom` means, and what the perception layer already understood but
    * nothing ever set.
    */
+  /**
+   * A skill's total modifier as a NUMBER.
+   *
+   * derived.skills.x is an object describing the skill; using it directly as
+   * a modifier silently produces nonsense. Falls back to the raw ability
+   * modifier when the sheet has no entry for that skill.
+   */
+  function skillMod(derived, skill, ability) {
+    var s = derived && derived.skills && derived.skills[skill];
+    if (s && typeof s.mod === 'number') return s.mod;
+    if (typeof s === 'number') return s;
+    return (derived && derived.abilityMods && derived.abilityMods[ability]) || 0;
+  }
+
   function hideResolve(state, command, ctx) {
     var b = Events.makeBatch(command);
     var a = actor(state, command.actorId);
@@ -935,9 +1112,11 @@
     if (!canAct(a)) return Events.refuse(b, 'no-action', 'no action left to Hide');
 
     var derived = a.derivedCache || (ctx && ctx.derived) || {};
-    var stealthMod = (derived.skills && derived.skills.stealth &&
-      (derived.skills.stealth.total != null ? derived.skills.stealth.total : derived.skills.stealth)) ||
-      (derived.abilityMods && derived.abilityMods.dex) || 0;
+    /* A derived skill is `{ability, mod, proficient, expertise}`, not a number.
+       Reading a `.total` that does not exist fell through to the whole object,
+       which `Dice.check` then used as a modifier — so Hide rolled a bare d20
+       and threw away proficiency and expertise entirely. */
+    var stealthMod = skillMod(derived, 'stealth', 'dex');
     var roll = Dice.check
       ? Dice.check({ rng: state.rng, mod: stealthMod })
       : Dice.roll('1d20', { rng: state.rng });
@@ -971,29 +1150,46 @@
   /**
    * Halve, double or cancel damage according to what the target is made of.
    *
-   * 2014 rules: resistance halves (rounding down), vulnerability doubles, and
-   * immunity removes it entirely. Resistance applies once no matter how many
-   * sources grant it, so this checks membership rather than counting.
+   * 2014 rules, in this order: immunity wins outright; then resistance and
+   * vulnerability, each applied ONCE however many sources grant them. A
+   * creature both resistant and vulnerable takes double and then half — five
+   * damage becomes four, not ten — because each is applied separately and
+   * rounding happens at each step.
+   *
+   * Monsters carry their defences on the statblock and characters on the
+   * derived sheet. Only the sheet was consulted, so a fire elemental burned
+   * and a skeleton took full damage from a club.
    */
   function applyDamageType(state, targetId, amount, damageType) {
     var t = actor(state, targetId);
     if (!t || !damageType || !amount) return { total: amount, note: '' };
     var d = t.derivedCache || {};
+    var block = t.statblock || (t.runtime && t.runtime.statblock) || {};
     var type = String(damageType).toLowerCase();
-    var has = function (list) {
-      return (list || []).some(function (x) { return String(x).toLowerCase() === type; });
+
+    var has = function (which) {
+      var lists = [d[which], block[which]];
+      for (var i = 0; i < lists.length; i++) {
+        var list = lists[i] || [];
+        for (var j = 0; j < list.length; j++) {
+          if (String(list[j]).toLowerCase() === type) return true;
+        }
+      }
+      return false;
     };
 
-    if (has(d.immunities)) {
+    if (has('immunities')) {
       return { total: 0, note: t.name + ' is unharmed \u2014 ' + type + ' does nothing to it.' };
     }
-    if (has(d.vulnerabilities)) {
-      return { total: amount * 2, note: t.name + ' is horribly vulnerable to ' + type + '.' };
-    }
-    if (has(d.resistances)) {
-      return { total: Math.floor(amount / 2), note: t.name + ' shrugs off much of the ' + type + '.' };
-    }
-    return { total: amount, note: '' };
+
+    var out = amount, notes = [];
+    if (has('vulnerabilities')) { out = out * 2; notes.push('horribly vulnerable to ' + type); }
+    if (has('resistances')) { out = Math.floor(out / 2); notes.push('shrugs off much of the ' + type); }
+
+    return {
+      total: out,
+      note: notes.length ? t.name + ' is ' + notes.join(', and ') + '.' : '',
+    };
   }
 
   function contestResolve(state, command, ctx, mode) {
@@ -1047,6 +1243,7 @@
     ctx = ctx || {};
     var verb = command.primary.verb;
     switch (verb) {
+      case 'multiattack': return monsterMultiattack(state, command, ctx);
       case 'attack': return attackResolve(state, command, ctx, {});
       case 'two_weapon_attack': return attackResolve(state, command, ctx, { offHand: true });
       case 'unarmed_strike': return attackResolve(state, command, ctx, {});
@@ -1141,6 +1338,17 @@
     var moves = [];
     var enemies = perceivedEnemies(state, actorId);
     if (canAct(a)) {
+      /* A creature whose statblock describes a multiattack should use it —
+         that IS its attack action, and offering only single attacks made every
+         boss in the game fight like a goblin. Listed first so a policy that
+         takes the first sensible option does the right thing. */
+      var seq = multiattackSequence(statblockOf(a));
+      if (seq.length) {
+        enemies.forEach(function (id) {
+          moves.push(move('multiattack', 'Multiattack ' + (state.actors[id].name || id), 'action',
+            { targetIds: [id], warn: seq.length + ' attacks' }));
+        });
+      }
       enemies.forEach(function (id) {
         moves.push(move('attack', 'Attack ' + (state.actors[id].name || id), 'action', { targetIds: [id] }));
       });
@@ -1239,6 +1447,16 @@
       Events.push(b, 'note', { text: 'pass', actorId: command.actorId }, (a ? a.name : command.actorId) + ' does nothing.');
       return b;
     }
+    if (verb === 'note') {
+      /* A player writing something down. It changes nothing mechanically and
+         is never narrated as fiction, but it belongs in the transcript — a
+         table's notes are part of the record of the session. */
+      var text = command.primary.note || (command.primary.improvised || '');
+      if (!text) return Events.refuse(b, 'no-text', 'there is nothing written down');
+      Events.push(b, 'note', { text: text, actorId: command.actorId, ooc: true },
+        (a ? a.name : command.actorId) + ' notes: ' + text);
+      return b;
+    }
     return Events.refuse(b, 'unknown-verb', 'meta does not handle ' + verb);
   }
 
@@ -1270,27 +1488,88 @@
 
   /* A monster's multiattack as one batch: a chain of attacks that each spend
      nothing extra (the whole thing is the single Attack action). */
+  /**
+   * A monster's multiattack as one batch.
+   *
+   * Each swing must see the damage the previous one did. Resolving them all
+   * against the same snapshot meant every attack in the sequence read the
+   * ORIGINAL temporary hit points and spent them again: two 4-damage hits
+   * against 5 temporary hit points left the target on 20 HP and 1 temp
+   * instead of 17 and 0. So the sequence is resolved against a shadow state
+   * that is advanced after each swing, while the events are still collected
+   * into a single batch the caller commits atomically.
+   */
   function monsterMultiattack(state, command, ctx) {
     ctx = ctx || {};
     var attackerId = command.actorId;
     var attacker = actor(state, attackerId);
     var b = Events.makeBatch(command);
-    if (!attacker || !attacker.runtime.statblock) return Events.refuse(b, 'no-statblock', 'not a statted creature');
+    /* Every other combat path reads the top-level statblock; this one read
+       `runtime.statblock`, which generated monsters do not have — so
+       multiattack was unreachable for every monster in the game. */
+    var block = statblockOf(attacker);
+    if (!attacker || !block) return Events.refuse(b, 'no-statblock', 'not a statted creature');
     if (!canAct(attacker)) return Events.refuse(b, 'no-action', 'no action left to multiattack');
-    var refs = multiattackSequence(attacker.runtime.statblock);
+
+    var refs = multiattackSequence(block);
+    if (!refs.length) return Events.refuse(b, 'no-multiattack', (attacker.name || attackerId) + ' has no multiattack');
     var targets = command.primary.targetIds || (ctx.targetId ? [ctx.targetId] : []);
     Events.push(b, 'action_economy', { actorId: attackerId, action: false });
+
+    var shadow = shadowOf(state);
     refs.forEach(function (ref, i) {
       var targetId = targets[i] || targets[0];
-      var sub = attackResolve(state, {
+      var t = actor(shadow, targetId);
+      if (!t || t.runtime.dead) return;      // do not keep hitting a corpse
+      var sub = attackResolve(shadow, {
         commandId: command.commandId, actorId: attackerId,
         primary: { verb: 'attack', targetIds: [targetId] },
       }, Object.assign({}, ctx, {}), { actionRef: ref, multiattack: true, free: true });
       if (sub.refused) return;
       b.events = b.events.concat(sub.events);
       b.beats = b.beats.concat(sub.beats);
+      /* Advance the shadow so the next swing sees the result of this one. */
+      applyToShadow(shadow, sub.events);
     });
     return b;
+  }
+
+  /** The statblock, wherever a given monster keeps it. */
+  function statblockOf(a) {
+    if (!a) return null;
+    return a.statblock || (a.runtime && a.runtime.statblock) || null;
+  }
+
+  /* A throwaway copy used to sequence several attacks inside one batch. It is
+     never committed and never seen by anything outside this function. */
+  function shadowOf(state) {
+    var copy = Object.create(Object.getPrototypeOf(state) || Object.prototype);
+    for (var key in state) {
+      if (!Object.prototype.hasOwnProperty.call(state, key)) continue;
+      copy[key] = key === 'actors' ? cloneActors(state.actors) : state[key];
+    }
+    return copy;
+  }
+
+  function cloneActors(actors) {
+    var out = {};
+    Object.keys(actors || {}).forEach(function (id) {
+      var a = actors[id];
+      /* Only the runtime changes mid-sequence; the rest can be shared. */
+      out[id] = Object.assign({}, a, {
+        runtime: JSON.parse(JSON.stringify(a.runtime || {})),
+      });
+    });
+    return out;
+  }
+
+  function applyToShadow(shadow, events) {
+    events.forEach(function (e) {
+      var fn = Events.APPLY && Events.APPLY[e.kind];
+      if (typeof fn === 'function') {
+        try { fn(shadow, e, null); } catch (err) { /* the real commit will judge */ }
+      }
+    });
   }
 
   /* Recharge: an ability with `recharge:[min,max]` comes back when a d6 at the
@@ -1338,6 +1617,7 @@
     beginEncounter: beginEncounter, startTurn: startTurn, endTurn: endTurn, advanceTurn: advanceTurn,
     upkeep: upkeep, encounterOver: encounterOver, endEncounter: endEncounter,
     perceivedEnemies: perceivedEnemies, attackAdvantage: attackAdvantage,
+    withEffects: withEffects, skillMod: skillMod,
     applyDamageType: applyDamageType, helpResolve: helpResolve, hideResolve: hideResolve,
     /* damage pipeline */
     damageEvents: damageEvents,

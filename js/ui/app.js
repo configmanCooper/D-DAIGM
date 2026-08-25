@@ -454,22 +454,54 @@
     DND.Game.runAiSeat(session, actorId, opts || {}).then(afterTurn);
   }
 
+  /* How many times the loop has re-armed itself without a human ever coming
+     up. An all-AI table legitimately runs for a long time, so this is not a
+     hard cap on play — it is a cap on *consecutive step-limit restarts*, which
+     is the shape a runaway takes. Reset whenever the table actually stops for
+     someone or the player asks for a turn. */
+  var autoRestarts = 0;
+  var MAX_AUTO_RESTARTS = 40;
+
   function aiRun(opts) {
     if (!session) return;
+    if (S.playing) return;              // never start the loop on top of itself
     S.playing = true;
     if (DND.Watch) DND.Watch.setStatus('playing…');
     DND.Game.advanceUntilHuman(session, opts || {}).then(function (r) {
       S.playing = false;
-      if (DND.Watch) DND.Watch.setStatus(r && r.stopped === 'human' ? 'stopped — your turn' : 'stopped');
+      var stopped = r && r.stopped;
+      if (DND.Watch) DND.Watch.setStatus(stopped === 'human' ? 'stopped — your turn' : 'stopped');
       afterTurn();
-      /* Ran out of steps rather than reaching a person: carry on. */
-      if (r && r.stopped === 'step limit') maybeAutoAdvance();
+
+      if (stopped === 'human') { autoRestarts = 0; return; }
+
+      /* Ran out of steps rather than reaching a person: carry on — but not for
+         ever. Before this was bounded, a table with no human up (an all-AI
+         watch, or any exploration scene) re-armed itself on every step limit
+         and pegged the CPU, flooding the log and freezing the page. */
+      if (stopped === 'step limit' && !session.__stopRequested) {
+        if (autoRestarts++ < MAX_AUTO_RESTARTS) { maybeAutoAdvance(); return; }
+        autoRestarts = 0;
+        if (DND.Watch) DND.Watch.setStatus('paused — press Play to continue');
+        if (DND.Log) DND.Log.system('The table has been running a while. Press Play to continue.');
+        return;
+      }
+      autoRestarts = 0;
+    }, function (err) {
+      /* A rejected loop must still release the flag, or Play is dead until
+         the page is reloaded. */
+      S.playing = false;
+      autoRestarts = 0;
+      if (DND.Watch) DND.Watch.setStatus('stopped');
+      if (DND.Log) DND.Log.system('The table stopped: ' + ((err && err.message) || err));
+      afterTurn();
     });
   }
 
   function aiStop() {
     // The loop yields between seats; clearing the flag stops further auto-steps.
     S.playing = false;
+    autoRestarts = 0;
     if (session) session.__stopRequested = true;
     if (DND.Watch) DND.Watch.setStatus('stopped');
   }

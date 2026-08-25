@@ -115,7 +115,11 @@
     var d = derivedOf(state, actorId);
     var a = actor(state, actorId);
     var diff = difficultyFor(band, suggestion);
-    var result = Rules.skillCheck(d, skill, { rng: state.rng, dc: diff.dc });
+    /* Guidance, exhaustion, and anything else currently on this character are
+       folded in here. The effect system computed them correctly and nothing
+       ever asked, so Guidance was a line of prose. */
+    var result = Rules.skillCheck(d, skill,
+      withEffects(state, actorId, 'ability_check', { rng: state.rng, dc: diff.dc }));
     Events.push(batch, 'roll', {
       rollKind: 'check', actorId: actorId, skill: skill,
       dc: diff.dc, band: diff.band,
@@ -134,8 +138,8 @@
     search: { skill: 'investigation', band: 'medium', verbing: 'searching' },
     investigate: { skill: 'investigation', band: 'medium', verbing: 'examining' },
     perceive: { skill: 'perception', band: 'medium', verbing: 'watching' },
-    unlock: { skill: 'sleight_of_hand', band: 'hard', verbing: 'picking the lock' },
-    disarm_trap: { skill: 'sleight_of_hand', band: 'hard', verbing: 'disarming it' },
+    unlock: { skill: 'sleightOfHand', band: 'hard', verbing: 'picking the lock' },
+    disarm_trap: { skill: 'sleightOfHand', band: 'hard', verbing: 'disarming it' },
     track: { skill: 'survival', band: 'medium', verbing: 'tracking' },
     forage: { skill: 'survival', band: 'easy', verbing: 'foraging' },
     read: { skill: 'investigation', band: 'easy', verbing: 'reading' },
@@ -554,6 +558,233 @@
 
   /* ========================================================== items ========= */
 
+  /**
+   * The healing an item restores, expressed as a dice string.
+   *
+   * Looks the item up in the real table rather than trusting the inventory
+   * entry to carry a copy, because an item picked up in play carries only its
+   * id — which is why drinking a found Potion of Healing quietly did nothing.
+   */
+  /**
+   * Who a spell actually lands on.
+   *
+   * A single-target spell hits what the caster named. An area spell hits
+   * everyone hostile who is present — the engine has no positional geometry
+   * for blast radii, and silently treating a fireball as a single-target
+   * spell would be a much worse lie than treating it as "everyone in the
+   * fight". Allies are spared, which is generous and keeps an AI seat from
+   * wiping its own party with a spell it does not understand.
+   */
+  function spellTargets(state, command, spell, effects) {
+    var named = (command.primary.targetIds || []).filter(function (id) { return actor(state, id); });
+    var isArea = (effects || []).some(function (e) { return e.kind === 'area'; }) ||
+      (spell && spell.mech && spell.mech.targets && spell.mech.targets.type === 'area');
+    if (!isArea) return named.length ? named : [];
+
+    var caster = actor(state, command.actorId);
+    var focus = named[0] ? actor(state, named[0]) : null;
+    var enemySide = focus ? focus.side : (caster && caster.side === 'party' ? 'enemy' : 'party');
+    var hit = Object.keys(state.actors).filter(function (id) {
+      var o = state.actors[id];
+      return o.side === enemySide && o.runtime && !o.runtime.dead && o.runtime.hp > 0;
+    });
+    return hit.length ? hit : named;
+  }
+
+  /**
+   * Upcasting: an extra die per slot level above the spell's own.
+   *
+   * `scaling: {per:'slot', mode:'damage', addDice:'1d6'}` is the SRD's own
+   * shape. Only damage scaling changes the dice string; more targets or a
+   * longer duration are handled where those matter.
+   */
+  function scaleDice(dice, spell, upcastBy) {
+    var sc = spell && spell.mech && spell.mech.scaling;
+    if (!upcastBy || !sc || sc.mode !== 'damage' || !sc.addDice) return dice;
+    var add = /^(\d+)d(\d+)$/.exec(String(sc.addDice));
+    var base = /^(\d+)d(\d+)(.*)$/.exec(String(dice));
+    if (!add || !base || add[2] !== base[2]) return dice;
+    return (parseInt(base[1], 10) + parseInt(add[1], 10) * upcastBy) + 'd' + base[2] + (base[3] || '');
+  }
+
+  function rollSpellDamage(state, e, spell, upcastBy) {
+    var total = 0, parts = [], type = null;
+    (e.damage || []).forEach(function (dmg) {
+      var roll = Dice.roll(scaleDice(dmg.dice, spell, upcastBy), { rng: state.rng });
+      total += roll.total;
+      parts.push(Dice.explain(roll));
+      type = type || dmg.type;
+    });
+    return { total: total, explain: parts.join(' + '), type: type };
+  }
+
+  /** A spell attack: the caster's attack bonus against the target's AC. */
+  function resolveSpellAttack(state, b, command, a, d, spell, e, tid, name, upcastBy) {
+    var t = actor(state, tid);
+    if (!t) return false;
+    var Combat = combatModule();
+    var ac = Combat && Combat.targetAc ? Combat.targetAc(state, tid) : 10;
+    var bonus = (d && d.spellcasting && d.spellcasting.attackBonus) || 0;
+    var roll = Dice.attack({ rng: state.rng, mod: bonus, ac: ac });
+    Events.push(b, 'roll', { of: 'spell_attack', actorId: command.actorId, targetId: tid, result: roll },
+      a.name + ' casts ' + name + ' at ' + t.name + '.');
+    if (!roll.hit) { b.beats.push('It goes wide.'); return true; }
+
+    var dmg = rollSpellDamage(state, e, spell, upcastBy);
+    if (roll.isCrit) dmg.total += rollSpellDamage(state, e, spell, upcastBy).total;
+    applySpellDamage(state, b, tid, dmg, t, name, roll.isCrit);
+    return true;
+  }
+
+  /**
+   * A spell that calls for a saving throw.
+   *
+   * `saveEffect` is the SRD's own vocabulary: `negates` (nothing on a success),
+   * `half` (half damage), `partial` (damage lands, the rider does not).
+   */
+  function resolveSpellSave(state, b, command, a, d, spell, e, tid, name, upcastBy) {
+    var t = actor(state, tid);
+    if (!t) return;
+    var dc = (d && d.spellcasting && d.spellcasting.dc) || 10;
+    var td = derivedOf(state, tid);
+    var save = Rules.savingThrow
+      ? Rules.savingThrow(td, e.ability, { rng: state.rng, dc: dc })
+      : { success: false, total: 0 };
+
+    Events.push(b, 'roll', {
+      rollKind: 'save', actorId: tid, ability: e.ability, dc: dc,
+      total: save.total, success: save.success, explain: Dice.explain(save),
+    }, t.name + ' rolls a ' + String(e.ability).toUpperCase() + ' save against ' + name +
+      ' (DC ' + dc + '): ' + (save.success ? 'success.' : 'failure.'));
+
+    if (e.damage && e.damage.length) {
+      var dmg = rollSpellDamage(state, e, spell, upcastBy);
+      if (save.success) {
+        if (e.saveEffect === 'negates') {
+          b.beats.push(t.name + ' takes nothing.');
+          return;
+        }
+        if (e.saveEffect === 'half') dmg.total = Math.floor(dmg.total / 2);
+      }
+      applySpellDamage(state, b, tid, dmg, t, name, false);
+    }
+
+    /* A rider condition only lands on a failure — except under `partial`,
+       where the damage lands and the condition is what the save avoids. */
+    if (e.condition && !save.success) {
+      Events.push(b, 'condition_add', {
+        targetId: tid, condition: e.condition, source: name,
+        endsOn: e.saveRepeat && e.saveRepeat !== 'none' ? 'save' : 'end_of_next_turn',
+        saveDc: dc, saveAbility: e.ability,
+      }, t.name + ' is ' + e.condition + '.');
+    }
+  }
+
+  function applySpellDamage(state, b, tid, dmg, t, name, crit) {
+    var Combat = combatModule();
+    if (Combat && Combat.damageEvents) {
+      /* Through the ordinary damage pipeline, so resistances, temporary hit
+         points, concentration checks and death all behave exactly as they do
+         for a sword. */
+      var chain = Combat.damageEvents(state, tid, dmg.total, { crit: !!crit, damageType: dmg.type });
+      b.events = b.events.concat(chain.events);
+      b.beats = b.beats.concat(chain.beats);
+      return;
+    }
+    Events.push(b, 'hp', { targetId: tid, delta: -dmg.total },
+      t.name + ' takes ' + dmg.total + ' damage from ' + name + '.');
+  }
+
+  /** Fold active effects into a roll's options. Delegates to combat.js so
+      there is one implementation, not two that drift. */
+  function withEffects(state, actorId, rollType, opts, ctx) {
+    var Combat = combatModule();
+    if (!Combat || !Combat.withEffects) return opts;
+    return Combat.withEffects(state, actorId, rollType, opts, ctx);
+  }
+
+  function combatModule() {
+    return (global.DND && global.DND.Combat) ||
+      (typeof require !== 'undefined' ? require('./combat.js') : null);
+  }
+
+  /** The item table, however this file is running. */
+  function itemTable(ctx) {
+    return (ctx && ctx.data && ctx.data.ITEMS) ||
+      (global.DND && global.DND.ITEMS) ||
+      (typeof require !== 'undefined' ? require('../data/srd_items.js').ITEMS : null);
+  }
+
+  function itemDef(id, ctx) {
+    var T = itemTable(ctx);
+    return (T && T[id]) || null;
+  }
+
+  /**
+   * What a merchant asks for something.
+   *
+   * SRD costs are {quantity, unit} in copper, silver, electrum, gold or
+   * platinum, and are frequently null for magic items. Everything is converted
+   * to gold so a purse is a single number; an unpriced item is treated as
+   * priceless rather than free, because free is the answer that empties a
+   * shop.
+   */
+  var COIN_IN_GOLD = { cp: 0.01, sp: 0.1, ep: 0.5, gp: 1, pp: 10 };
+  function priceOf(def) {
+    if (!def) return Infinity;
+    var c = def.cost;
+    if (!c) return RARITY_PRICE[def.rarity] != null ? RARITY_PRICE[def.rarity] : Infinity;
+    if (typeof c === 'number') return c;
+    var rate = COIN_IN_GOLD[String(c.unit || 'gp').toLowerCase()] || 1;
+    return Math.max(0, Math.round((c.quantity || 0) * rate));
+  }
+
+  /* Rough going rates for magic items, which the SRD deliberately does not
+     price. These are the widely-used DMG guideline midpoints. */
+  var RARITY_PRICE = {
+    common: 50, uncommon: 400, rare: 4000, 'very-rare': 40000, legendary: 200000,
+  };
+
+  /** A table entry turned into something that can sit in a pack. */
+  function inventoryEntry(def) {
+    return {
+      uid: def.id, id: def.id, name: def.name || def.id,
+      slot: null, equipped: false,
+      damage: def.damage || null, ac: def.ac || null,
+      properties: def.properties || [], weight: def.weight || 0,
+      consumable: !!(def.mech && def.mech.consumable),
+    };
+  }
+
+  /** Something lying in this room that could be picked up. */
+  function groundItem(state, wantId, ctx) {
+    var loc = (state.locations || {})[state.locationId];
+    var lying = (loc && loc.items) || [];
+    for (var i = 0; i < lying.length; i++) {
+      var it = lying[i];
+      if (it.uid === wantId || it.id === wantId ||
+        String(it.name || '').toLowerCase() === String(wantId).toLowerCase()) return it;
+    }
+    /* Nothing was placed by hand, but the id may still name a real item — a
+       player reaching for something the fiction has just described. */
+    var def = itemDef(wantId, ctx);
+    return def ? inventoryEntry(def) : null;
+  }
+
+  function healDiceFor(entry, ctx) {
+    if (!entry) return null;
+    var ITEMS = (ctx && ctx.data && ctx.data.ITEMS) ||
+      (global.DND && global.DND.ITEMS) ||
+      (typeof require !== 'undefined' ? require('../data/srd_items.js').ITEMS : null);
+    var def = ITEMS && ITEMS[entry.id];
+    var mech = def && def.mech;
+    if (!mech || mech.type !== 'healing') return null;
+    var dice = mech.dice || '';
+    var bonus = mech.bonus || 0;
+    if (!dice) return bonus ? String(bonus) : null;
+    return bonus ? dice + '+' + bonus : dice;
+  }
+
   function resolveItem(state, command, ctx) {
     ctx = ctx || {};
     var b = Events.makeBatch(command);
@@ -572,7 +803,11 @@
     switch (verb) {
       case 'drink':
       case 'use': {
-        var heal = entry && entry.heal;
+        /* Healing can be written on the inventory entry (a hand-placed item in
+           a campaign) or, far more usually, live in the item table as
+           `mech: {type:'healing', dice, bonus}`. Only the first was read, so
+           every healing potion picked up in play did nothing at all. */
+        var heal = (entry && entry.heal) || healDiceFor(entry, ctx);
         if (heal) {
           var roll = Dice.roll(heal, { rng: state.rng });
           Events.push(b, 'roll', { rollKind: 'heal', actorId: command.actorId, total: roll.total, explain: Dice.explain(roll) }, '');
@@ -619,6 +854,71 @@
         }, '');
         return b;
       }
+      case 'unattune':
+        Events.push(b, 'item_unattune', { actorId: command.actorId, uid: uid },
+          a.name + ' releases their attunement to ' + label + '.');
+        return b;
+
+      case 'pick_up': {
+        /* Something on the ground, not in a pack. The id is enough to look it
+           up; a player who says "pick up the sword" has not been handed a uid. */
+        var wantId = command.primary.itemId || (command.primary.targetIds || [])[0];
+        if (!wantId) return Events.refuse(b, 'no-item', 'there is nothing named to pick up');
+        var ground = groundItem(state, wantId, ctx);
+        if (!ground) return Events.refuse(b, 'not-here', 'there is no ' + wantId + ' within reach');
+        Events.push(b, 'item_gain', { actorId: command.actorId, item: ground },
+          a.name + ' picks up ' + (ground.name || wantId) + '.');
+        Events.push(b, 'location_item_remove', { locationId: state.locationId, uid: ground.uid || ground.id }, '');
+        return b;
+      }
+
+      case 'buy': {
+        var sellerId = (command.primary.targetIds || [])[0];
+        var seller = sellerId ? actor(state, sellerId) : null;
+        if (!seller) return Events.refuse(b, 'no-merchant', 'there is nobody here selling anything');
+        if (!canConverse(seller)) {
+          return Events.refuse(b, 'no-merchant', (seller.name || 'they') + ' is in no position to trade');
+        }
+        var wantBuy = command.primary.itemId;
+        if (!wantBuy) return Events.refuse(b, 'no-item', 'nothing was named to buy');
+        var def = itemDef(wantBuy, ctx);
+        if (!def) return Events.refuse(b, 'no-such-item', 'no such thing as ' + wantBuy);
+        var price = priceOf(def);
+        var purse = a.runtime.gold || 0;
+        if (purse < price) {
+          return Events.refuse(b, 'too-poor',
+            a.name + ' has ' + purse + ' gold and ' + (def.name || wantBuy) + ' costs ' + price);
+        }
+        Events.push(b, 'gold', { actorId: command.actorId, delta: -price }, '');
+        Events.push(b, 'gold', { actorId: sellerId, delta: price }, '');
+        Events.push(b, 'item_gain', { actorId: command.actorId, item: inventoryEntry(def) },
+          a.name + ' buys ' + (def.name || wantBuy) + ' for ' + price + ' gold.');
+        return b;
+      }
+
+      case 'sell': {
+        var buyerId = (command.primary.targetIds || [])[0];
+        var buyer = buyerId ? actor(state, buyerId) : null;
+        if (!buyer) return Events.refuse(b, 'no-merchant', 'there is nobody here buying');
+        if (!entry) return Events.refuse(b, 'not-carried', 'that is not something ' + a.name + ' is carrying');
+        var sellDef = itemDef(entry.id, ctx);
+        /* Half price. A merchant who pays full price for used adventuring gear
+           is not a merchant, and it is the convention every table already
+           expects. */
+        var paid = Math.floor(priceOf(sellDef) / 2);
+        var theirPurse = buyer.runtime.gold || 0;
+        if (theirPurse < paid) {
+          return Events.refuse(b, 'they-cannot-pay',
+            (buyer.name || 'they') + ' cannot afford that \u2014 they have ' + theirPurse + ' gold');
+        }
+        Events.push(b, 'item_lose', { actorId: command.actorId, uid: uid }, '');
+        Events.push(b, 'gold', { actorId: command.actorId, delta: paid }, '');
+        Events.push(b, 'gold', { actorId: buyerId, delta: -paid }, '');
+        Events.push(b, 'item_gain', { actorId: buyerId, item: entry },
+          a.name + ' sells ' + label + ' for ' + paid + ' gold.');
+        return b;
+      }
+
       default:
         return Events.refuse(b, 'unknown-verb', 'items do not handle ' + verb);
     }
@@ -657,13 +957,40 @@
     if (!spellId) return Events.refuse(b, 'no-spell', 'no spell was named');
 
     var d = derivedOf(state, command.actorId);
-    var known = (d && d.spellcasting && (d.spellcasting.available || d.spellcasting.prepared)) || [];
+    var spell = spellData(ctx) && spellData(ctx)[spellId];
+
+    /* Cantrips are not prepared. They are always available, cost no slot, and
+       are the most frequently cast spells at any table — and this check looked
+       only at the prepared list, so a wizard's fire bolt and a cleric's sacred
+       flame were both refused as "not prepared". Every cantrip in the game was
+       uncastable. */
+    var sc = (d && d.spellcasting) || {};
+    var isCantrip = (spell && spell.level === 0) ||
+      (sc.cantripsKnown || []).indexOf(spellId) >= 0;
+
+    var known = (sc.available || sc.prepared || []).concat(sc.cantripsKnown || []);
     if (known.length && known.indexOf(spellId) < 0) {
       return Events.refuse(b, 'not-prepared', a.name + ' does not have ' + spellId + ' prepared');
     }
 
-    var spell = spellData(ctx) && spellData(ctx)[spellId];
-    var level = command.primary.slotLevel != null ? command.primary.slotLevel : (spell ? spell.level : 1);
+    var level = isCantrip ? 0
+      : (command.primary.slotLevel != null ? command.primary.slotLevel : (spell ? spell.level : 1));
+
+    /* Casting costs the action economy the spell asks for. Nothing checked or
+       spent it, so a wizard could cast every spell they had prepared in a
+       single turn — which is not a small imbalance, it removes the entire
+       resource game from spellcasting. Only enforced in a fight; out of
+       combat there is no economy and a ritual takes as long as it takes. */
+    var castTime = (spell && spell.mech && spell.mech.castTime) || 'action';
+    var inCombat = !!(state.combat && state.combat.active) && command.primary.verb !== 'ritual_cast';
+    if (inCombat) {
+      var Combat = combatModule();
+      var free = Combat && (castTime === 'bonus' ? Combat.canBonus : castTime === 'reaction' ? Combat.canReact : Combat.canAct);
+      if (free && !free(a)) {
+        return Events.refuse(b, 'no-' + castTime,
+          a.name + ' has no ' + castTime + ' left this turn');
+      }
+    }
 
     if (level > 0) {
       var spent = (a.runtime.slotsSpent && a.runtime.slotsSpent[level]) || 0;
@@ -673,6 +1000,13 @@
       }
       if (!maxSlots) {
         return Events.refuse(b, 'no-slot', a.name + ' has no level ' + level + ' slots at all');
+      }
+      /* You cannot cast a spell with a slot lower than its own level. Nothing
+         compared the two, so a level-1 slot cast Fireball. */
+      if (spell && spell.level > level) {
+        return Events.refuse(b, 'slot-too-low',
+          (spell.name || spellId) + ' is a level ' + spell.level +
+          ' spell and cannot be cast with a level ' + level + ' slot');
       }
       /* A dedicated slot event, so the spend lands in `slotsSpent` — the very
          pool the check above reads. It previously emitted a generic resource
@@ -685,6 +1019,14 @@
     var name = (spell && spell.name) || spellId;
     var targetId = (command.primary.targetIds || [])[0];
     var target = targetId ? actor(state, targetId) : null;
+
+    if (inCombat) {
+      var econ = { actorId: command.actorId };
+      if (castTime === 'bonus') econ.bonus = false;
+      else if (castTime === 'reaction') econ.reaction = false;
+      else econ.action = false;
+      Events.push(b, 'action_economy', econ, '');
+    }
 
     if (spell && spell.mech && spell.mech.concentration) {
       if (a.runtime.concentratingOn) {
@@ -699,22 +1041,91 @@
     /* Healing and damage are the two effects worth resolving generically here;
        everything else is narrated from the spell's own text with the slot
        correctly spent, which is honest about what the engine models. */
+    /* Every effect the SRD data actually describes, resolved mechanically.
+       This used to handle `heal` and `temp_hp` alone — nine spells out of
+       three hundred and nineteen — so Fireball spent a slot, printed a line
+       and dealt no damage to anybody. The data has always carried saves,
+       spell attacks, conditions and AC changes; nothing read them. */
     var handled = false;
     var effects = (spell && spell.mech && spell.mech.effects) || [];
+    var targets = spellTargets(state, command, spell, effects);
+    var upcastBy = Math.max(0, level - (spell ? spell.level : level));
+
     effects.forEach(function (e) {
-      if (e.kind === 'heal' && target) {
-        var roll = Dice.roll(e.dice || '1d8', { rng: state.rng });
-        var mod = (d && d.spellcasting && d.spellcasting.mod) || 0;
-        var total = roll.total + (e.mod === 'spell' ? mod : (e.flat || 0));
-        Events.push(b, 'roll', { rollKind: 'heal', actorId: command.actorId, total: total, explain: Dice.explain(roll) }, '');
-        Events.push(b, 'hp', { targetId: targetId, delta: total },
-          a.name + ' casts ' + name + '; ' + target.name + ' recovers ' + total + ' hit points.');
+      if (e.kind === 'heal') {
+        targets.forEach(function (tid) {
+          var t = actor(state, tid);
+          if (!t) return;
+          var roll = Dice.roll(scaleDice(e.dice || '1d8', spell, upcastBy), { rng: state.rng });
+          var mod = (d && d.spellcasting && d.spellcasting.mod) || 0;
+          var total = roll.total + (e.mod === 'spell' ? mod : (e.flat || 0));
+          Events.push(b, 'roll', { rollKind: 'heal', actorId: command.actorId, total: total, explain: Dice.explain(roll) }, '');
+          Events.push(b, 'hp', { targetId: tid, delta: total },
+            a.name + ' casts ' + name + '; ' + t.name + ' recovers ' + total + ' hit points.');
+        });
         handled = true;
+        return;
       }
-      if (e.kind === 'temp_hp' && target) {
-        var r2 = Dice.roll(e.dice || '1d4', { rng: state.rng });
-        Events.push(b, 'temp_hp', { targetId: targetId, amount: r2.total + (e.flat || 0) },
-          target.name + ' gains ' + (r2.total + (e.flat || 0)) + ' temporary hit points.');
+
+      if (e.kind === 'temp_hp') {
+        targets.forEach(function (tid) {
+          var t = actor(state, tid);
+          if (!t) return;
+          var r2 = Dice.roll(scaleDice(e.dice || '1d4', spell, upcastBy), { rng: state.rng });
+          var amount = r2.total + (e.flat || 0);
+          Events.push(b, 'temp_hp', { targetId: tid, amount: amount },
+            t.name + ' gains ' + amount + ' temporary hit points.');
+        });
+        handled = true;
+        return;
+      }
+
+      if (e.kind === 'attack') {
+        targets.forEach(function (tid) {
+          if (resolveSpellAttack(state, b, command, a, d, spell, e, tid, name, upcastBy)) handled = true;
+        });
+        handled = true;
+        return;
+      }
+
+      if (e.kind === 'save') {
+        targets.forEach(function (tid) {
+          resolveSpellSave(state, b, command, a, d, spell, e, tid, name, upcastBy);
+        });
+        handled = true;
+        return;
+      }
+
+      if (e.kind === 'ac') {
+        targets.forEach(function (tid) {
+          var t = actor(state, tid);
+          if (!t) return;
+          Events.push(b, 'effect_add', {
+            targetId: tid, actorId: command.actorId,
+            effect: {
+              id: 'eff_' + spellId + '_' + tid, name: name, targetId: tid,
+              kind: 'ac', spellId: spellId,
+              /* The data says `mode`; the AC resolver reads `type`. */
+              ac: { type: e.mode === 'set' ? 'base' : 'add', source: name, value: e.value },
+            },
+          }, name + ' settles over ' + t.name + '.');
+        });
+        handled = true;
+        return;
+      }
+
+      if (e.kind === 'modifier') {
+        targets.forEach(function (tid) {
+          var t = actor(state, tid);
+          if (!t) return;
+          Events.push(b, 'effect_add', {
+            targetId: tid, actorId: command.actorId,
+            effect: {
+              id: 'eff_' + spellId + '_' + tid, name: name, targetId: tid,
+              kind: 'bonus_dice', appliesTo: e.appliesTo, dice: e.die, spellId: spellId,
+            },
+          }, t.name + ' is touched by ' + name + '.');
+        });
         handled = true;
       }
     });
@@ -784,12 +1195,12 @@
   var IMPROV_HINTS = [
     { re: /\b(?:lift|haul|force|smash|break|shove|heave|pull|drag|hold)\b/i, skill: 'athletics' },
     { re: /\b(?:balance|tumble|squeeze|slip|dodge|leap|climb down|catch)\b/i, skill: 'acrobatics' },
-    { re: /\b(?:cut|tie|pick|rig|wedge|jam|fiddle|palm|pocket)\b/i, skill: 'sleight_of_hand' },
+    { re: /\b(?:cut|tie|pick|rig|wedge|jam|fiddle|palm|pocket)\b/i, skill: 'sleightOfHand' },
     { re: /\b(?:sneak|creep|hide|quietly|unseen)\b/i, skill: 'stealth' },
     { re: /\b(?:remember|recall|recognise|recognize|identify|know)\b/i, skill: 'history' },
     { re: /\b(?:pray|holy|blessed|divine|rite|ritual)\b/i, skill: 'religion' },
     { re: /\b(?:track|weather|forage|camp|trail)\b/i, skill: 'survival' },
-    { re: /\b(?:calm|soothe|handle|horse|animal|dog)\b/i, skill: 'animal_handling' },
+    { re: /\b(?:calm|soothe|handle|horse|animal|dog)\b/i, skill: 'animalHandling' },
     { re: /\b(?:examine|deduce|work out|figure out|inspect)\b/i, skill: 'investigation' },
     { re: /\b(?:listen|watch|spot|notice|scan)\b/i, skill: 'perception' },
   ];

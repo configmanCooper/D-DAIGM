@@ -686,9 +686,13 @@
     var t = a.runtime.turn;
     if (!t) {
       /* No action economy at all. In a fight that means the turn was never
-         opened and something is wrong; out of combat it is simply exploration,
-         where the spotlight passes when someone has had their say. */
-      return !(session.state.combat && session.state.combat.active);
+         opened and something is wrong. Out of combat there is no economy by
+         design — but answering "spent" unconditionally meant every AI seat was
+         judged finished BEFORE it acted, so exploration seats never got a turn
+         and the loop walked the table for ever looking for someone who could.
+         Out of combat a seat gets exactly one go, then the spotlight moves. */
+      if (session.state.combat && session.state.combat.active) return true;
+      return (passes || 0) >= 1;
     }
     if (t.surprised) return true;
     if (t.action) return false;
