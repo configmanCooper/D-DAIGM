@@ -2120,4 +2120,158 @@ t.section('the encounter multiplier reads the party, not just the monsters');
   t.ok(objects.thresholds.easy > 0, 'levels and CRs may be given as objects');
 }
 
+t.section('you swing well only with what you were trained on');
+/*
+ * `toHit` was `mod + prof` for every weapon a character happened to be
+ * holding. A wizard who picked up a greatsword swung it with full proficiency —
+ * and being able to use any weapon well is most of what separates a fighter
+ * from a wizard.
+ *
+ * The data was complete on both sides: classes list `weaponProfs` as broad
+ * families ("simple", "martial") or specific weapons ("rapier"), and every item
+ * carries a `subcategory` of "simple-melee", "martial-ranged" and so on.
+ * Nothing compared them.
+ */
+{
+  const armed = (classId, weapons) => {
+    const c = Character.buildFromSpec({
+      name: 'X', raceId: 'human', classId, levels: 5, backgroundId: 'soldier',
+      abilities: { str: 14, dex: 14, con: 14, int: 14, wis: 14, cha: 14 },
+      proficiencies: { skills: [] },
+    });
+    c.runtime.inventory = weapons.map((w, i) => ({ uid: 'w' + i, id: w, name: w }));
+    const st = State.create({ seed: 'prof-' + classId });
+    State.addActor(st, { id: 'pc1', name: 'X', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime });
+    State.refreshAllDerived(st);
+    const by = {};
+    (st.actors.pc1.runtime.attacks || []).forEach(a => { by[a.uid || a.name] = a; });
+    return { attacks: by, prof: st.actors.pc1.derivedCache.proficiencyBonus };
+  };
+
+  const wiz = armed('wizard', ['greatsword', 'dagger', 'quarterstaff', 'longbow']);
+  t.eq(wiz.attacks.w0.proficient, false, 'a wizard is not proficient with a greatsword');
+  t.eq(wiz.attacks.w1.proficient, true, 'but is with a dagger, which their class lists');
+  t.eq(wiz.attacks.w2.proficient, true, 'and a quarterstaff');
+  t.eq(wiz.attacks.w3.proficient, false, 'and not a longbow');
+  t.eq(wiz.attacks.w1.toHit - wiz.attacks.w0.toHit, wiz.prof,
+    'and the difference between them is exactly the proficiency bonus',
+    '(' + wiz.attacks.w0.toHit + ' vs ' + wiz.attacks.w1.toHit + ')');
+
+  const fig = armed('fighter', ['greatsword', 'dagger', 'longbow']);
+  t.ok(['w0', 'w1', 'w2'].every(k => fig.attacks[k].proficient),
+    'a fighter is proficient with simple and martial weapons alike');
+
+  const rog = armed('rogue', ['rapier', 'greatsword', 'shortsword']);
+  t.eq(rog.attacks.w0.proficient, true, 'a rogue is proficient with a rapier, named on its list');
+  t.eq(rog.attacks.w1.proficient, false, 'and not with a greatsword, which is not');
+
+  /* An NPC with no class list is assumed to know its own weapons; refusing
+     proficiency to everything without a class would weaken every hand-placed
+     character in the game rather than fix anything. */
+  {
+    const st = State.create({ seed: 'npc-prof' });
+    State.addActor(st, {
+      id: 'npc', name: 'Guard', side: 'ally', kind: 'npc',
+      base: { name: 'Guard', abilities: { str: 14, dex: 12, con: 12, int: 10, wis: 10, cha: 10 },
+        classes: [] },
+      progression: { levels: [] },
+      runtime: { hp: 11, hpMax: 11, conditions: {}, deathSaves: {}, equipped: {},
+        inventory: [{ uid: 'g1', id: 'greatsword', name: 'Greatsword' }] },
+    });
+    State.refreshAllDerived(st);
+    const swing = (st.actors.npc.runtime.attacks || []).filter(x => x.uid === 'g1')[0];
+    t.eq(swing.proficient, true, 'a classless NPC still knows the weapon it was given');
+  }
+}
+
+t.section('a spell takes as long as it takes');
+/*
+ * 46 spells in the data cast in a minute and 13 in an hour. Every one fell
+ * through to `canAct` and was charged as a single action, so Find Familiar —
+ * an hour of brass and incense — could be cast in six seconds with a hobgoblin
+ * swinging at you. And 52 spells name a component with a gold-piece value,
+ * which nothing read: Revivify cost a slot and nothing else.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+
+  const wiz = (prepared, extra) => {
+    const c = Character.buildFromSpec({
+      name: 'W', raceId: 'human', classId: 'wizard', levels: 9, backgroundId: 'sage',
+      abilities: { str: 8, dex: 14, con: 14, int: 18, wis: 10, cha: 10 },
+      proficiencies: { skills: [] },
+    });
+    if (extra) c.runtime.inventory = c.runtime.inventory.concat(extra);
+    const st = State.create({ seed: 'casttime' });
+    State.addActor(st, { id: 'pc1', name: 'W', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime });
+    st.actors.pc1.runtime.pos = { x: 0, y: 0 };
+    State.addActor(st, { id: 'foe1', name: 'Ogre', side: 'enemy', kind: 'monster',
+      base: { name: 'Ogre', abilities: { str: 16, dex: 8, con: 16, int: 5, wis: 7, cha: 7 } },
+      progression: { levels: [] },
+      runtime: { hp: 60, hpMax: 60, conditions: {}, inventory: [], deathSaves: {},
+        pos: { x: 1, y: 0 }, ac: 11, speed: 30, reach: 5 } });
+    State.refreshAllDerived(st);
+    const sc = st.actors.pc1.derivedCache.spellcasting;
+    sc.prepared = (sc.prepared || []).concat(prepared);
+    st.combat = { active: false, order: [], turnIndex: 0, round: 0 };
+    return st;
+  };
+  const cast = (st, id, lvl) => Dispatch.dispatch(st, { past: [], future: [] }, {
+    v: 1, family: 'spell', commandId: 'c' + Math.random(), actorId: 'pc1',
+    stateRevision: st.revision, turnEpoch: st.turnEpoch,
+    primary: { verb: 'cast', spellId: id, targetIds: [], slotLevel: lvl || 1 },
+  }, {});
+
+  /* --- in a fight --- */
+  {
+    const st = wiz(['find-familiar', 'magic-missile']);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: ['pc1', 'foe1'] };
+    st.activeActorId = 'pc1';
+    Events.commit(st, Combat.startTurn(st, 'pc1'));
+    const r = cast(st, 'find-familiar', 1);
+    t.eq(!!r.batch.refused, true, 'an hour-long spell cannot be cast mid-fight');
+    t.ok(/hour/.test((r.batch.refused || {}).detail || ''), 'and it says why',
+      '(' + ((r.batch.refused || {}).detail || '') + ')');
+    t.eq(Dispatch.legalMoves(st, 'pc1', {}).filter(m => /Familiar/i.test(m.what)).length, 0,
+      'nor is it offered in one');
+    /* An action-cast spell is unaffected. */
+    t.eq(!!cast(st, 'magic-missile', 1).batch.refused, false,
+      'while an ordinary action spell is cast as usual');
+  }
+
+  /* --- the component --- */
+  {
+    const none = wiz(['find-familiar']);
+    const before = none.clock || 0;
+    const r = cast(none, 'find-familiar', 1);
+    t.eq(!!r.batch.refused, true, 'without the component the spell is refused');
+    t.eq((none.clock || 0) - before, 0,
+      'and a refusal does not burn an hour of the day on the way out');
+
+    const held = wiz(['find-familiar'],
+      [{ uid: 'ch1', id: 'charcoal', name: 'charcoal, incense and herbs' }]);
+    const c0 = held.clock || 0;
+    t.eq(!!cast(held, 'find-familiar', 1).batch.refused, false, 'with it, the spell is cast');
+    t.eq((held.clock || 0) - c0, 60, 'and it takes the hour it says it takes');
+    t.eq((held.actors.pc1.runtime.inventory || []).some(i => i.uid === 'ch1'), false,
+      'and the component is consumed, because the spell says so');
+  }
+
+  /* --- a plural component still matches a singular item --- */
+  {
+    const rich = wiz(['revivify'], [{ uid: 'd1', id: 'diamond', name: 'a diamond worth 300gp' }]);
+    t.eq(!!cast(rich, 'revivify', 3).batch.refused, false,
+      'Revivify finds "a diamond" for a component described as "Diamonds"');
+    t.eq((rich.actors.pc1.runtime.inventory || []).some(i => i.uid === 'd1'), false,
+      'and consumes it');
+    const poor = wiz(['revivify']);
+    t.eq(!!cast(poor, 'revivify', 3).batch.refused, true,
+      'and without one it cannot be cast at all');
+  }
+}
+
 t.done();

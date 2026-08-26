@@ -1444,6 +1444,43 @@
 
   /* ========================================================= spells ========= */
 
+  /* Casting times that are not a piece of a turn. */
+  var LONG_CASTS = {
+    minute: { minutes: 1, label: 'a minute' },
+    hour: { minutes: 60, label: 'an hour' },
+  };
+
+  /* The distinctive word in a material component's description, used to find
+     it in a pack. "Diamonds worth 300gp" is carried as an item called a
+     diamond, so the match has to survive a plural — matching the whole
+     sentence would never hit anything. */
+  function materialKey(text) {
+    var words = String(text || '').toLowerCase()
+      .replace(/[^a-z ]+/g, ' ')
+      .split(/\s+/)
+      .filter(function (w) {
+        return w.length > 3 && ['with', 'worth', 'least', 'that', 'from', 'this',
+          'which', 'your', 'each', 'consumed', 'value', 'spell', 'must'].indexOf(w) < 0;
+      });
+    var stem = words[0] || 'component';
+    return stem.replace(/(ies|es|s)$/, '');
+  }
+
+  function shortMaterial(text) {
+    var t = String(text || 'a costly component').replace(/\s+/g, ' ').trim();
+    return t.length > 60 ? t.slice(0, 57) + '\u2026' : t;
+  }
+
+  /* Something in the pack that answers to this component. */
+  function findMaterial(a, description) {
+    var key = materialKey(description);
+    var re = new RegExp(key + '(s|es|ies)?', 'i');
+    return (a.runtime.inventory || []).filter(function (i) {
+      if (!i) return false;
+      return re.test(String(i.id || '') + ' ' + String(i.name || ''));
+    })[0] || null;
+  }
+
   function resolveSpell(state, command, ctx) {
     ctx = ctx || {};
     var b = Events.makeBatch(command);
@@ -1487,6 +1524,51 @@
        combat there is no economy and a ritual takes as long as it takes. */
     var castTime = (spell && spell.mech && spell.mech.castTime) || 'action';
     var inCombat = !!(state.combat && state.combat.active) && command.primary.verb !== 'ritual_cast';
+
+    /* A spell that takes a minute or an hour is not a combat action.
+       46 spells in the data cast in a minute and 13 in an hour, and every one
+       of them fell through to `canAct` and was treated as a single action — so
+       Find Familiar, an hour's ritual with brass and incense, could be cast in
+       six seconds with a hobgoblin swinging at you. Out of combat they are
+       fine; they simply take the time they take. */
+    if (LONG_CASTS[castTime] && inCombat) {
+      return Events.refuse(b, 'too-slow',
+        (spell && spell.name || spellId) + ' takes ' + LONG_CASTS[castTime].label +
+        ' to cast \u2014 not in the middle of a fight');
+    }
+
+    /* Costly materials. 52 spells name a component with a gold-piece value,
+       and a consumed one is gone afterwards; none of it was read, so Revivify
+       cost nothing but a slot. Only enforced where the data gives a price —
+       the ordinary pinch of sand is assumed to be in the component pouch. */
+    var comps = (spell && spell.mech && spell.mech.components) || null;
+    var material = null;
+    if (comps && comps.costGp > 0) {
+      material = findMaterial(a, comps.m);
+      if (!material) {
+        var desc = shortMaterial(comps.m);
+        /* Most descriptions already name the price ("Diamonds worth 300gp"),
+           so appending it again reads as a stutter. */
+        var priced = /\d\s*gp/i.test(desc);
+        return Events.refuse(b, 'no-material',
+          (spell && spell.name || spellId) + ' needs ' + desc +
+          (priced ? '' : ' worth ' + comps.costGp + ' gp') +
+          ', and ' + a.name + ' has none');
+      }
+    }
+
+    /* Everything that could refuse has refused. Only now spend the clock —
+       pushing the hour before the material check meant a spell that was then
+       refused still burned an hour of the day. */
+    if (LONG_CASTS[castTime]) {
+      Events.push(b, 'time', { minutes: LONG_CASTS[castTime].minutes },
+        'The casting takes ' + LONG_CASTS[castTime].label + '.');
+    }
+    if (material && comps.consumed) {
+      Events.push(b, 'item_lose', { actorId: command.actorId, uid: material.uid || material.id },
+        'The ' + (material.name || 'component') + ' is consumed.');
+    }
+
     if (inCombat) {
       var Combat = combatModule();
       var free = Combat && (castTime === 'bonus' ? Combat.canBonus : castTime === 'reaction' ? Combat.canReact : Combat.canAct);
@@ -1886,6 +1968,10 @@
          purchase you cannot afford, and for a warlock it was every spell on
          the list. Cantrips cost nothing and are always offered. */
       if (!castableNow(a, sc, spell)) return;
+      /* A spell that takes a minute or an hour cannot be started in a fight,
+         so it must not be offered in one. */
+      var ct = (spell && spell.mech && spell.mech.castTime) || 'action';
+      if (LONG_CASTS[ct] && state.combat && state.combat.active) return;
       if (isHealing(spell)) {
         allies.forEach(function (id) {
           var target = state.actors[id];

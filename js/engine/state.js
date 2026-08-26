@@ -232,6 +232,57 @@
     return itemCache;
   }
 
+  /**
+   * Is this character proficient with this weapon?
+   *
+   * The class data has always listed `weaponProfs` — either broad categories
+   * ("simple", "martial") or specific weapons ("rapier", "hand-crossbow") — and
+   * every item carries a `subcategory` of "simple-melee", "martial-ranged" and
+   * so on. Nothing compared them: `toHit` was `mod + prof` for every weapon a
+   * character happened to be holding, so a wizard who picked up a greatsword
+   * swung it with full proficiency. Being able to use any weapon well is most
+   * of what separates a fighter from a wizard.
+   *
+   * Races and backgrounds can grant weapons too (an elf's longsword, a dwarf's
+   * battleaxe), so anything gathered onto `base.proficiencies.weapons` counts
+   * as well.
+   */
+  function proficientWithWeapon(base, item, entry) {
+    var granted = [];
+    var CLASSES = classData();
+    (base.classes || []).forEach(function (c) {
+      var cd = CLASSES && CLASSES[c.classId];
+      if (cd && cd.weaponProfs) granted = granted.concat(cd.weaponProfs);
+    });
+    var own = (base.proficiencies && base.proficiencies.weapons) || [];
+    granted = granted.concat(own);
+    if (!granted.length) return false;
+
+    var lower = granted.map(function (g) { return String(g).toLowerCase(); });
+    var id = String((item && item.id) || (entry && entry.id) || '').toLowerCase();
+    if (id && lower.indexOf(id) >= 0) return true;
+
+    /* "simple" covers simple-melee and simple-ranged; likewise martial. */
+    var sub = String((item && item.subcategory) || '').toLowerCase();
+    if (sub) {
+      var family = sub.split('-')[0];
+      if (family && lower.indexOf(family) >= 0) return true;
+      if (lower.indexOf(sub) >= 0) return true;
+    }
+    return false;
+  }
+
+  var classCache = null;
+  function classData() {
+    if (classCache) return classCache;
+    var fromGlobal = global.DND && global.DND.Data && global.DND.Data.CLASSES;
+    if (fromGlobal) { classCache = fromGlobal; return classCache; }
+    if (typeof require !== 'undefined') {
+      try { classCache = require('../data/srd_classes.js').CLASSES; } catch (e) { classCache = null; }
+    }
+    return classCache;
+  }
+
   function ensureAttacks(state, a, derived) {
     if (a.runtime.attacksAuthored) return;          // a statblock supplied its own
     var ITEMS = itemData();
@@ -251,10 +302,17 @@
       var ranged = props.indexOf('ammunition') >= 0 || props.indexOf('thrown') >= 0 ||
         (item.subcategory && /ranged/i.test(item.subcategory));
       var mod = (finesse || ranged) ? Math.max(str, dex) : str;
+      /* A creature with no class at all — a hand-placed NPC, a campaign
+         fixture — is assumed to know its own weapons; refusing proficiency to
+         everything without a class list would quietly weaken every NPC in the
+         game rather than fix anything. */
+      var classed = (a.base.classes || []).length > 0;
+      var isProf = !classed || proficientWithWeapon(a.base, item, entry);
       attacks.push({
         name: item.name || entry.name || entry.id,
         uid: entry.uid || entry.id,
-        toHit: mod + prof,
+        toHit: mod + (isProf ? prof : 0),
+        proficient: isProf,
         damage: dice + (mod >= 0 ? '+' + mod : String(mod)),
         damageType: (dmg && dmg.type) || 'slashing',
         abilityMod: mod,
