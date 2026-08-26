@@ -71,6 +71,9 @@ To keep working from the old version instead, make a branch:
 
       git switch -c my-new-branch
 
+The script keeps ITSELF out of the restore, so going back to a commit from
+before it existed does not delete it and strand you in the past.
+
 
 THE ARGUMENTS, IN FULL
 ----------------------
@@ -116,6 +119,54 @@ function Head   { param([string]$m) Write-Host ""; Write-Host "  $m" -Foreground
 function Warn   { param([string]$m) Write-Host "  ! $m" -ForegroundColor Yellow }
 function Fail   { param([string]$m) Write-Host "  x $m" -ForegroundColor Red; exit 1 }
 function Good   { param([string]$m) Write-Host "  + $m" -ForegroundColor Green }
+
+function Run-Git {
+  # Run git, ignore anything it writes to stderr that is only a WARNING, and
+  # judge success by the exit code.
+  #
+  # `& git ... *> $null` looks like it silences git, but under
+  # `$ErrorActionPreference = 'Stop'` anything a native command writes to
+  # stderr becomes a terminating PowerShell error — so an unrelated locked file
+  # in the folder ("warning: unable to unlink ...") aborted a restore that had
+  # in fact completely succeeded.
+  $old = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $output = & git @args 2>&1 | Out-String
+    return @{ ok = ($LASTEXITCODE -eq 0); output = $output }
+  } finally {
+    $ErrorActionPreference = $old
+  }
+}
+
+# The restore tool must survive its own restore.
+#
+# Going back to a commit from before this script existed simply deleted it,
+# which left you standing in the past with no way to get back — the one moment
+# you most need the tool is the moment it removed itself. These are copied
+# aside before the checkout and put back afterwards.
+$SelfFiles = @('restore.ps1', 'restore.cmd')
+
+function Protect-Self {
+  $keep = Join-Path $env:TEMP "aethertable_restore_self_$Stamp"
+  New-Item -ItemType Directory -Path $keep -Force | Out-Null
+  foreach ($f in $SelfFiles) {
+    $p = Join-Path $Root $f
+    if (Test-Path $p) { Copy-Item $p (Join-Path $keep $f) -Force }
+  }
+  return $keep
+}
+
+function Restore-Self {
+  param([string] $Keep)
+  if (-not $Keep -or -not (Test-Path $Keep)) { return }
+  foreach ($f in $SelfFiles) {
+    $p = Join-Path $Keep $f
+    if (Test-Path $p) { Copy-Item $p (Join-Path $Root $f) -Force }
+  }
+  Remove-Item $Keep -Recurse -Force -ErrorAction SilentlyContinue
+  Say 'restore.ps1 and restore.cmd were kept, so you can come back'
+}
 
 function InAGitRepo {
   & git rev-parse --git-dir *> $null
@@ -209,10 +260,14 @@ function Save-WhatYouHaveNow {
     if ($DryRun) {
       Say "would commit your uncommitted changes to a branch called $branch"
     } else {
-      & git stash push -u -m "restore.ps1 safety $Stamp" *> $null
-      if ($LASTEXITCODE -eq 0) {
-        & git branch $branch stash@{0} *> $null
-        & git stash pop *> $null
+      # Tracked changes only. `stash -u` also sweeps up UNTRACKED files, which
+      # are not at risk from a checkout in the first place — and if one of them
+      # happens to be locked by another program (this folder is shared with
+      # other work), the stash fails and takes the whole restore down with it.
+      $stashed = Run-Git stash push -m "restore.ps1 safety $Stamp"
+      if ($stashed.ok) {
+        Run-Git branch $branch 'stash@{0}' | Out-Null
+        Run-Git stash pop | Out-Null
         Good "your uncommitted changes are saved on the branch '$branch'"
         Say  "  (see them later with:  git show $branch)"
       } else {
@@ -257,10 +312,17 @@ function Restore-Commit {
   }
 
   Stop-TheGame
+  # Copy this script aside BEFORE the safety stash, not after: the stash
+  # reverts the working tree to HEAD, so an uncommitted edit to this very file
+  # would be rolled back and then faithfully "protected" in its rolled-back
+  # form. It is recoverable from the safety branch either way, but silently
+  # losing the change you are in the middle of making is a poor tool.
+  $keep = Protect-Self
   Save-WhatYouHaveNow
 
-  & git checkout --force $resolved *> $null
-  if ($LASTEXITCODE -ne 0) { Fail 'git could not check that out. Nothing was lost - your safety zip is in D:\CLI\backups.' }
+  $r = Run-Git checkout --force $resolved
+  Restore-Self -Keep $keep
+  if (-not $r.ok) { Fail "git could not check that out. Nothing was lost - your safety zip is in D:\CLI\backups.`n$($r.output)" }
 
   Good "the game folder is now exactly as it was at $($what.Split(' ')[0])"
   Say ''
@@ -312,10 +374,12 @@ function Restore-Latest {
   if ($DryRun) { Say 'would switch back to main and pull nothing'; return }
 
   Stop-TheGame
+  $keep = Protect-Self
   Save-WhatYouHaveNow
 
-  & git checkout --force main *> $null
-  if ($LASTEXITCODE -ne 0) { Fail "Could not switch back to main." }
+  $r = Run-Git checkout --force main
+  Restore-Self -Keep $keep
+  if (-not $r.ok) { Fail "Could not switch back to main.`n$($r.output)" }
   $what = & git log -1 --pretty=format:'%h  %ad  %s' --date=short
   Good "back on main at $what"
 }
