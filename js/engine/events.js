@@ -56,6 +56,7 @@
     'time',              // minutes/hours/days passed
     'long_rest_taken',   // when the last long rest finished: one per 24 hours
     'spell_cast_marker', // what has been cast this turn: the bonus-action spell rule
+    'ready', 'ready_clear',   // an action held for a trigger, and its release
     'xp', 'level',
     'spawn', 'despawn',
     'narration',         // prose attached to this batch, after the fact
@@ -710,6 +711,26 @@
       a.runtime.turn.spellsCast = (a.runtime.turn.spellsCast || []).concat([{
         spellId: e.spellId, castTime: e.castTime, level: e.level || 0,
       }]);
+    },
+
+    /* An action held for a trigger. Kept on the runtime rather than the turn,
+       because a readied action outlives the turn that set it — that is the
+       whole point of it — and expires at the start of the readier's next one. */
+    ready: function (state, e) {
+      var a = actor(state, e.actorId);
+      if (!a) return;
+      a.runtime.readied = {
+        trigger: e.trigger || 'approach',
+        watchId: e.watchId || null,
+        verb: e.verb || 'attack',
+        round: e.round || 0,
+      };
+    },
+
+    ready_clear: function (state, e) {
+      var a = actor(state, e.actorId);
+      if (!a) return;
+      a.runtime.readied = null;
     },
 
     xp: function (state, e) {

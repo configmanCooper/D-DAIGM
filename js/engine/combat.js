@@ -396,6 +396,14 @@
         name + ' loses the opening their ally made.');
     }
 
+    /* A readied action is held until the start of your next turn, and then it
+       is simply gone — that is the cost of holding it. Without an expiry it
+       would sit there for the rest of the fight and fire once per enemy step. */
+    if (a.runtime.readied) {
+      Events.push(b, 'ready_clear', { actorId: actorId },
+        name + ' lets the held action go.');
+    }
+
     /* You cannot stay on a mount that is dead, unconscious or no longer there.
        `mountedOn` was set and cleared only by the rider's own mount/dismount
        verbs, so a knight whose horse had been killed under him rode the corpse
@@ -1462,7 +1470,7 @@
       case 'help': return helpResolve(state, command, ctx);
       case 'hide': return hideResolve(state, command, ctx);
       case 'stabilise': return stabiliseResolve(state, command, ctx);
-      case 'ready': return stanceResolve(state, command, null, 'readies an action.');
+      case 'ready': return readyResolve(state, command, ctx);
       case 'escape_grapple': {
         var eb = Events.makeBatch(command);
         var esc = actor(state, command.actorId);
@@ -1653,11 +1661,25 @@
       moves.push(move('dodge', 'Dodge', 'action'));
       moves.push(move('disengage', 'Disengage', 'action'));
       moves.push(move('dash', 'Dash', 'action'));
-      /* Readying is a whole action in the rules and was reachable only by
-         typing it, which meant one of the four things a character can do with
-         their action was invisible. */
-      moves.push(move('ready', 'Ready an action', 'action',
-        { warn: 'holds your action for a trigger, and costs your reaction when it fires' }));
+      /* Readying is a whole action in the rules, and it was pure narration:
+         `stanceResolve` printed "readies an action" and stored nothing, so the
+         trigger, the held action and the reaction that spends it did not
+         exist. What is modelled here is the trigger the engine can actually
+         detect — somebody coming within your reach — which is by far the most
+         common use of Ready at a table and the one that interacts with
+         everything else already built: reach, reactions and opportunity
+         attacks. Other triggers remain a matter for the Dungeon Master. */
+      if (!a.runtime.readied) {
+        enemies.forEach(function (id) {
+          moves.push(move('ready', 'Ready an attack on ' + (state.actors[id].name || id) +
+            ' if they close', 'action',
+          { targetIds: [id], note: 'approach',
+            warn: 'held until they come within your reach; spends your reaction' }));
+        });
+        moves.push(move('ready', 'Ready an attack for whoever closes first', 'action',
+          { note: 'approach',
+            warn: 'held until anyone comes within your reach; spends your reaction' }));
+      }
       moves.push(move('hide', 'Hide', 'action',
         { warn: 'a Stealth check against what they might notice' }));
       /* Help names the ally first and the enemy second, which is the order the
@@ -1713,7 +1735,97 @@
     return moves;
   };
 
-  /* ----------------------------------------------------------- movement ---- */
+  /**
+   * Holding an action for a trigger.
+   *
+   * 2014, "Ready": you spend your action, name a perceivable trigger and the
+   * action you will take, and when the trigger fires you spend your REACTION
+   * to take it. It expires at the start of your next turn.
+   *
+   * This printed "readies an action" and stored nothing at all — no trigger, no
+   * held action, no expiry and no reaction — so one of the four things a
+   * character can do with their action did precisely nothing.
+   *
+   * The trigger modelled is the one the engine can detect and the one most
+   * used at a table: somebody coming within your reach. It fires through the
+   * ordinary attack path, so reach, advantage and the reaction economy all
+   * apply exactly as they do anywhere else.
+   */
+  function readyResolve(state, command, ctx) {
+    var b = Events.makeBatch(command);
+    var a = actor(state, command.actorId);
+    if (!a) return Events.refuse(b, 'no-actor', 'no one to act');
+    if (!canAct(a)) return Events.refuse(b, 'no-action', a.name + ' has no action left this turn');
+    if (a.runtime.readied) {
+      return Events.refuse(b, 'already-readied', a.name + ' is already holding an action');
+    }
+
+    var watchId = (command.primary.targetIds || [])[0] || null;
+    var watchName = watchId && state.actors[watchId]
+      ? (state.actors[watchId].name || watchId) : null;
+
+    Events.push(b, 'action_economy', { actorId: command.actorId, action: false }, '');
+    Events.push(b, 'ready', {
+      actorId: command.actorId,
+      trigger: 'approach',
+      watchId: watchId,
+      verb: 'attack',
+      round: (state.combat && state.combat.round) || 0,
+    }, a.name + ' holds their attack, watching ' +
+      (watchName || 'for anyone who comes close') + '.');
+    return b;
+  }
+
+  /**
+   * Does anybody's readied action fire because this creature just moved?
+   *
+   * Called after a move is applied, with the same shadow-state discipline the
+   * rest of the movement resolver uses: the events go into the mover's batch,
+   * so the whole turn commits atomically.
+   */
+  function firedReadiedActions(state, moverId, dest, b) {
+    var mover = actor(state, moverId);
+    if (!mover || !dest || isDown(mover)) return;
+
+    /* The move event is in the batch but has not been applied, so the mover is
+       still standing where they started. Both the reach test and the attack
+       that follows have to see them where they are GOING, or a readied strike
+       measures the distance they came from and refuses itself. The position is
+       borrowed for the length of the resolution and put straight back; the
+       committed `move` event is what actually changes it. */
+    var was = mover.runtime.pos;
+    mover.runtime.pos = { x: dest.x, y: dest.y };
+    try {
+      Object.keys(state.actors || {}).forEach(function (id) {
+        if (id === moverId) return;
+        var watcher = actor(state, id);
+        var held = watcher && watcher.runtime && watcher.runtime.readied;
+        if (!held || held.trigger !== 'approach') return;
+        if (isDown(watcher) || !canReact(watcher)) return;
+        if (watcher.side === mover.side) return;              // you do not ambush your own
+        if (held.watchId && held.watchId !== moverId) return; // waiting for someone else
+
+        var span = weaponSpan(state, id, profileFor(state, id, {}), {});
+        var reach = span ? (span.melee ? span.reach : span.normal || CELL) : CELL;
+        var apart = distanceFt(watcher, mover);
+        if (apart == null || apart > reach) return;
+
+        Events.push(b, 'ready_clear', { actorId: id },
+          (watcher.name || id) + ' has been waiting for this.');
+        var strike = attackResolve(state, {
+          commandId: (b.commandId || 'ready') + ':' + id,
+          actorId: id,
+          primary: { verb: 'attack', targetIds: [moverId] },
+        }, {}, { reaction: true });
+        if (strike && !strike.refused) {
+          (strike.events || []).forEach(function (e) { b.events.push(e); });
+          b.beats = b.beats.concat(strike.beats || []);
+        }
+      });
+    } finally {
+      mover.runtime.pos = was;
+    }
+  }
 
   function resolveMovement(state, command, ctx) {
     ctx = ctx || {};
@@ -1807,6 +1919,9 @@
         }
       });
     }
+
+    /* And anyone holding an action for exactly this. */
+    firedReadiedActions(state, command.actorId, dest, b);
     return b;
   }
 

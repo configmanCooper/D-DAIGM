@@ -2039,6 +2039,13 @@
          so it must not be offered in one. */
       var ct = (spell && spell.mech && spell.mech.castTime) || 'action';
       if (LONG_CASTS[ct] && state.combat && state.combat.active) return;
+      /* The bar must say what it really costs. Every cast was labelled
+         'action', so Healing Word — a bonus-action spell — was shown as
+         costing the action a player was about to spend on something else. The
+         resolver had it right all along; only the label lied. */
+      var castCost = ct === 'bonus' ? 'bonus'
+        : ct === 'reaction' ? 'reaction'
+          : LONG_CASTS[ct] ? LONG_CASTS[ct].label : 'action';
       if (isHealing(spell)) {
         allies.forEach(function (id) {
           var target = state.actors[id];
@@ -2046,7 +2053,7 @@
           if (!hurt && allies.length > 1) return;    // no point healing the unhurt
           var dying = target.runtime.hp <= 0;
           var m = mv('cast', 'Cast ' + name + ' on ' + (target.name || id) +
-            (dying ? ' \u2014 they are dying' : ''), 'action',
+            (dying ? ' \u2014 they are dying' : ''), castCost,
           { spellId: spellId, targetIds: [id] },
           dying ? 'they are at zero hit points and making death saves' : null);
           moves.push(tagSpell(m, spell));
@@ -2062,7 +2069,7 @@
            should be told that one of them is next to their own fighter. */
         foes.forEach(function (foeId) {
           var caught = alliesCaughtBy(state, actorId, spell, foeId);
-          var m = mv('cast', 'Cast ' + name + ' at ' + nameOf(state, foeId), 'action',
+          var m = mv('cast', 'Cast ' + name + ' at ' + nameOf(state, foeId), castCost,
             { spellId: spellId, targetIds: [foeId] },
             caught.length
               ? 'catches ' + caught.map(function (id) { return nameOf(state, id); }).join(' and ')
@@ -2072,7 +2079,7 @@
           moves.push(tagSpell(m, spell));
         });
       } else {
-        moves.push(tagSpell(mv('cast', 'Cast ' + name, 'action', { spellId: spellId }), spell));
+        moves.push(tagSpell(mv('cast', 'Cast ' + name, castCost, { spellId: spellId }), spell));
       }
     });
 

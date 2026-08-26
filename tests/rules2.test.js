@@ -2520,4 +2520,183 @@ t.section('a mount that goes down puts its rider on the ground');
     'and lands prone, which is where being thrown puts you');
 }
 
+t.section('a readied action is really held, and really fires');
+/*
+ * Ready printed "readies an action" and stored nothing — no trigger, no held
+ * action, no expiry and no reaction — so one of the four things a character
+ * can do with their action did precisely nothing.
+ *
+ * The trigger modelled is the one the engine can detect and the one most used
+ * at a table: somebody coming within your reach. It fires through the ordinary
+ * attack path, so reach, advantage and the reaction economy apply as usual.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/combat.js');
+  require('../js/engine/interaction.js');
+
+  function watch() {
+    const c = Character.buildFromSpec({
+      name: 'Guard', raceId: 'human', classId: 'fighter', levels: 5, backgroundId: 'soldier',
+      abilities: { str: 16, dex: 12, con: 14, int: 10, wis: 10, cha: 10 },
+      proficiencies: { skills: [] },
+    });
+    const st = State.create({ seed: 'readied' });
+    State.addActor(st, { id: 'pc1', name: 'Guard', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime });
+    st.actors.pc1.runtime.pos = { x: 0, y: 0 };
+    State.addActor(st, { id: 'foe1', name: 'Goblin', side: 'enemy', kind: 'monster',
+      base: { name: 'Goblin', abilities: { str: 8, dex: 14, con: 10, int: 10, wis: 8, cha: 8 } },
+      progression: { levels: [] },
+      runtime: { hp: 30, hpMax: 30, conditions: {}, inventory: [], deathSaves: {},
+        pos: { x: 6, y: 0 }, ac: 13, speed: 30, reach: 5 } });
+    State.refreshAllDerived(st);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: ['pc1', 'foe1'] };
+    st.activeActorId = 'pc1';
+    Events.commit(st, Combat.startTurn(st, 'pc1'));
+    return st;
+  }
+  const ready = (st, targetIds) => Combat.resolveCombat(st, {
+    v: 1, family: 'combat', commandId: 'rd' + Math.random(), actorId: 'pc1',
+    stateRevision: st.revision, turnEpoch: st.turnEpoch,
+    primary: { verb: 'ready', targetIds: targetIds || [] },
+  }, {});
+  const walkIn = st => Combat.resolveMovement(st, {
+    v: 1, family: 'movement', commandId: 'mv' + Math.random(), actorId: 'foe1',
+    stateRevision: st.revision, turnEpoch: st.turnEpoch,
+    primary: { verb: 'move',
+      path: [{ x: 6, y: 0 }, { x: 5, y: 0 }, { x: 4, y: 0 }, { x: 3, y: 0 },
+        { x: 2, y: 0 }, { x: 1, y: 0 }] },
+  }, {});
+
+  {
+    const st = watch();
+    const offers = Dispatch.legalMoves(st, 'pc1', {}).filter(m => m.step.verb === 'ready');
+    t.ok(offers.length >= 1, 'the bar offers a readied attack', '(' + offers.length + ')');
+    t.ok(/close/i.test(offers[0].what), 'named after the trigger it waits for',
+      '(' + offers[0].what + ')');
+
+    const b = ready(st, ['foe1']);
+    t.eq(!!b.refused, false, 'readying is accepted');
+    Events.commit(st, b);
+    t.ok(!!st.actors.pc1.runtime.readied, 'and the held action is actually stored');
+    t.eq(st.actors.pc1.runtime.turn.action, false, 'it costs the action');
+    t.eq(Dispatch.legalMoves(st, 'pc1', {}).filter(m => m.step.verb === 'ready').length, 0,
+      'and cannot be readied twice over');
+
+    /* The goblin walks into reach. */
+    Events.commit(st, Combat.startTurn(st, 'foe1'));
+    const mv = walkIn(st);
+    Events.commit(st, mv);
+    t.ok((mv.beats || []).some(s => /waiting for this/i.test(s)),
+      'the held action fires when they come within reach',
+      '(' + (mv.beats || []).join(' / ') + ')');
+    t.ok((mv.beats || []).some(s => /swings at/i.test(s)), 'and it is a real attack');
+    t.eq(st.actors.pc1.runtime.readied, null, 'the held action is spent');
+    t.eq(st.actors.pc1.runtime.turn.reaction, false, 'and it cost the reaction');
+  }
+
+  {
+    /* It does not fire for somebody who stays out of reach. */
+    const st = watch();
+    Events.commit(st, ready(st, ['foe1']));
+    Events.commit(st, Combat.startTurn(st, 'foe1'));
+    const short = Combat.resolveMovement(st, {
+      v: 1, family: 'movement', commandId: 'mv2', actorId: 'foe1',
+      stateRevision: st.revision, turnEpoch: st.turnEpoch,
+      primary: { verb: 'move', path: [{ x: 6, y: 0 }, { x: 5, y: 0 }, { x: 4, y: 0 }] },
+    }, {});
+    Events.commit(st, short);
+    t.eq((short.beats || []).some(s => /waiting for this/i.test(s)), false,
+      'a goblin who stops fifteen feet away does not trigger it');
+    t.ok(!!st.actors.pc1.runtime.readied, 'and the action is still held');
+  }
+
+  {
+    /* And it expires at the start of the readier's next turn — holding it
+       for ever would let one action fire once per enemy step for the rest of
+       the fight. */
+    const st = watch();
+    Events.commit(st, ready(st, ['foe1']));
+    Events.commit(st, Combat.startTurn(st, 'pc1'));
+    t.eq(st.actors.pc1.runtime.readied, null,
+      'a held action expires at the start of your next turn');
+  }
+
+  t.ok(Events.KINDS.indexOf('ready') >= 0 && Events.KINDS.indexOf('ready_clear') >= 0,
+    'both ready events are registered kinds');
+}
+
+t.section('a bonus action cannot be spent without something granting one');
+/*
+ * The audit read `bonus: true` on every turn record and concluded a character
+ * had a free-floating bonus action. Probed rather than assumed: a wizard with
+ * no bonus-action spell and one weapon is offered NOTHING that costs a bonus
+ * action, because the only two things that spend one — the off-hand strike and
+ * a spell whose own casting time is a bonus action — are each granted by the
+ * thing that offers them.
+ *
+ * So the flag is harmless, and this is the invariant that keeps it harmless:
+ * anything costing a bonus action must be granted by something. It is checked
+ * rather than assumed, because a future move declared `'bonus'` with no grant
+ * behind it would reintroduce exactly the hole the audit thought was there.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/combat.js');
+  require('../js/engine/interaction.js');
+  const Spells = require('../js/data/srd_spells.js');
+  const SP = Spells.SPELLS || Spells.spells || Spells;
+
+  const scene = (classId, abilities, prepared, inv, eq) => {
+    const c = Character.buildFromSpec({
+      name: 'X', raceId: 'human', classId, levels: 5, backgroundId: 'soldier',
+      abilities, proficiencies: { skills: [] },
+    });
+    if (inv) { c.runtime.inventory = inv; c.runtime.equipped = eq || {}; }
+    const st = State.create({ seed: 'bonus-grant-' + classId });
+    State.addActor(st, { id: 'pc1', name: 'X', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime });
+    st.actors.pc1.runtime.pos = { x: 0, y: 0 };
+    State.addActor(st, { id: 'foe1', name: 'Ogre', side: 'enemy', kind: 'monster',
+      base: { name: 'Ogre', abilities: { str: 16, dex: 8, con: 16, int: 5, wis: 7, cha: 7 } },
+      progression: { levels: [] },
+      runtime: { hp: 60, hpMax: 60, conditions: {}, inventory: [], deathSaves: {},
+        pos: { x: 1, y: 0 }, ac: 11, speed: 30, reach: 5 } });
+    State.refreshAllDerived(st);
+    if (prepared) st.actors.pc1.derivedCache.spellcasting.prepared = prepared;
+    st.combat = { active: true, round: 1, turnIndex: 0, order: ['pc1', 'foe1'] };
+    st.activeActorId = 'pc1';
+    Events.commit(st, Combat.startTurn(st, 'pc1'));
+    return st;
+  };
+  const bonusCost = st => Dispatch.legalMoves(st, 'pc1', {}).filter(m => m.cost === 'bonus');
+
+  const plain = scene('wizard', { str: 8, dex: 14, con: 14, int: 17, wis: 10, cha: 10 },
+    ['magic-missile', 'shield']);
+  t.eq(bonusCost(plain).length, 0,
+    'a wizard with one weapon and no bonus-action spell has nothing to spend a bonus action on');
+
+  const twin = scene('rogue', { str: 10, dex: 18, con: 12, int: 12, wis: 12, cha: 12 }, null,
+    [{ uid: 'w1', id: 'dagger', name: 'Dagger' },
+      { uid: 'w2', id: 'shortsword', name: 'Shortsword' }],
+    { mainHand: 'w1', offHand: 'w2' });
+  t.eq(bonusCost(twin).length, 1,
+    'a rogue wielding two light weapons has exactly one: the off-hand strike');
+
+  const priest = scene('cleric', { str: 12, dex: 12, con: 14, int: 10, wis: 17, cha: 10 },
+    ['healing-word', 'cure-wounds']);
+  const hw = bonusCost(priest).filter(m => /Healing Word/i.test(m.what))[0];
+  t.ok(!!hw, 'a cleric with Healing Word has one, granted by the spell itself');
+  t.eq((SP['healing-word'].mech || {}).castTime, 'bonus',
+    'and the data agrees that is what it costs');
+
+  /* The label used to say "action" for every spell however it was cast, so a
+     player was told Healing Word would cost the action they meant to attack
+     with. The resolver was right; only the bar lied. */
+  const cure = Dispatch.legalMoves(priest, 'pc1', {})
+    .filter(m => /Cure Wounds/i.test(m.what))[0];
+  t.eq(cure.cost, 'action', 'while Cure Wounds still costs an action');
+}
+
 t.done();
