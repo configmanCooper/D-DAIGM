@@ -276,6 +276,41 @@
      The off-hand attack of two-weapon fighting adds NO ability modifier to its
      damage — unless the modifier is negative (a penalty always applies) or the
      Two-Weapon Fighting style has removed the restriction. */
+  /**
+   * Can this character fight with two weapons at all?
+   *
+   * 2014, "Two-Weapon Fighting": you must be wielding two LIGHT MELEE weapons,
+   * one in each hand. Nothing checked, so the bar offered an off-hand strike to
+   * a rogue holding a rapier — which is finesse but not light — and to anyone
+   * holding a single weapon and nothing else.
+   */
+  function twoWeaponEligible(state, actorId) {
+    var a = actor(state, actorId);
+    if (!a) return null;
+    var list = a.runtime.attacks || [];
+    var eq = a.runtime.equipped || {};
+    var find = function (ref) {
+      if (!ref) return null;
+      return list.filter(function (w) { return w && (w.uid === ref || w.id === ref); })[0] || null;
+    };
+    var main = find(eq.mainHand) || list.filter(function (w) { return w && !w.unarmed; })[0];
+    var off = find(eq.offHand);
+    if (!main || !off || main === off) return null;
+
+    var light = function (w) { return (w.properties || []).indexOf('light') >= 0; };
+    var melee = function (w) {
+      /* A thrown weapon is still a melee weapon; what disqualifies you is a
+         weapon that can ONLY be used at range. The data marks a dagger
+         `ranged: true` because it can be thrown, so the thrown property is
+         what rescues it. */
+      if (!w.ranged) return true;
+      return (w.properties || []).indexOf('thrown') >= 0;
+    };
+    if (!light(main) || !light(off)) return null;
+    if (!melee(main) || !melee(off)) return null;
+    return { main: main, off: off };
+  }
+
   function twoWeaponDamageBonus(abilityMod, opts) {
     opts = opts || {};
     if (opts.twoWeaponFightingStyle) return abilityMod;
@@ -822,8 +857,34 @@
       return null;
     }
     var list = a.runtime.attacks || [];
-    var pick = opts.offHand ? (list[1] || list[0]) : list[0];
-    return pick || null;
+
+    /* An unarmed strike is a specific attack, not "whatever is in your hand".
+       `opts.unarmed` was passed in from the `unarmed_strike` verb and read by
+       nothing here, so the profile came back as `list[0]` — the equipped
+       weapon. "Strike the Ogre unarmed" hit for 1d8+4 piercing with a rapier.
+       The correct entry has been in the list all along, built by state.js and
+       flagged `unarmed: true`. */
+    if (opts.unarmed) {
+      return list.filter(function (w) { return w && w.unarmed; })[0] || null;
+    }
+
+    /* The off-hand weapon is the one in the off hand, not the second entry in
+       an array whose order is the inventory's. It happened to be right for a
+       character carrying exactly two weapons in the order they equipped them,
+       and wrong for everybody else — a rogue with a spare greatsword in the
+       pack made off-hand strikes with whatever sorted second. */
+    if (opts.offHand) {
+      var offRef = (a.runtime.equipped || {}).offHand;
+      if (offRef) {
+        var byUid = list.filter(function (w) {
+          return w && (w.uid === offRef || w.id === offRef);
+        })[0];
+        if (byUid) return byUid;
+      }
+      return list[1] || list[0] || null;
+    }
+
+    return list[0] || null;
   }
 
   /**
@@ -1354,7 +1415,15 @@
     switch (verb) {
       case 'multiattack': return monsterMultiattack(state, command, ctx);
       case 'attack': return attackAction(state, command, ctx, {});
-      case 'two_weapon_attack': return attackResolve(state, command, ctx, { offHand: true });
+      case 'two_weapon_attack': {
+        /* Enforced here as well as filtered from the move list, because a
+           typed action and an AI seat both reach the resolver directly. */
+        if (!twoWeaponEligible(state, command.actorId)) {
+          return Events.refuse(Events.makeBatch(command), 'not-two-weapon',
+            'two-weapon fighting needs a light melee weapon in each hand');
+        }
+        return attackResolve(state, command, ctx, { offHand: true });
+      }
       case 'unarmed_strike': return attackAction(state, command, ctx, { unarmed: true });
       case 'opportunity_attack': return attackResolve(state, command, ctx, { reaction: true });
       case 'grapple': return contestResolve(state, command, ctx, 'grapple');
@@ -1608,7 +1677,7 @@
           }));
       });
     }
-    if (canBonus(a) && (a.runtime.attacks || []).length > 1) {
+    if (canBonus(a) && twoWeaponEligible(state, actorId)) {
       enemies.forEach(function (id) {
         moves.push(move('two_weapon_attack', 'Off-hand strike ' + (state.actors[id].name || id), 'bonus',
           { targetIds: [id], warn: 'off-hand adds no ability modifier to damage' }));

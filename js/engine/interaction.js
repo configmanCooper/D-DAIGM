@@ -310,6 +310,13 @@
     return b;
   }
 
+  /* Has enough of the day passed for another long rest to do anything? */
+  function longRestReady(state) {
+    var last = state && state.lastLongRestAt;
+    if (typeof last !== 'number') return true;
+    return ((state.clock || 0) - last) >= 24 * 60;
+  }
+
   function resolveRest(state, command, b, verb) {
     var a = actor(state, command.actorId);
     if (state.combat && state.combat.active) {
@@ -317,6 +324,24 @@
     }
     var isLong = verb === 'long_rest';
     var d = derivedOf(state, command.actorId);
+
+    /* One long rest per 24 hours (2014, "Long Rest"). Nothing enforced it, so
+       three long rests taken back to back were all accepted — which quietly
+       removes the resource game from the whole system: spell slots, hit dice
+       and every per-rest class feature refill on demand, and there is never a
+       reason not to. The clock is already kept in minutes by the `time` event;
+       this simply reads it. */
+    if (isLong) {
+      var now = state.clock || 0;
+      var last = state.lastLongRestAt;
+      if (typeof last === 'number' && now - last < 24 * 60) {
+        var mins = 24 * 60 - (now - last);
+        var hours = Math.ceil(mins / 60);
+        return Events.refuse(b, 'too-soon',
+          'a long rest benefits you only once in twenty-four hours \u2014 ' +
+          hours + (hours === 1 ? ' hour' : ' hours') + ' yet');
+      }
+    }
 
     /* The whole party rests, not just whoever said so. A short rest where only
        the speaker got their breath back made resting nearly pointless and led
@@ -356,6 +381,12 @@
     });
 
     Events.push(b, 'time', { minutes: isLong ? 480 : 60 }, '');
+    /* Stamp when the long rest finished, so the next one can be refused until
+       twenty-four hours have passed. Its own event so it survives a save and
+       replays with the log, like every other piece of state. */
+    if (isLong) {
+      Events.push(b, 'long_rest_taken', { at: (state.clock || 0) + 480 }, '');
+    }
     b.beats.push(isLong
       ? 'The party takes a long rest. Wounds close, spells return.'
       : 'The party catches its breath for an hour.');
@@ -434,7 +465,13 @@
       var left = Math.max(0, levels - spent);
       for (var i = 0; i < left && healed < target; i++) {
         var roll = Dice.roll('1d' + die, { rng: state.rng });
-        var gain = Math.max(1, roll.total + conMod);
+        /* 2014, "Short Rest": you regain the die roll plus your Constitution
+           modifier, "regaining a minimum of 0 hit points" — not 1. A negative
+           Constitution modifier can waste a die entirely, which is the point
+           of the rule and the reason a frail character cannot rely on them.
+           This clamped to 1 and quietly handed out a hit point that the rules
+           specifically say you do not get. */
+        var gain = Math.max(0, roll.total + conMod);
         out.push({ classId: c.classId, die: die, heal: gain });
         healed += gain;
       }
@@ -464,7 +501,12 @@
     if (!inCombat) {
       moves.push(mv('investigate', 'Examine something closely', 'time'));
       moves.push(mv('short_rest', 'Take a short rest', 'an hour'));
-      moves.push(mv('long_rest', 'Take a long rest', 'eight hours'));
+      /* Only when it would actually do something. Offering a long rest that
+         refuses for being too soon is the same trap as offering a purchase you
+         cannot afford. */
+      if (longRestReady(state)) {
+        moves.push(mv('long_rest', 'Take a long rest', 'eight hours'));
+      }
       ((ctx && ctx.exits) || []).forEach(function (exit) {
         moves.push(mv('travel', 'Travel to ' + (exit.name || exit.id), 'hours', { note: exit.id }));
       });

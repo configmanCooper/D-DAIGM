@@ -176,13 +176,24 @@ t.section('Case 13 — two-weapon off-hand adds the weapon die only, no ability 
   t.eq(Combat.twoWeaponDamageBonus(-1, {}), -1, 'a negative modifier always applies');
 
   /* Through the resolver: main-hand damage is 1d6+3; the off-hand strike must
-     deal only the die. Scripted d20 = 18 (hits), d6 = 4. */
+     deal only the die. Scripted d20 = 18 (hits), d6 = 4.
+
+     Both hands hold a light melee weapon, because two-weapon fighting now
+     requires that — the fixture used to carry a single weapon and no equipped
+     slots, which is not a two-weapon fighter at all and was only accepted
+     because nothing checked. */
   const s = freshCombat([10, 18, 4], [
     mkActor('hero', 'Shen', 'party', {
-      attacks: [{ name: 'Shortsword', toHit: 5, damage: '1d6+3', abilityMod: 3, reach: 5 }],
+      attacks: [
+        { name: 'Shortsword', uid: 'sw1', toHit: 5, damage: '1d6+3', abilityMod: 3, reach: 5,
+          properties: ['light'] },
+        { name: 'Shortsword', uid: 'sw2', toHit: 5, damage: '1d6+3', abilityMod: 3, reach: 5,
+          properties: ['light'] },
+      ],
     }),
     mkActor('ogre', 'Ogre', 'enemy', { ac: 12, hp: 20, hpMax: 20 }),
   ]);
+  s.actors.hero.runtime.equipped = { mainHand: 'sw1', offHand: 'sw2' };
   commit(s, Combat.beginEncounter(s, [{ id: 'hero', mod: 0 }], {}));
   commit(s, Combat.startTurn(s, 'hero'));
   const b = Combat.resolveCombat(s, Command.create({
@@ -389,9 +400,17 @@ t.section('meta resolver handles end_turn and pass');
 t.section('legalMoves is one aggregated list for UI, AI seat and referee alike');
 {
   const s = freshCombat([10], [
-    mkActor('hero', 'Shen', 'party', { attacks: [{ name: 'A', toHit: 5, damage: '1d6+3', abilityMod: 3 }, { name: 'B', toHit: 5, damage: '1d6+3', abilityMod: 3 }] }),
+    mkActor('hero', 'Shen', 'party', { attacks: [
+      /* A legal two-weapon fighter: a light melee weapon in each hand. The
+         fixture used to carry two unremarkable weapons with no properties and
+         no equipped slots, which the off-hand strike was offered to anyway
+         because nothing checked the prerequisite. */
+      { name: 'A', uid: 'a1', toHit: 5, damage: '1d6+3', abilityMod: 3, properties: ['light'] },
+      { name: 'B', uid: 'b1', toHit: 5, damage: '1d6+3', abilityMod: 3, properties: ['light'] },
+    ] }),
     mkActor('ogre', 'Ogre', 'enemy'),
   ]);
+  s.actors.hero.runtime.equipped = { mainHand: 'a1', offHand: 'b1' };
   Combat.register();
   commit(s, Combat.beginEncounter(s, [{ id: 'hero', mod: 0 }], {}));
   commit(s, Combat.startTurn(s, 'hero'));

@@ -205,6 +205,28 @@ function main() {
   bonded.combat = { active: false, round: 0, order: [], turnIndex: 0 };
   merge(reachableVerbs(bonded, 'pc1', ctx));
 
+  /* A dual-wielder, because two-weapon fighting now needs a light melee weapon
+     in each hand. None of the characters swept above carries two, so the verb
+     read as unreachable the moment the prerequisite was enforced — which is
+     the harness failing to build a dual-wielder rather than the game failing
+     to offer the move. */
+  const twin = State.create({ seed: 'reach-twin' });
+  State.addActor(twin, hero('pc1', 'Twin Blades', { classId: 'rogue', levels: 5 }));
+  State.addActor(twin, hero('foe1', 'Bandit', { classId: 'fighter', levels: 2, side: 'enemy' }));
+  State.addSeat(twin, { id: 'p1', name: 'P1', actorId: 'pc1', control: 'human' });
+  twin.actors.pc1.runtime.inventory.push(
+    { uid: 'sw1', id: 'shortsword', name: 'a shortsword' },
+    { uid: 'dg1', id: 'dagger', name: 'a dagger' });
+  twin.actors.pc1.runtime.equipped = { mainHand: 'sw1', offHand: 'dg1' };
+  if (twin.actors.foe1) twin.actors.foe1.runtime.pos = { x: 4, y: 3 };
+  State.refreshAllDerived(twin);
+  twin.combat = { active: true, round: 1, turnIndex: 0, order: [{ id: 'pc1' }, { id: 'foe1' }] };
+  twin.actors.pc1.runtime.turn = {
+    action: true, bonus: true, reaction: true, objectInteraction: true,
+    movementRemaining: 30, surprised: false,
+  };
+  merge(reachableVerbs(twin, 'pc1', ctx));
+
   /* Verbs that are reachable by their nature rather than through the bar. */
   const byNature = {
     opportunity_attack: 'a reaction the engine takes for you',

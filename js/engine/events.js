@@ -54,6 +54,7 @@
     'position',          // entered/left a location, travelled
     'mount',             // got on or off a mount
     'time',              // minutes/hours/days passed
+    'long_rest_taken',   // when the last long rest finished: one per 24 hours
     'xp', 'level',
     'spawn', 'despawn',
     'narration',         // prose attached to this batch, after the fact
@@ -688,6 +689,15 @@
 
     time: function (state, e) {
       state.clock = (state.clock || 0) + (e.minutes || 0);
+    },
+
+    /* When the last long rest finished, in the same minutes the clock keeps.
+       The 2014 rules allow one long rest per twenty-four hours, and without
+       somewhere to record the last one the limit cannot be enforced — three
+       long rests taken back to back were all accepted, which removes the
+       resource game from slots, hit dice and every per-rest class feature. */
+    long_rest_taken: function (state, e) {
+      state.lastLongRestAt = typeof e.at === 'number' ? e.at : (state.clock || 0);
     },
 
     xp: function (state, e) {

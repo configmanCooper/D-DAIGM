@@ -111,10 +111,33 @@
     opts = opts || {};
     var s = derived.skills[skill];
     var ability = s ? s.ability : SKILL_ABILITY[skill];
-    var flat = (s ? s.mod : (derived.abilityMods[ability] || 0)) + (opts.bonus || 0);
+
+    /* A Dungeon Master may call for a skill against a different ability —
+       Strength (Intimidation) to loom rather than to charm, Intelligence
+       (Nature) to recall rather than to sense. It is an explicit option in the
+       2014 rules and `opts.ability` was accepted by callers and ignored here,
+       so a barbarian with Strength 18 and Charisma 8 loomed at +2.
+       Proficiency still applies: proficiency is in the SKILL, not the ability
+       it is usually paired with. */
+    var flat;
+    var proficient = !!(s && s.proficient);
+    if (opts.ability && opts.ability !== ability) {
+      ability = opts.ability;
+      flat = (derived.abilityMods[ability] || 0) +
+        (proficient ? (derived.proficiencyBonus || 0) : 0) +
+        (s && s.expertise ? (derived.proficiencyBonus || 0) : 0);
+    } else {
+      flat = (s ? s.mod : (derived.abilityMods[ability] || 0));
+    }
+    flat += (opts.bonus || 0);
+
     var ad = advDis(derived, 'ability_check', opts);
     var r = rollD20(flat, ad, opts);
-    r.check = { kind: 'skill', skill: skill, ability: ability, flat: flat, proficient: s && s.proficient, sources: ad };
+    r.check = {
+      kind: 'skill', skill: skill, ability: ability, flat: flat,
+      proficient: proficient, sources: ad,
+      substituted: !!(opts.ability && opts.ability !== (s ? s.ability : SKILL_ABILITY[skill])),
+    };
     return r;
   }
 
@@ -436,13 +459,34 @@
     return XP_BY_CR[String(n)] != null ? XP_BY_CR[String(n)] : 0;
   }
 
-  function encounterMultiplier(count) {
-    if (count <= 1) return 1;
-    if (count === 2) return 1.5;
-    if (count <= 6) return 2;
-    if (count <= 10) return 2.5;
-    if (count <= 14) return 3;
-    return 4;
+  /**
+   * The count-based fudge factor, as a band index so the party-size adjustment
+   * can shift it up or down a step (2014 DMG, "Encounter Difficulty").
+   */
+  var MULTIPLIER_BANDS = [0.5, 1, 1.5, 2, 2.5, 3, 4, 5];
+
+  function multiplierBand(count) {
+    if (count <= 1) return 1;      // 1x
+    if (count === 2) return 2;     // 1.5x
+    if (count <= 6) return 3;      // 2x
+    if (count <= 10) return 4;     // 2.5x
+    if (count <= 14) return 5;     // 3x
+    return 6;                       // 4x
+  }
+
+  function encounterMultiplier(count, partySize) {
+    var band = multiplierBand(count);
+    /* "If the party contains fewer than three characters, use the next highest
+       multiplier; if it contains six or more, use the next lowest." A party of
+       two facing a pack is in far more trouble than the raw table says, and a
+       party of seven far less — this was not applied at all, so every
+       difficulty rating was computed as though the table were four strong. */
+    if (typeof partySize === 'number' && partySize > 0) {
+      if (partySize < 3) band += 1;
+      else if (partySize >= 6) band -= 1;
+    }
+    band = Math.max(0, Math.min(MULTIPLIER_BANDS.length - 1, band));
+    return MULTIPLIER_BANDS[band];
   }
 
   /**
@@ -452,14 +496,37 @@
    */
   function encounterDifficulty(partyLevels, monsterCRs) {
     var thresholds = { easy: 0, medium: 0, hard: 0, deadly: 0 };
-    (partyLevels || []).forEach(function (lv) {
+    var levels = (partyLevels || []).map(function (lv) {
+      /* Accept a bare level or a {level} object: callers pass both, and
+         reading `row[0]` off undefined threw. */
+      return typeof lv === 'number' ? lv : ((lv && lv.level) || 1);
+    });
+    levels.forEach(function (lv) {
       var row = XP_THRESHOLDS[Math.max(1, Math.min(20, lv))];
+      if (!row) return;
       thresholds.easy += row[0]; thresholds.medium += row[1];
       thresholds.hard += row[2]; thresholds.deadly += row[3];
     });
+
+    var crs = (monsterCRs || []).map(function (m) {
+      return typeof m === 'number' || typeof m === 'string' ? m : ((m && m.cr) || 0);
+    });
     var rawXp = 0;
-    (monsterCRs || []).forEach(function (cr) { rawXp += xpForCr(cr); });
-    var multiplier = encounterMultiplier((monsterCRs || []).length);
+    crs.forEach(function (cr) { rawXp += xpForCr(cr); });
+
+    /* Monsters far beneath the party do not make a fight more chaotic in the
+       way the multiplier is meant to capture; the DMG says to leave out
+       creatures whose XP is so low they cannot meaningfully threaten anyone.
+       Counting a swarm of rats as though each were a real combatant pushed a
+       trivial encounter into "deadly". A twentieth of the party's easy
+       threshold is the line used here, and only the COUNT is affected — their
+       experience still counts toward the total. */
+    var partySize = levels.length || 0;
+    var floor = partySize ? (thresholds.easy / partySize) / 20 : 0;
+    var counted = crs.filter(function (cr) { return xpForCr(cr) >= floor; });
+    var effectiveCount = counted.length || crs.length;
+
+    var multiplier = encounterMultiplier(effectiveCount, partySize);
     var adjusted = Math.round(rawXp * multiplier);
 
     var difficulty = 'trivial';
@@ -473,6 +540,8 @@
       xp: rawXp,
       adjustedXp: adjusted,
       multiplier: multiplier,
+      countedMonsters: effectiveCount,
+      ignoredAsTrivial: crs.length - counted.length,
       thresholds: thresholds,
     };
   }

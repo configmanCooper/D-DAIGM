@@ -1886,4 +1886,238 @@ t.section('a spell that promises damage delivers it');
     'and Scorching Ray is no longer among the ones that only talk about it');
 }
 
+t.section('an unarmed strike is not the weapon in your hand');
+/*
+ * `profileFor` was passed `opts.unarmed` by the `unarmed_strike` verb and read
+ * it nowhere, returning `list[0]` — the equipped weapon. "Strike the Ogre
+ * unarmed" hit for 1d8+4 piercing with a rapier. The correct entry had been in
+ * the attack list all along, built by state.js and flagged `unarmed: true`.
+ *
+ * The off-hand had the same shape of bug: it took `list[1]`, the second entry
+ * of an array ordered by inventory, rather than the weapon actually in the off
+ * hand.
+ */
+{
+  require('../js/engine/combat.js');
+  const rogue = (inv, eq) => {
+    const c = Character.buildFromSpec({
+      name: 'R', raceId: 'human', classId: 'rogue', levels: 5, backgroundId: 'criminal',
+      abilities: { str: 8, dex: 18, con: 12, int: 12, wis: 12, cha: 12 },
+      proficiencies: { skills: [] },
+    });
+    c.runtime.inventory = inv;
+    c.runtime.equipped = eq;
+    const st = State.create({ seed: 'unarmed' });
+    State.addActor(st, { id: 'pc1', name: 'R', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime });
+    st.actors.pc1.runtime.pos = { x: 0, y: 0 };
+    State.addActor(st, { id: 'foe1', name: 'Ogre', side: 'enemy', kind: 'monster',
+      base: { name: 'Ogre', abilities: { str: 16, dex: 8, con: 16, int: 5, wis: 7, cha: 7 } },
+      progression: { levels: [] },
+      runtime: { hp: 60, hpMax: 60, conditions: {}, inventory: [], deathSaves: {},
+        pos: { x: 1, y: 0 }, ac: 11, speed: 30, reach: 5 } });
+    State.refreshAllDerived(st);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: ['pc1', 'foe1'] };
+    st.activeActorId = 'pc1';
+    Events.commit(st, Combat.startTurn(st, 'pc1'));
+    return st;
+  };
+
+  const st = rogue(
+    [{ uid: 'w1', id: 'rapier', name: 'Rapier' },
+      { uid: 'w2', id: 'dagger', name: 'Dagger' },
+      { uid: 'w3', id: 'greatsword', name: 'Greatsword' }],
+    { mainHand: 'w1', offHand: 'w2' });
+
+  const fist = Combat.profileFor(st, 'pc1', { unarmed: true });
+  t.eq(fist.damageType, 'bludgeoning', 'an unarmed strike is bludgeoning');
+  t.ok(!/d8/.test(fist.damage), 'and not the rapier\u2019s die', '(' + fist.damage + ')');
+  t.eq(!!fist.unarmed, true, 'it is the unarmed entry from the attack list');
+
+  const main = Combat.profileFor(st, 'pc1', {});
+  t.eq(main.name, 'Rapier', 'the main hand is still the main-hand weapon');
+  const off = Combat.profileFor(st, 'pc1', { offHand: true });
+  t.eq(off.name, 'Dagger', 'and the off hand is the weapon actually in it, not list[1]');
+}
+
+t.section('two-weapon fighting needs two light weapons');
+/*
+ * 2014, "Two-Weapon Fighting": a light melee weapon in each hand. Nothing
+ * checked, so a rogue holding a rapier — finesse, but not light — was offered
+ * an off-hand strike, and so was a character holding one weapon and nothing
+ * else.
+ */
+{
+  require('../js/engine/combat.js');
+  const Dispatch = require('../js/engine/dispatch.js');
+  const armed = (inv, eq) => {
+    const c = Character.buildFromSpec({
+      name: 'R', raceId: 'human', classId: 'rogue', levels: 5, backgroundId: 'criminal',
+      abilities: { str: 8, dex: 18, con: 12, int: 12, wis: 12, cha: 12 },
+      proficiencies: { skills: [] },
+    });
+    c.runtime.inventory = inv;
+    c.runtime.equipped = eq;
+    const st = State.create({ seed: 'twf' });
+    State.addActor(st, { id: 'pc1', name: 'R', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime });
+    st.actors.pc1.runtime.pos = { x: 0, y: 0 };
+    State.addActor(st, { id: 'foe1', name: 'Ogre', side: 'enemy', kind: 'monster',
+      base: { name: 'Ogre', abilities: { str: 16, dex: 8, con: 16, int: 5, wis: 7, cha: 7 } },
+      progression: { levels: [] },
+      runtime: { hp: 60, hpMax: 60, conditions: {}, inventory: [], deathSaves: {},
+        pos: { x: 1, y: 0 }, ac: 11, speed: 30, reach: 5 } });
+    State.refreshAllDerived(st);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: ['pc1', 'foe1'] };
+    st.activeActorId = 'pc1';
+    Events.commit(st, Combat.startTurn(st, 'pc1'));
+    return st;
+  };
+  const check = st => ({
+    offered: Dispatch.legalMoves(st, 'pc1', {})
+      .filter(m => m.step.verb === 'two_weapon_attack').length,
+    refused: !!Combat.resolveCombat(st, {
+      v: 1, family: 'combat', commandId: 'tw' + Math.random(), actorId: 'pc1',
+      stateRevision: st.revision, turnEpoch: st.turnEpoch,
+      primary: { verb: 'two_weapon_attack', targetIds: ['foe1'] },
+    }, {}).refused,
+  });
+
+  const rapier = check(armed(
+    [{ uid: 'w1', id: 'rapier', name: 'Rapier' }, { uid: 'w2', id: 'dagger', name: 'Dagger' }],
+    { mainHand: 'w1', offHand: 'w2' }));
+  t.eq(rapier.offered, 0, 'a rapier is finesse but not light, so no off-hand strike is offered');
+  t.eq(rapier.refused, true, 'and the resolver refuses it if asked directly');
+
+  const two = check(armed(
+    [{ uid: 'w1', id: 'dagger', name: 'Dagger' }, { uid: 'w2', id: 'shortsword', name: 'Shortsword' }],
+    { mainHand: 'w1', offHand: 'w2' }));
+  t.eq(two.offered, 1, 'a dagger and a shortsword are both light, so it is offered');
+  t.eq(two.refused, false, 'and it resolves');
+
+  const one = check(armed([{ uid: 'w1', id: 'dagger', name: 'Dagger' }], { mainHand: 'w1' }));
+  t.eq(one.offered, 0, 'one weapon is not two weapons');
+  t.eq(one.refused, true, 'and that is refused too');
+}
+
+t.section('a skill can be rolled against another ability');
+/*
+ * A Dungeon Master may call for Strength (Intimidation) to loom rather than to
+ * charm — an explicit option in the 2014 rules. `opts.ability` was accepted by
+ * callers and ignored by `skillCheck`, so a barbarian with Strength 18 and
+ * Charisma 8 loomed at +2.
+ */
+{
+  const Rules = require('../js/engine/rules.js');
+  const c = Character.buildFromSpec({
+    name: 'B', raceId: 'human', classId: 'barbarian', levels: 5, backgroundId: 'soldier',
+    abilities: { str: 18, dex: 10, con: 14, int: 8, wis: 10, cha: 8 },
+    proficiencies: { skills: ['intimidation'] },
+  });
+  const d = Character.derive(c.base, c.progression, c.runtime, []);
+  const rng = { int: () => 10, next: () => 0.5 };
+
+  const normal = Rules.skillCheck(d, 'intimidation', { rng });
+  t.eq(normal.check.ability, 'cha', 'Intimidation is a Charisma skill by default');
+
+  const loom = Rules.skillCheck(d, 'intimidation', { rng, ability: 'str' });
+  t.eq(loom.check.ability, 'str', 'but it can be rolled against Strength');
+  t.ok(loom.check.flat > normal.check.flat,
+    'and the barbarian is much better at looming than at charming',
+    '(' + normal.check.flat + ' -> ' + loom.check.flat + ')');
+  t.eq(loom.check.substituted, true, 'the roll records that the ability was substituted');
+  t.eq(loom.check.proficient, true,
+    'proficiency still applies, because it belongs to the skill not the ability');
+}
+
+t.section('a long rest benefits you once in twenty-four hours');
+/*
+ * Nothing enforced it: three long rests taken back to back were all accepted,
+ * which removes the resource game from the whole system — slots, hit dice and
+ * every per-rest class feature refill on demand, and there is never a reason
+ * not to.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  const c = Character.buildFromSpec({
+    name: 'F', raceId: 'human', classId: 'fighter', levels: 3, backgroundId: 'soldier',
+    abilities: { str: 16, dex: 12, con: 14, int: 10, wis: 10, cha: 10 },
+    proficiencies: { skills: [] },
+  });
+  const st = State.create({ seed: 'longrest' });
+  State.addActor(st, { id: 'pc1', name: 'F', side: 'party', kind: 'pc',
+    base: c.base, progression: c.progression, runtime: c.runtime });
+  State.refreshAllDerived(st);
+
+  const rest = () => Dispatch.dispatch(st, { past: [], future: [] }, {
+    v: 1, family: 'exploration', commandId: 'lr' + Math.random(), actorId: 'pc1',
+    stateRevision: st.revision, turnEpoch: st.turnEpoch,
+    primary: { verb: 'long_rest', targetIds: [] },
+  }, {});
+  const offered = () => Dispatch.legalMoves(st, 'pc1', {})
+    .filter(m => m.step.verb === 'long_rest').length;
+  const pass = mins => {
+    const b = Events.makeBatch({ commandId: 't' + Math.random() });
+    Events.push(b, 'time', { minutes: mins }, '');
+    Events.commit(st, b);
+  };
+
+  t.eq(offered(), 1, 'a long rest is offered to a party that has not had one');
+  t.eq(!!rest().batch.refused, false, 'and the first one is taken');
+  t.eq(st.lastLongRestAt, 480, 'the time it finished is recorded');
+
+  t.eq(!!rest().batch.refused, true, 'a second one straight away is refused');
+  t.eq(offered(), 0, 'and it is not offered either, rather than refusing on click');
+
+  pass(20 * 60);
+  t.eq(!!rest().batch.refused, true, 'twenty hours later is still too soon');
+
+  pass(5 * 60);
+  t.eq(offered(), 1, 'twenty-five hours on it is offered again');
+  t.eq(!!rest().batch.refused, false, 'and taken');
+
+  t.ok(Events.KINDS.indexOf('long_rest_taken') >= 0,
+    'long_rest_taken is a registered event kind, or the stamp would be dropped');
+}
+
+t.section('the encounter multiplier reads the party, not just the monsters');
+/*
+ * 2014 DMG: with fewer than three characters use the next highest multiplier,
+ * with six or more the next lowest. Neither was applied — every encounter was
+ * rated as though the party were exactly four. And a swarm of creatures far
+ * beneath the party inflated the count, so ten rats could push a medium fight
+ * into deadly.
+ */
+{
+  const Rules = require('../js/engine/rules.js');
+  const four = Rules.encounterDifficulty([5, 5, 5, 5], [2, 2, 2]);
+  const two = Rules.encounterDifficulty([5, 5], [2, 2, 2]);
+  const six = Rules.encounterDifficulty([5, 5, 5, 5, 5, 5], [2, 2, 2]);
+
+  t.eq(four.multiplier, 2, 'three monsters against four characters is the plain 2x');
+  t.ok(two.multiplier > four.multiplier,
+    'a party of two takes the next multiplier up',
+    '(' + four.multiplier + ' -> ' + two.multiplier + ')');
+  t.ok(six.multiplier < four.multiplier,
+    'a party of six takes the next one down',
+    '(' + four.multiplier + ' -> ' + six.multiplier + ')');
+
+  const plain = Rules.encounterDifficulty([5, 5, 5, 5], [3, 3]);
+  const withRats = Rules.encounterDifficulty([5, 5, 5, 5],
+    [3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  t.eq(withRats.countedMonsters, plain.countedMonsters,
+    'ten CR-0 creatures do not count toward the multiplier');
+  t.eq(withRats.ignoredAsTrivial, 10, 'and the engine says how many it set aside');
+  t.eq(withRats.multiplier, plain.multiplier,
+    'so the rats cannot turn the fight into a harder one than it is');
+  t.ok(withRats.xp > plain.xp === false || withRats.xp >= plain.xp,
+    'while their experience still counts toward the total');
+
+  /* And the shape callers actually pass. `encounterDifficulty` threw on a
+     {level} object, which is what half the engine hands it. */
+  const objects = Rules.encounterDifficulty([{ level: 5 }, { level: 5 }], [{ cr: 2 }]);
+  t.ok(objects.thresholds.easy > 0, 'levels and CRs may be given as objects');
+}
+
 t.done();
