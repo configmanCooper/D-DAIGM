@@ -24,6 +24,7 @@ const Knowledge = require('../js/engine/knowledge.js');
 const State = require('../js/engine/state.js');
 const Dispatch = require('../js/engine/dispatch.js');
 const Character = require('../js/engine/character.js');
+const Chargen = require('../js/gen/chargen.js');
 const Combat = require('../js/engine/combat.js');
 const Interaction = require('../js/engine/interaction.js');
 const Save = require('../js/engine/save.js');
@@ -41,6 +42,7 @@ function parseArgs(argv) {
     seed: 'playtest-' + Date.now().toString(36),
     port: process.env.PORT || 8177,
     label: '', quiet: false, noExport: false, encounter: false, levelAt: 0, waves: 1, startLevel: 0, milestone: false,
+    expert: false, untilLevel: 0, interlude: 6, expertModel: null,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -61,6 +63,14 @@ function parseArgs(argv) {
     else if (a === '--milestone') out.milestone = true;
     else if (a === '--start-level') out.startLevel = parseInt(next(), 10);
     else if (a === '--level-at') out.levelAt = parseInt(next(), 10);
+    /* An experienced player does more than pick a move off a list: they ask
+       the Dungeon Master how a rule works, they ask to amend the record, and
+       they change who is travelling with them. `--expert` seats one and lets
+       it do all three. */
+    else if (a === '--expert') out.expert = true;
+    else if (a === '--until-level') out.untilLevel = parseInt(next(), 10);
+    else if (a === '--interlude') out.interlude = parseInt(next(), 10);
+    else if (a === '--expert-model') out.expertModel = next();
   }
   return out;
 }
@@ -280,6 +290,253 @@ function seatUp(session, count, backendKind, model) {
   return chosen;
 }
 
+/* ------------------------------------------------------- the expert player
+
+   Picking a move off a list is the least of what an experienced player does.
+   They interrupt to ask how a rule works, they ask the Dungeon Master to
+   amend something that was skipped over, they recruit and part with
+   companions, and they try things the designer did not think of.
+
+   None of that was ever exercised by an unattended run, so none of it was
+   ever evidence of anything. This seats a large model as that player. */
+
+const EXPERT = {
+  asked: 0, answered: 0, badAnswers: [],
+  amendsAsked: 0, amendsAllowed: 0, amendsRefused: 0, amendsApplied: 0,
+  recruited: 0, dismissed: 0,
+  improvised: 0,
+  notes: [],
+};
+
+/** Ask the expert's own model for a line of free text. */
+async function expertSays(system, user, opts) {
+  opts = opts || {};
+  const model = ARGS.expertModel || ARGS.model;
+  const body = {
+    model: model,
+    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+    json: !!opts.json,
+  };
+  const r = await fetch('/api/copilot/chat', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error('copilot ' + r.status + ': ' + (await r.text()).slice(0, 200));
+  const raw = await r.text();
+  /* NDJSON, one object per line, same shape the Ollama proxy returns. */
+  let text = '';
+  raw.split('\n').filter(Boolean).forEach(line => {
+    try {
+      const j = JSON.parse(line);
+      text += (j.message && j.message.content) || j.response || '';
+    } catch (e) { /* a partial line at the end */ }
+  });
+  return text.trim();
+}
+
+/** What the expert can see right now, in words, for its own prompts. */
+function expertBriefing(session, actorId) {
+  const s = session.state;
+  const a = s.actors[actorId];
+  const d = (a && a.derivedCache) || {};
+  const rt = (a && a.runtime) || {};
+  const party = State.partyIds(s).map(id => {
+    const p = s.actors[id];
+    return p.name + ' (' + p.runtime.hp + '/' + ((p.derivedCache || {}).hpMax || p.runtime.hpMax) + ' hp)';
+  });
+  const foes = State.livingEnemies(s).map(id => s.actors[id].name);
+  const recent = (s.transcript || []).slice(-6)
+    .map(l => (typeof l === 'string' ? l : (l.text || l.narration || '')))
+    .filter(Boolean).join('\n');
+  return [
+    'You are playing ' + (a ? a.name : actorId) + '.',
+    'Level ' + (d.level || 1) + ', ' + rt.hp + '/' + (d.hpMax || rt.hpMax) + ' hit points, AC ' + d.ac + '.',
+    'Party: ' + party.join(', '),
+    foes.length ? 'Enemies present: ' + foes.join(', ') : 'No enemies present.',
+    'Where: ' + (session.locationName || s.locationId || 'somewhere'),
+    recent ? 'Recently:\n' + recent : '',
+  ].filter(Boolean).join('\n');
+}
+
+const EXPERT_PERSONA =
+  'You are an experienced Dungeons & Dragons 5th Edition player \u2014 the ' +
+  'kind who has run and played for years, knows the 2014 rules well, and ' +
+  'plays their character with commitment. You are at a table right now.';
+
+/** Interrupt play to ask the Dungeon Master something. */
+async function expertAsks(session, actorId) {
+  EXPERT.asked++;
+  let question;
+  try {
+    question = await expertSays(EXPERT_PERSONA,
+      expertBriefing(session, actorId) + '\n\n' +
+      'Ask the Dungeon Master ONE question, out of character, of the kind a ' +
+      'real player asks mid-session: how a rule works, what your own ' +
+      'character can do right now, whether something you want to try is ' +
+      'possible, or what you can see. Vary it \u2014 do not always ask about ' +
+      'the same thing. Reply with the question only, one sentence.');
+  } catch (e) {
+    log('  ! expert could not compose a question: ' + e.message);
+    return;
+  }
+  if (!question) return;
+  log('\n  [OOC] ' + question);
+
+  const out = await Game.askOrAmend(session, question, {
+    actorId: actorId, locationName: session.locationName,
+    stallMs: 120000, totalMs: 300000,
+  });
+
+  const text = out.text || out.describe || '';
+  log('  [DM ] ' + String(text).replace(/\n/g, '\n        ').slice(0, 700));
+
+  if (out.kind === 'answer' && text) {
+    EXPERT.answered++;
+    /* The two failures that would make the feature worthless. */
+    if (/there is no dungeon master model/i.test(text)) {
+      EXPERT.badAnswers.push({ question, why: 'fell back to offline', text: text.slice(0, 160) });
+    } else if (text.length < 25) {
+      EXPERT.badAnswers.push({ question, why: 'no real answer', text });
+    }
+  } else if (out.kind === 'amend') {
+    /* It asked for a change while being told to ask a question. Fine — the
+       classifier is doing its job; take it as an amendment. */
+    await resolveAmendment(session, actorId, question, out);
+  }
+}
+
+/** Ask the Dungeon Master to amend the record, and apply it if allowed. */
+async function expertAmends(session, actorId) {
+  EXPERT.amendsAsked++;
+  let request;
+  try {
+    request = await expertSays(EXPERT_PERSONA,
+      expertBriefing(session, actorId) + '\n\n' +
+      'Ask the Dungeon Master to retcon something \u2014 to establish that ' +
+      'something was already true, or to correct something that was skipped. ' +
+      'The kind of thing a real player says: "can we say I bought rope in ' +
+      'town before we left?", "I\u2019d have filled my waterskin", "wait, ' +
+      'shouldn\u2019t I have had advantage on that?", "can we say my character ' +
+      'already knew her?". Keep it modest and plausible. Reply with the ' +
+      'request only, one sentence.');
+  } catch (e) {
+    log('  ! expert could not compose an amendment: ' + e.message);
+    return;
+  }
+  if (!request) return;
+  log('\n  [OOC/retcon] ' + request);
+
+  const out = await Game.askOrAmend(session, request, {
+    actorId: actorId, locationName: session.locationName,
+    stallMs: 120000, totalMs: 300000,
+  });
+  await resolveAmendment(session, actorId, request, out);
+}
+
+async function resolveAmendment(session, actorId, request, out) {
+  if (out.kind === 'refused') {
+    EXPERT.amendsRefused++;
+    log('  [DM ] refused: ' + String(out.text).slice(0, 300));
+    return;
+  }
+  if (out.kind !== 'amend') {
+    log('  [DM ] answered instead: ' + String(out.text || '').slice(0, 250));
+    return;
+  }
+  EXPERT.amendsAllowed++;
+  log('  [DM ] ' + String(out.describe).replace(/\n/g, '\n        '));
+
+  const before = JSON.stringify(State.digest(session.state).party);
+  const applied = Game.applyRetcon(session, out.proposal, { actorId, request });
+  if (applied.ok) {
+    EXPERT.amendsApplied++;
+    const after = JSON.stringify(State.digest(session.state).party);
+    log('  [   ] applied' + (before === after ? ' (story only)' : ' \u2014 the sheets moved'));
+  } else {
+    log('  [   ] could not apply: ' + applied.reason);
+    EXPERT.notes.push('retcon failed to apply: ' + applied.reason);
+  }
+}
+
+/**
+ * Someone joins, or someone leaves.
+ *
+ * Party composition changing mid-campaign is ordinary at a table and was
+ * never exercised: every previous run started with a fixed party and ended
+ * with the same one, so nothing proved that adding or removing a member
+ * leaves the initiative, the seats and the roster consistent.
+ */
+function expertChangesParty(session, join) {
+  const s = session.state;
+  const party = State.partyIds(s);
+
+  if (join) {
+    const level = Math.max(1, (s.actors[party[0]].derivedCache || {}).level || 1);
+    const spec = Chargen.generate({
+      rng: new RNG('recruit-' + party.length + '-' + s.revision),
+      fixed: { levels: level },
+    });
+    const built = Character.buildFromSpec(spec);
+    const id = 'ally-' + s.revision;
+    /* Through a spawn EVENT rather than State.addActor, so a recruit is
+       replayable and undoable like everything else. A companion who appears
+       by direct mutation is invisible to the log and vanishes on a rewind. */
+    const batch = Events.makeBatch({ commandId: 'recruit-' + id, actorId: party[0] });
+    Events.push(batch, 'spawn', {
+      actorId: id,
+      actor: {
+        id, name: spec.name, side: 'party', kind: 'npc',
+        base: built.base, progression: built.progression, runtime: built.runtime,
+        persona: spec.name + ' has thrown in with the party.',
+      },
+    });
+    Events.commit(s, batch);
+    State.setController(s, id, { kind: 'companionPolicy', seatId: null, agent: null });
+    State.refreshAllDerived(s);
+    EXPERT.recruited++;
+    log('\n  [party] ' + spec.name + ' joins the party (level ' + level + ').');
+    return id;
+  }
+
+  /* Part with a companion — never a seated player, and never the last one. */
+  const seatedIds = (s.seats || []).map(x => x.actorId);
+  const spare = party.filter(id => seatedIds.indexOf(id) < 0);
+  if (!spare.length || party.length <= 2) return null;
+  const goes = spare[spare.length - 1];
+  const name = s.actors[goes].name;
+
+  /* Not mid-fight. Removing a combatant whose turn is in the initiative order
+     leaves the order pointing at somebody who no longer exists. */
+  if (s.combat && s.combat.active) return null;
+
+  const batch = Events.makeBatch({ commandId: 'part-' + goes, actorId: party[0] });
+  Events.push(batch, 'despawn', { actorId: goes });
+  Events.commit(s, batch);
+  if (s.activeActorId === goes) s.activeActorId = party[0];
+  State.refreshAllDerived(s);
+  EXPERT.dismissed++;
+  log('\n  [party] ' + name + ' parts ways with the party.');
+  return goes;
+}
+
+/** Has everyone who is seated reached the level we are playing towards? */
+function partyAtLevel(session, want) {
+  const ids = State.partyIds(session.state);
+  if (!ids.length) return false;
+  return ids.every(id => {
+    const d = session.state.actors[id].derivedCache || {};
+    return (d.level || 1) >= want;
+  });
+}
+
+function lowestLevel(session) {
+  const ids = State.partyIds(session.state);
+  return ids.reduce((lo, id) => {
+    const d = session.state.actors[id].derivedCache || {};
+    return Math.min(lo, d.level || 1);
+  }, 99);
+}
+
 /* ------------------------------------------------------------------ report */
 
 const REPORT = {
@@ -392,6 +649,7 @@ async function main() {
   /* Successive waves, each a step harder, so a long run is a session rather
      than one fight followed by eighty turns of standing about. */
   let wavesFought = 0;
+  let expertTurns = 0;
   function spawnWave(session, n) {
     const MONSTERS = (() => {
       try { return require('../js/data/srd_monsters.js').MONSTERS; } catch (e) { return {}; }
@@ -510,6 +768,14 @@ async function main() {
 
   for (let turn = 0; turn < ARGS.turns; turn++) {
     REPORT.turns++;
+
+    /* Have we played far enough? Checked at the top so a run that reaches the
+       target stops there rather than grinding out the remaining turns. */
+    if (ARGS.untilLevel && partyAtLevel(session, ARGS.untilLevel)) {
+      log('\n  the whole party has reached level ' + ARGS.untilLevel + '. That is what we came for.');
+      break;
+    }
+
     const actorId = session.state.activeActorId || seated[turn % seated.length];
     const actor = session.state.actors[actorId];
     if (!actor) break;
@@ -543,6 +809,38 @@ async function main() {
       log('  ! turn threw: ' + ((e && e.message) || e));
     }
     REPORT.latencies.push(Date.now() - t0);
+
+    /* ------------------------------------------------- expert interludes --
+       Between turns, the things a real player does that are not moves: ask
+       the Dungeon Master a question, ask to amend the record, and change who
+       is travelling with them. Deliberately OUT of combat where possible, and
+       never so often that the run becomes a chat. */
+    if (ARGS.expert && isSeat && ARGS.interlude > 0) {
+      /* Counted in the seat's OWN turns, not the absolute turn index. Keyed
+         to the loop counter, an interlude only landed when the initiative
+         happened to be on the player at that exact turn, so in a fight the
+         amendment beat was skipped entirely and the run never exercised it. */
+      expertTurns++;
+      if (expertTurns % ARGS.interlude === 0) {
+        const beat = expertTurns / ARGS.interlude;
+        try {
+          if (beat % 3 === 1) {
+            await expertAsks(session, actorId);
+          } else if (beat % 3 === 2) {
+            await expertAmends(session, actorId);
+          } else {
+            /* Alternate joining and parting, so both paths are exercised. */
+            const joining = (beat % 6 === 0);
+            const changed = expertChangesParty(session, joining);
+            if (!changed && !joining) log('\n  [party] nobody to part with just now.');
+            await expertAsks(session, actorId);
+          }
+        } catch (e) {
+          REPORT.errors++;
+          log('  ! interlude threw: ' + ((e && e.message) || e));
+        }
+      }
+    }
 
     /* Advance the initiative order if we are in an encounter; otherwise rotate
        the narrative spotlight between the seats. */
@@ -643,6 +941,31 @@ async function main() {
   log('  median turn         ' + (REPORT.latencies[Math.floor(REPORT.latencies.length / 2)] || 0) + 'ms');
   log('  transcript lines    ' + d.transcriptLines);
   log('');
+
+  if (ARGS.expert) {
+    hr('what the expert did besides taking turns');
+    log('  questions asked     ' + EXPERT.asked + ' (' + EXPERT.answered + ' answered by the DM)');
+    log('  amendments asked    ' + EXPERT.amendsAsked +
+      ' \u2014 ' + EXPERT.amendsAllowed + ' allowed, ' + EXPERT.amendsRefused + ' refused, ' +
+      EXPERT.amendsApplied + ' applied');
+    log('  companions joined   ' + EXPERT.recruited);
+    log('  companions parted   ' + EXPERT.dismissed);
+    log('  levels reached      ' + State.partyIds(session.state).map(id => {
+      const p = session.state.actors[id];
+      return p.name + ' ' + ((p.derivedCache || {}).level || 1);
+    }).join(', '));
+    log('  amendments on record ' + (session.state.retcons || []).length);
+    (session.state.retcons || []).forEach(r => log('    \u00b7 ' + r.summary));
+    if (EXPERT.badAnswers.length) {
+      log('');
+      log('  *** ' + EXPERT.badAnswers.length + ' POOR ANSWER(S) ***');
+      EXPERT.badAnswers.forEach(b => log('    - (' + b.why + ') ' + b.question + '\n      ' + b.text));
+    } else if (EXPERT.asked) {
+      log('  every question got a real answer from the model \u2713');
+    }
+    if (EXPERT.notes.length) EXPERT.notes.forEach(n => log('  note: ' + n));
+    log('');
+  }
   if (REPORT.leaks.length) {
     log('  *** ' + REPORT.leaks.length + ' SECRET LEAK(S) DETECTED ***');
     REPORT.leaks.forEach(l => log('    - ' + l.observer + ': "' + l.term + '" from ' + l.factId));
