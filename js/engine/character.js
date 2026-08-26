@@ -499,7 +499,25 @@
           primary.cd.spellcasting.type || 'known')
         : null,
       cantripsKnown: (progression.cantripsKnown || []).slice(),
-      prepared: (progression.preparedSpells || []).slice(),
+      /* What this caster can actually cast today.
+         A "known" caster — sorcerer, bard, ranger, warlock — does not prepare;
+         the spells they learn ARE their list. Levelling up appends to
+         `progression.spellsKnown`, and nothing read it: `spellcasting()` never
+         returned it and `resolveSpell` consults only `prepared` and cantrips.
+         So a sorcerer who reached level 3 and chose Scorching Ray could never
+         cast Scorching Ray, for the rest of the campaign. Merged rather than
+         substituted, because a multiclassed prepared/known caster has both and
+         a campaign may seed `preparedSpells` for either kind. */
+      prepared: (function () {
+        var ready = (progression.preparedSpells || []).slice();
+        (progression.spellsKnown || []).forEach(function (id) {
+          if (ready.indexOf(id) < 0) ready.push(id);
+        });
+        return ready;
+      })(),
+      /* The learned list on its own, for anything that needs to tell "known"
+         from "prepared today" — a level-up screen, or a wizard's book. */
+      known: (progression.spellsKnown || []).slice(),
       /* A wizard's spellbook is the pool they prepare FROM, and is not the
          same thing as what they have prepared today. Everyone else prepares
          from their class list, so they have no book. */
@@ -516,7 +534,7 @@
       ritualFrom: (function () {
         if (!primary || !primary.cd.spellcasting || !primary.cd.spellcasting.ritual) return [];
         var book = (progression.spellbook || []);
-        var ready = (progression.preparedSpells || []);
+        var ready = (progression.preparedSpells || []).concat(progression.spellsKnown || []);
         if (primary.c && primary.c.classId === 'wizard' && book.length) {
           return book.concat(ready.filter(function (id) { return book.indexOf(id) < 0; }));
         }

@@ -1604,9 +1604,23 @@
       }
 
       if (e.kind === 'attack') {
-        targets.forEach(function (tid) {
+        /* Some spells throw more than one of the same thing — Scorching Ray's
+           three rays, and anything else the data marks with a count. Each is a
+           separate attack roll, and they may all go at the same target or be
+           spread across several: with fewer targets named than rays available,
+           the remainder land on the last one named, which is how a player who
+           picks a single enemy expects it to work. */
+        var shots = Math.max(1, e.count || 1);
+        for (var s = 0; s < shots; s++) {
+          var tid = targets[Math.min(s, targets.length - 1)];
+          if (tid == null) break;
           if (resolveSpellAttack(state, b, command, a, d, spell, e, tid, name, upcastBy)) handled = true;
-        });
+        }
+        if (shots === 1) {
+          targets.slice(1).forEach(function (extra) {
+            if (resolveSpellAttack(state, b, command, a, d, spell, e, extra, name, upcastBy)) handled = true;
+          });
+        }
         handled = true;
         return;
       }

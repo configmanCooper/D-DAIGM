@@ -1769,4 +1769,121 @@ t.section('coming back from the dead actually costs something');
   t.eq(other.flat, 0, 'but not to a roll it does not name', '(' + other.flat + ')');
 }
 
+t.section('a spell you have learned is a spell you can cast');
+/*
+ * Levelling a known caster appends to `progression.spellsKnown`. Nothing read
+ * it: `Character.spellcasting()` never returned it, and `resolveSpell` consults
+ * only `prepared` and cantrips. So a sorcerer who reached level 3 and chose
+ * Scorching Ray could never cast Scorching Ray — for the rest of the campaign.
+ * The choice the level-up screen made you make had no effect whatsoever.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+
+  function sorcerer() {
+    const c = Character.buildFromSpec({
+      name: 'S', raceId: 'human', classId: 'sorcerer', levels: 5, backgroundId: 'sage',
+      abilities: { str: 8, dex: 14, con: 14, int: 10, wis: 10, cha: 18 },
+      proficiencies: { skills: [] },
+    });
+    const st = State.create({ seed: 'learned' });
+    State.addActor(st, { id: 'pc1', name: 'S', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime });
+    st.actors.pc1.runtime.pos = { x: 0, y: 0 };
+    State.addActor(st, { id: 'foe1', name: 'Ogre', side: 'enemy', kind: 'monster',
+      base: { name: 'Ogre', abilities: { str: 16, dex: 8, con: 16, int: 5, wis: 7, cha: 7 } },
+      progression: { levels: [] },
+      runtime: { hp: 90, hpMax: 90, conditions: {}, inventory: [], deathSaves: {},
+        pos: { x: 2, y: 0 }, ac: 11, speed: 30, reach: 5 } });
+    State.refreshAllDerived(st);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: ['pc1', 'foe1'] };
+    st.activeActorId = 'pc1';
+    return st;
+  }
+  const spellNames = st => {
+    Events.commit(st, Combat.startTurn(st, 'pc1'));
+    return Dispatch.legalMoves(st, 'pc1', {})
+      .filter(m => m.family === 'spell' && /^Cast/.test(m.what)).map(m => m.what);
+  };
+
+  const st = sorcerer();
+  t.eq(spellNames(st).some(s => /Scorching/i.test(s)), false,
+    'a sorcerer who has not learned Scorching Ray is not offered it');
+
+  st.actors.pc1.progression.spellsKnown = ['scorching-ray'];
+  State.refreshAllDerived(st);
+  t.eq(spellNames(st).some(s => /Scorching/i.test(s)), true,
+    'and once learned, it is offered');
+  t.deep(st.actors.pc1.derivedCache.spellcasting.known, ['scorching-ray'],
+    'the sheet distinguishes what is known from what is prepared today');
+
+  /* Cast it for real: being offered is not the same as working. */
+  const before = st.actors.foe1.runtime.hp;
+  const r = Dispatch.dispatch(st, { past: [], future: [] }, {
+    v: 1, family: 'spell', commandId: 'sr1', actorId: 'pc1',
+    stateRevision: st.revision, turnEpoch: st.turnEpoch,
+    primary: { verb: 'cast', spellId: 'scorching-ray', targetIds: ['foe1'], slotLevel: 2 },
+  }, {});
+  t.eq(!!(r.batch && r.batch.refused), false, 'and casting it is not refused',
+    r.batch && r.batch.refused ? '(' + r.batch.refused.detail + ')' : '');
+  t.ok(st.actors.foe1.runtime.hp < before, 'and it actually burns somebody',
+    '(' + (before - st.actors.foe1.runtime.hp) + ' damage)');
+
+  /* Three rays are three separate attack rolls, not one. Scorching Ray had no
+     mechanical effect at all — only a `narrative` summary — so it spent a slot
+     and did nothing. */
+  const rolls = (r.batch.beats || []).filter(s => /casts Scorching Ray/i.test(s)).length;
+  t.eq(rolls, 3, 'and it throws three rays, each rolled on its own', '(' + rolls + ')');
+}
+
+t.section('a spell that promises damage delivers it');
+/*
+ * 140 of the 319 spells carry only a `narrative` effect. For most that is
+ * right — Prestidigitation and Mage Hand are for a Dungeon Master to
+ * adjudicate, not for dice. But a spell whose own text says it deals 2d6 fire
+ * damage and which carries no mechanics spends your slot and does nothing, and
+ * that is indistinguishable from a bug.
+ *
+ * This lists the ones that are still text, so the gap is declared rather than
+ * discovered mid-fight. Each is genuinely awkward — a persistent flaming
+ * sphere, a glyph that is really a trap, the backlash from a failed Wish — and
+ * the allowlist is the honest record of that. Scorching Ray was on this list
+ * and is not any more.
+ */
+{
+  const Spells = require('../js/data/srd_spells.js');
+  const T = Spells.SPELLS || Spells.spells || Spells;
+
+  const KNOWN_NARRATIVE = [
+    'divine-favor',        // a damage rider on your own weapon attacks
+    'alter-self',          // 1d6 is a natural weapon the new form grants
+    'branding-smite',      // a rider on the next hit, needs smite plumbing
+    'flame-blade',         // conjures a weapon you then attack with
+    'flaming-sphere',      // a persistent object that moves and rams
+    'glyph-of-warding',    // really a trap: placed now, fires later
+    'meld-into-stone',     // damage only if the stone is destroyed around you
+    'spirit-guardians',    // a moving aura, needs per-turn area upkeep
+    'dimension-door',      // 4d6 only on a failed teleport into a solid object
+    'wish',                // 1d10 per level is the backlash from a stretched wish
+  ];
+
+  const offenders = [];
+  Object.keys(T).forEach(id => {
+    const sp = T[id];
+    const effects = ((sp.mech || {}).effects) || [];
+    if (effects.some(e => e.kind !== 'narrative')) return;
+    const txt = (sp.text || '') + ' ' + effects.map(e => e.summary || '').join(' ');
+    if (!/\d+d\d+\s+\w+\s+damage/i.test(txt)) return;
+    if (KNOWN_NARRATIVE.indexOf(id) >= 0) return;
+    offenders.push(sp.name || id);
+  });
+
+  t.deep(offenders, [],
+    'no spell promises damage in its text while carrying no mechanics at all');
+  t.eq(KNOWN_NARRATIVE.indexOf('scorching-ray'), -1,
+    'and Scorching Ray is no longer among the ones that only talk about it');
+}
+
 t.done();

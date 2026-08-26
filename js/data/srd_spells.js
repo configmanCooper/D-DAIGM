@@ -6386,8 +6386,15 @@
       },
       "effects": [
         {
-          "kind": "narrative",
-          "summary": "You create three rays of fire and hurl them at targets within range. You can hurl them at one target or several."
+          "kind": "attack",
+          "attack": "ranged_spell",
+          "count": 3,
+          "damage": [
+            {
+              "dice": "2d6",
+              "type": "fire"
+            }
+          ]
         }
       ],
       "cantripScaling": null,
