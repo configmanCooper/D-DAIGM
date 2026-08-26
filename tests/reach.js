@@ -227,6 +227,27 @@ function main() {
   };
   merge(reachableVerbs(twin, 'pc1', ctx));
 
+  /* Somebody bleeding out beside you, so Steady has a reason to exist. None of
+     the scenes above has a dying ally, and the verb is deliberately offered
+     only when it would do something. */
+  const triage = State.create({ seed: 'reach-triage' });
+  State.addActor(triage, hero('pc1', 'Medic', { classId: 'cleric', levels: 5 }));
+  State.addActor(triage, hero('pc2', 'Fallen', { classId: 'fighter', levels: 5 }));
+  State.addActor(triage, hero('foe1', 'Bandit', { classId: 'fighter', levels: 2, side: 'enemy' }));
+  State.addSeat(triage, { id: 'p1', name: 'P1', actorId: 'pc1', control: 'human' });
+  State.refreshAllDerived(triage);
+  triage.actors.pc1.runtime.pos = { x: 3, y: 3 };
+  triage.actors.pc2.runtime.pos = { x: 4, y: 3 };
+  triage.actors.pc2.runtime.hp = 0;
+  triage.actors.pc2.runtime.deathSaves = { successes: 0, failures: 0 };
+  if (triage.actors.foe1) triage.actors.foe1.runtime.pos = { x: 6, y: 3 };
+  triage.combat = { active: true, round: 1, turnIndex: 0, order: [{ id: 'pc1' }, { id: 'foe1' }] };
+  triage.actors.pc1.runtime.turn = {
+    action: true, bonus: true, reaction: true, objectInteraction: true,
+    movementRemaining: 30, surprised: false,
+  };
+  merge(reachableVerbs(triage, 'pc1', ctx));
+
   /* Verbs that are reachable by their nature rather than through the bar. */
   const byNature = {
     opportunity_attack: 'a reaction the engine takes for you',

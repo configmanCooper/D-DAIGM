@@ -33,7 +33,12 @@
      constrained to this list by enum, so it cannot invent a mechanic. */
   var VERBS = {
     combat: ['attack', 'multiattack', 'grapple', 'shove', 'dodge', 'disengage', 'dash', 'help', 'hide',
-      'ready', 'opportunity_attack', 'two_weapon_attack', 'unarmed_strike', 'escape_grapple'],
+      'ready', 'opportunity_attack', 'two_weapon_attack', 'unarmed_strike', 'escape_grapple',
+      /* Steadying a dying creature. Added with the action itself; without it
+         here the resolver and the action bar both knew the verb and the
+         referee's enum did not, so an AI Dungeon Master could never choose it
+         and a typed "I stabilise him" had nowhere to land. */
+      'stabilise'],
     movement: ['move', 'stand_up', 'drop_prone', 'climb', 'swim', 'jump', 'crawl', 'mount', 'dismount'],
     spell: ['cast', 'dismiss_concentration', 'counterspell', 'ritual_cast'],
     item: ['use', 'equip', 'unequip', 'attune', 'unattune', 'drink', 'throw', 'give', 'drop', 'pick_up', 'buy', 'sell'],
