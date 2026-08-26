@@ -2776,4 +2776,80 @@ t.section('every offered item action actually changes something');
     'no item action commits successfully while changing nothing at all');
 }
 
+/* ---------------------------------------------------------------------------
+   A caster with a higher slot free is not out of spells.
+
+   `castableNow` decides whether a spell is offered at all, and it returns
+   true when any slot of the spell's level OR HIGHER is free, because the
+   rules let you cast with a higher slot. The resolver only ever tried the
+   spell's own level. The two disagreed, so a cleric with no first-level slots
+   and three second-level slots in hand was shown Cure Wounds, chose it, and
+   was told "has no level 1 slots left" — every single turn.
+
+   A live campaign logged thirty-eight of those in one fight: three companions
+   standing over a dying paladin, each picking the same spell each round and
+   each doing nothing at all, while the party managed one attack in a hundred
+   turns. The log reads like a battle. Nothing was happening.
+--------------------------------------------------------------------------- */
+t.section('a spell casts from a higher slot when its own level is spent');
+{
+  const c = build('cleric', 5, 'upcast');
+  const s = scene('upcast');
+  c.progression.preparedSpells = (c.progression.preparedSpells || []).concat(['cure-wounds']);
+  State.addActor(s, {
+    id: 'c', name: 'Cleric', side: 'party', kind: 'pc',
+    base: c.base, progression: c.progression, runtime: c.runtime,
+  });
+  State.refreshAllDerived(s);
+
+  const max = s.actors.c.derivedCache.spellcasting.slotsMax;
+  t.ok((max[1] || 0) > 0 && (max[2] || 0) > 0, 'the cleric has both first and second level slots');
+
+  /* Spend every first-level slot. */
+  s.actors.c.runtime.slotsSpent = { 1: max[1] };
+  State.refreshAllDerived(s);
+
+  const moves = (Dispatch.legalMoves(s, 'c', {}) || [])
+    .filter(m => m.step && m.step.verb === 'cast' && m.step.spellId === 'cure-wounds');
+  t.ok(moves.length > 0,
+    'Cure Wounds is still offered, because a higher slot can pay for it');
+
+  const cmd = Command.create({
+    sessionId: s.sessionId, stateRevision: s.revision, turnEpoch: s.turnEpoch,
+    actorId: 'c', family: moves[0].family, primary: moves[0].step,
+  });
+  const out = Dispatch.dispatch(s, State.makeHistory(), cmd, {});
+
+  t.eq(out.ok, true, 'and casting it SUCCEEDS rather than refusing',
+    out.ok ? '' : JSON.stringify(out.errors || out.reason));
+  t.eq((s.actors.c.runtime.slotsSpent[2] || 0), 1,
+    'a second-level slot was spent for it');
+  t.ok(/level 2 slot/i.test((out.beats || []).join(' ')),
+    'and the log says which slot was spent', (out.beats || []).join(' | '));
+}
+
+t.section('and is refused only when every slot that could pay is gone');
+{
+  const c = build('cleric', 5, 'upcast2');
+  const s = scene('upcast2');
+  c.progression.preparedSpells = (c.progression.preparedSpells || []).concat(['cure-wounds']);
+  State.addActor(s, {
+    id: 'c', name: 'Cleric', side: 'party', kind: 'pc',
+    base: c.base, progression: c.progression, runtime: c.runtime,
+  });
+  State.refreshAllDerived(s);
+
+  const max = s.actors.c.derivedCache.spellcasting.slotsMax;
+  const spent = {};
+  Object.keys(max).forEach(l => { spent[l] = max[l]; });
+  s.actors.c.runtime.slotsSpent = spent;
+  State.refreshAllDerived(s);
+
+  const moves = (Dispatch.legalMoves(s, 'c', {}) || [])
+    .filter(m => m.step && m.step.verb === 'cast' && m.step.spellId === 'cure-wounds');
+  t.deep(moves, [],
+    'with nothing left anywhere, the spell is not offered at all \u2014 rather ' +
+    'than offered and then refused');
+}
+
 t.done();

@@ -1721,6 +1721,34 @@
           a.name + ' spends a Pact Magic slot (' + (pactSpent + 1) + ' of ' + pactMax +
           ' used, level ' + pactLevel + ').');
       } else {
+        /* Use the lowest slot that can actually pay for it.
+           The resolver only ever tried the spell's OWN level, while
+           `castableNow` — which decides whether the move is offered at all —
+           returns true if any slot of that level or higher is free, because
+           the rules let you cast with a higher slot. The two disagreed, so a
+           cleric with no first-level slots but a second-level slot in hand was
+           shown Cure Wounds, chose it, and was told "has no level 1 slots
+           left". Every turn. A live campaign logged thirty-eight of those in
+           one fight: three companions standing over a dying paladin, each
+           picking the same spell each round and each doing nothing at all,
+           while the party made one attack in a hundred turns.
+
+           Casting at a higher level is what a player at the table does
+           without thinking about it, and what "At Higher Levels" is for. */
+        var slotsMaxAll = (d && d.spellcasting && d.spellcasting.slotsMax) || {};
+        if (maxSlots && spent >= maxSlots) {
+          var upcast = 0;
+          for (var L2 = level + 1; L2 <= 9; L2++) {
+            var maxL = slotsMaxAll[L2] || 0;
+            var spentL = (a.runtime.slotsSpent && a.runtime.slotsSpent[L2]) || 0;
+            if (maxL && spentL < maxL) { upcast = L2; break; }
+          }
+          if (upcast) {
+            level = upcast;
+            spent = (a.runtime.slotsSpent && a.runtime.slotsSpent[level]) || 0;
+            maxSlots = slotsMaxAll[level] || 0;
+          }
+        }
         if (maxSlots && spent >= maxSlots) {
           return Events.refuse(b, 'no-slot', a.name + ' has no level ' + level + ' slots left');
         }
