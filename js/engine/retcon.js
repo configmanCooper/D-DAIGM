@@ -73,6 +73,17 @@
       .replace(/^-+|-+$/g, '');
   }
 
+  /* "extra-torches" is two torches. Crude on purpose: enough for the plurals
+     a model actually writes, and it only ever runs as a last resort after
+     every exact match has failed. */
+  function singular(w) {
+    if (!w || w.length < 4) return w;
+    if (/(ch|sh|ss|x|z)es$/.test(w)) return w.slice(0, -2);
+    if (/ies$/.test(w)) return w.slice(0, -3) + 'y';
+    if (/[^s]s$/.test(w)) return w.slice(0, -1);
+    return w;
+  }
+
   /* Built once per item table: two flat maps from normalised slug to item,
      so a lookup is not a linear scan of four hundred entries per change. */
   var slugIndex = null;
@@ -153,6 +164,26 @@
       });
       if (best) return best;
     }
+
+    /* Head noun, last of all.
+       "ash-vial" is a vial. A SINGLE-word candidate matches only when it is
+       the last meaningful word of the request, which is where English puts
+       the head noun. Of the 113 one-word items in the data only two are above
+       common rarity, and both are refused on rarity anyway, so this cannot
+       smuggle treasure in: "sword-of-infinite-plot-armour" ends in "armour"
+       and nothing is called that. */
+    var meaningful = Object.keys(asked);
+    if (meaningful.length >= 2) {
+      var tail = key.split('-').filter(function (w) { return w && !STOPWORDS[w]; });
+      var head = tail[tail.length - 1];
+      if (head && idx.byName[head]) return idx.byName[head];
+      if (head && idx.byId[head]) return idx.byId[head];
+      var one = singular(head);
+      if (one !== head) {
+        if (idx.byName[one]) return idx.byName[one];
+        if (idx.byId[one]) return idx.byId[one];
+      }
+    }
     return null;
   }
 
@@ -194,11 +225,13 @@
     var hpMoved = 0;
     var itemsAdded = 0;
 
-    function refuse(c, why) { refused.push({ change: c, reason: why }); }
+    function refuse(c, why, malformed) {
+      refused.push({ change: c, reason: why, malformed: !!malformed });
+    }
 
     changes.forEach(function (rawChange) {
       var c = rawChange;
-      if (!c || !c.type) return refuse(c, 'malformed change');
+      if (!c || !c.type) return refuse(c, 'malformed change', true);
 
       /* Fill in what the model reliably leaves out.
          Observed against the live model on every single well-formed request:
@@ -230,7 +263,7 @@
       if (NEEDS_ACTOR[c.type] && !who) {
         return refuse(c, c.actorId
           ? 'no such character: ' + c.actorId
-          : 'that change has to name whose it is');
+          : 'that change has to name whose it is', true);
       }
 
       switch (c.type) {
@@ -240,7 +273,7 @@
             return refuse(c, 'at most ' + LIMITS.items + ' items per retcon');
           }
           var def = itemDef(c.itemId || c.name);
-          if (!def) return refuse(c, 'no such item: ' + (c.itemId || c.name));
+          if (!def) return refuse(c, 'no such item: ' + (c.itemId || c.name), true);
           var rarity = def.rarity || null;
           if (LIMITS.rarities.indexOf(rarity) < 0) {
             return refuse(c, 'a ' + rarity + ' item is treasure to be found, not remembered');
@@ -255,7 +288,7 @@
         }
         case 'gold': {
           var d = Number(c.delta) || 0;
-          if (!d) return refuse(c, 'no amount given');
+          if (!d) return refuse(c, 'no amount given', true);
           if (Math.abs(goldMoved + d) > LIMITS.gold) {
             return refuse(c, 'a retcon may move at most ' + LIMITS.gold + ' gp');
           }
@@ -269,7 +302,7 @@
         }
         case 'hp': {
           var h = Number(c.delta) || 0;
-          if (!h) return refuse(c, 'no amount given');
+          if (!h) return refuse(c, 'no amount given', true);
           if (Math.abs(hpMoved + h) > LIMITS.hp) {
             return refuse(c, 'a retcon may correct at most ' + LIMITS.hp + ' hit points');
           }
@@ -278,18 +311,18 @@
           return;
         }
         case 'fact':
-          if (!c.text) return refuse(c, 'a fact needs something to say');
+          if (!c.text) return refuse(c, 'a fact needs something to say', true);
           accepted.push(c);
           return;
         case 'relationship':
-          if (!c.fromId || !c.toId) return refuse(c, 'a relationship needs both sides');
+          if (!c.fromId || !c.toId) return refuse(c, 'a relationship needs both sides', true);
           if (!actorOf(state, c.fromId) || !actorOf(state, c.toId)) {
             return refuse(c, 'no such character in that relationship');
           }
           accepted.push(c);
           return;
         case 'flag':
-          if (!c.flag) return refuse(c, 'a flag needs a name');
+          if (!c.flag) return refuse(c, 'a flag needs a name', true);
           accepted.push(c);
           return;
         case 'quest':
@@ -302,16 +335,25 @@
       }
     });
 
+    /* A refusal because the model wrote the change badly is not the same as a
+       refusal because the change was not allowed. Live runs produced both: an
+       hp correction with no amount in it (good faith, malformed) alongside a
+       holy avenger and fifty thousand gold (denied). Treating them alike lost
+       reasonable amendments on a missing field while the protection that
+       matters is only about the denied kind. */
+    var denied = refused.filter(function (r) { return !r.malformed; });
+
     return {
-      /* A proposal whose every change was refused is a REFUSAL, not a
+      /* A proposal whose changes were all DENIED is a refusal, not a
          narrative amendment. Treating those as "narrative only" meant the
          greedy case came back allowed: the sword and the fortune were both
          thrown out, nothing was left, and the summary "Bram has a legendary
          holy avenger and fifty thousand gold" was recorded as settled truth
          and fed to the Dungeon Master as fact from then on. */
-      ok: accepted.length > 0 || (!!proposal.summary && refused.length === 0),
+      ok: accepted.length > 0 || (!!proposal.summary && denied.length === 0),
       accepted: accepted,
       refused: refused,
+      denied: denied,
       /* Purely narrative retcons are legal and common — "we'd have made camp
          by the river" changes nothing mechanically and is still worth
          recording. But it has to be a proposal that never asked for anything

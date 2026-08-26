@@ -418,6 +418,10 @@ async function main() {
          order for a Potion of Healing. */
       ['healing-potion-small', /potion of healing/i],
       ['hooded-lantern', /lantern/i],
+      /* Also live: a vial of ash, and "a couple of extra torches". */
+      ['ash-vial', /vial/i],
+      ['extra-torches', /torch/i],
+      ['spare-candles', /candle/i],
     ];
     ok.forEach(([slug, want]) => {
       const d = Retcon.itemDef(slug);
@@ -427,6 +431,42 @@ async function main() {
 
     t.ok(/legendary/i.test((Retcon.itemDef('holy-avenger') || {}).rarity || ''),
       'a real legendary item is still found \u2014 and refused on rarity, not on spelling');
+  }
+
+  /* ------------------------------------------------------------------ */
+  t.section('a badly written change is not the same as a forbidden one');
+  {
+    /* Live: the model asked to establish that Shen had taken his short rest,
+       and wrote an `hp` change with no amount in it. Good faith, malformed.
+       Treating that like a denial threw the whole reasonable amendment away,
+       while the protection that matters is only ever about denials. */
+    const s = table().state;
+
+    const sloppy = Retcon.validate(s, {
+      summary: 'Bram took his short rest last night.',
+      changes: [{ type: 'hp', actorId: 'bram' }],
+    }, { actorId: 'bram' });
+    t.eq(sloppy.denied.length, 0, 'a missing amount is not a denial');
+    t.eq(sloppy.ok, true,
+      'so the amendment still stands, as a change to the story');
+
+    const greedy = Retcon.validate(s, {
+      summary: 'Bram has a fortune.',
+      changes: [{ type: 'gold', actorId: 'bram', delta: 50000 }],
+    }, { actorId: 'bram' });
+    t.eq(greedy.denied.length, 1, 'but going over the limit IS a denial');
+    t.eq(greedy.ok, false, 'and that still refuses the whole thing');
+
+    const mixed = Retcon.validate(s, {
+      summary: 'Bram had rope, and also a fortune.',
+      changes: [
+        { type: 'item', actorId: 'bram', itemId: 'rope-hempen-50-feet' },
+        { type: 'gold', actorId: 'bram', delta: 50000 },
+      ],
+    }, { actorId: 'bram' });
+    t.eq(mixed.accepted.length, 1, 'a mixed proposal keeps what is allowed');
+    t.eq(mixed.denied.length, 1, 'and refuses what is not');
+    t.eq(mixed.ok, true, 'and goes ahead with the part that stands');
   }
 
   t.done();
