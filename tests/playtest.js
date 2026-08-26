@@ -505,6 +505,22 @@ function expertChangesParty(session, join) {
     Events.commit(s, batch);
     State.setController(s, id, { kind: 'companionPolicy', seatId: null, agent: null });
     State.refreshAllDerived(s);
+
+    /* Someone who turns up mid-fight has to be IN the fight. Without this
+       they stand outside the initiative order and never take a turn until
+       the next encounter begins, which is not "joining the party" in any
+       sense a player would recognise. */
+    if (s.combat && s.combat.active && Array.isArray(s.combat.order)) {
+      const init = (s.actors[id].derivedCache || {}).initiative || 0;
+      const roll = 10 + init;
+      let at = s.combat.order.findIndex(e => (e.initiative != null ? e.initiative : 0) < roll);
+      if (at < 0) at = s.combat.order.length;
+      /* Never ahead of whoever is acting right now: a newcomer must not be
+         handed a turn that has already begun. */
+      if (at <= s.combat.turnIndex) at = s.combat.turnIndex + 1;
+      s.combat.order.splice(at, 0, { id: id, initiative: roll });
+    }
+
     EXPERT.recruited++;
     log('\n  [party] ' + spec.name + ' joins the party (level ' + level + ').');
     return id;
@@ -884,10 +900,17 @@ async function main() {
           } else if (beat % 3 === 2) {
             await expertAmends(session, actorId);
           } else {
-            /* Alternate joining and parting, so both paths are exercised. */
-            const joining = (beat % 6 === 0);
-            const changed = expertChangesParty(session, joining);
-            if (!changed && !joining) log('\n  [party] nobody to part with just now.');
+            /* Someone joins, or someone leaves \u2014 whichever the moment
+               allows. Parting is impossible mid-fight (removing a combatant
+               leaves the initiative order pointing at somebody who no longer
+               exists), so a combat-heavy campaign exercised NEITHER path:
+               every party beat landed during a wave, tried to part, was
+               refused, and did nothing. A whole run reported "companions
+               joined 0, companions parted 0". */
+            const inFight = !!(session.state.combat && session.state.combat.active);
+            let changed = expertChangesParty(session, inFight);
+            if (!changed) changed = expertChangesParty(session, !inFight);
+            if (!changed) log('\n  [party] nobody to add or part with just now.');
             await expertAsks(session, actorId);
           }
         } catch (e) {
