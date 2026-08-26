@@ -26,6 +26,7 @@ const Dispatch = require('../js/engine/dispatch.js');
 const Character = require('../js/engine/character.js');
 const Chargen = require('../js/gen/chargen.js');
 const Combat = require('../js/engine/combat.js');
+const Rules = require('../js/engine/rules.js');
 const Interaction = require('../js/engine/interaction.js');
 const Save = require('../js/engine/save.js');
 const Backend = require('../js/ai/backend.js');
@@ -42,7 +43,7 @@ function parseArgs(argv) {
     seed: 'playtest-' + Date.now().toString(36),
     port: process.env.PORT || 8177,
     label: '', quiet: false, noExport: false, encounter: false, levelAt: 0, waves: 1, startLevel: 0, milestone: false,
-    expert: false, untilLevel: 0, interlude: 6, expertModel: null,
+    expert: false, untilLevel: 0, interlude: 6, expertModel: null, deathPolicy: '',
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -71,6 +72,12 @@ function parseArgs(argv) {
     else if (a === '--until-level') out.untilLevel = parseInt(next(), 10);
     else if (a === '--interlude') out.interlude = parseInt(next(), 10);
     else if (a === '--expert-model') out.expertModel = next();
+    /* Which mortality rules the campaign is played under. A long unattended
+       run to a target level under 'standard' ends the moment the seated
+       character rolls three failed death saves, and then grinds on with the
+       companions, which measures nothing. 'heroic' is a real campaign setting
+       and the honest one for this. */
+    else if (a === '--death-policy') out.deathPolicy = next();
   }
   return out;
 }
@@ -640,6 +647,12 @@ async function main() {
   const seated = seatUp(session, ARGS.seats, ARGS.backend, ARGS.model);
   wire(session);
 
+  if (ARGS.deathPolicy) {
+    session.state.meta = session.state.meta || {};
+    session.state.meta.deathPolicy = ARGS.deathPolicy;
+    log('  death:    ' + ARGS.deathPolicy);
+  }
+
   hr('opening state');
   const d0 = State.digest(session.state);
   log('  location: ' + d0.locationId);
@@ -703,25 +716,62 @@ async function main() {
   }
 
   /** Everyone still standing catches their breath and spends hit dice. */
+  /**
+   * A night's rest between waves.
+   *
+   * Through the engine's own rest rules rather than a hand-rolled heal. The
+   * hand-rolled version put everyone back to three-quarters hit points and
+   * restored NO SPELL SLOTS, so across a long run the cleric emptied out and
+   * the party went into the next wave with no healing at all. That is exactly
+   * how the first campaign ended: "You have no slots left, Keeper", and then
+   * a wipe to four goblins and a wolf. A party that has just cleared a fight
+   * and has time makes camp, and the rules say what that gives back.
+   */
   function restBetweenWaves(session) {
-    const healed = [];
+    const rested = [];
     State.partyIds(session.state).forEach(id => {
       const a = session.state.actors[id];
       if (!a.runtime || a.runtime.dead) return;
-      const before = a.runtime.hp;
-      /* Stabilised-but-down characters come back up at 1, which is what an
-         hour and a bandage buys you. */
-      const target = before <= 0 ? 1 : Math.min(a.runtime.hpMax, Math.round(a.runtime.hpMax * 0.75));
-      if (target <= before) return;
-      const batch = Events.makeBatch({ commandId: 'rest-' + id + '-' + Date.now().toString(36) });
-      if (before <= 0) Events.push(batch, 'revive', { actorId: id, hp: 1 }, a.name + ' is back on their feet.');
-      Events.push(batch, 'hp', { targetId: id, delta: target - Math.max(1, before) },
-        a.name + ' patches themselves up.');
-      Events.push(batch, 'time', { minutes: 60 }, '');
-      Events.commit(session.state, batch);
-      healed.push(a.name);
+
+      const batch = Events.makeBatch({ commandId: 'longrest-' + id + '-' + session.state.revision });
+      /* Someone at zero has to be on their feet before a rest does anything:
+         the rules require at least 1 hit point to benefit from a long rest. */
+      if (a.runtime.hp <= 0) {
+        Events.push(batch, 'revive', { actorId: id, hp: 1 }, a.name + ' is brought round.');
+      }
+      let events = [];
+      try {
+        /* `restoreOnRest` returns { events, type } — not an array. */
+        const rest = Rules.restoreOnRest(a.base, a.progression, a.runtime, 'long', {
+          actorId: id, derived: a.derivedCache,
+        });
+        events = (rest && rest.events) || [];
+      } catch (e) { events = []; }
+      events.forEach(ev => {
+        const payload = Object.assign({}, ev);
+        delete payload.kind;
+        delete payload.seq;
+        Events.push(batch, ev.kind, payload);
+      });
+      Events.push(batch, 'time', { minutes: 480 }, '');
+      try {
+        Events.commit(session.state, batch);
+        rested.push(a.name);
+      } catch (e) { log('  ! rest failed for ' + a.name + ': ' + ((e && e.message) || e)); }
     });
-    if (healed.length) log('  \u2014 the party takes an hour: ' + healed.join(', '));
+    State.refreshAllDerived(session.state);
+    if (rested.length) {
+      log('  \u2014 the party makes camp and takes a long rest: ' + rested.join(', '));
+      log('    ' + State.partyIds(session.state).map(id => {
+        const p = session.state.actors[id];
+        const sc = (p.derivedCache || {}).spellcasting;
+        const slots = sc && sc.slotsRemaining
+          ? Object.keys(sc.slotsRemaining).map(l => sc.slotsRemaining[l]).join('/')
+          : '\u2014';
+        return p.name + ' ' + p.runtime.hp + '/' + ((p.derivedCache || {}).hpMax || p.runtime.hpMax) +
+          ' hp, slots ' + slots;
+      }).join('   '));
+    }
   }
 
   hr('play');
@@ -861,6 +911,23 @@ async function main() {
     const alive = State.partyIds(session.state)
       .filter(id => session.state.actors[id].runtime.hp > 0).length;
     if (!alive) { log('\n  the party is down. Ending the run.'); break; }
+
+    /* If the character we are actually playing is dead for good, the run is
+       over as a test of playing them. Grinding on with the companions looks
+       like progress in the log and measures nothing: the previous run spent
+       seventy turns that way and reported the seated character stuck at a
+       level they could no longer leave. */
+    const deadSeat = seated.filter(id => {
+      const a = session.state.actors[id];
+      return !a || (a.runtime && a.runtime.dead);
+    });
+    if (deadSeat.length === seated.length) {
+      log('\n  ' + deadSeat.map(id => (session.state.actors[id] || {}).name || id).join(', ') +
+        ' is dead, and that is who we came to play. Ending the run.' +
+        (ARGS.deathPolicy === 'heroic' ? '' :
+          '\n  (a campaign played under --death-policy heroic would have left them stable instead)'));
+      break;
+    }
     const foes = State.livingEnemies(session.state).length;
     if (inEncounter && !foes) {
       log('\n  every enemy is down. The fight is over.');
