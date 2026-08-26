@@ -370,4 +370,35 @@ t.section('a round trip can be round-tripped');
     drift.slice(0, 6).map(k => k + ': ' + JSON.stringify(fa[k]) + ' → ' + JSON.stringify(fb[k])).join('; '));
 }
 
+t.section('the pools a class actually spends survive a save');
+/*
+ * Both of these are new state, and new state is exactly what a save quietly
+ * drops. `pactSlotsSpent` is the warlock's whole resource game and
+ * `featuresSpent` is rage, ki, action surge, lay on hands and the rest — a
+ * save that lost either would hand a player back a character with everything
+ * refilled, which looks like generosity and is actually the resource system
+ * not existing.
+ */
+{
+  const sess = busySession();
+  const who = Object.keys(sess.state.actors).filter(
+    id => sess.state.actors[id].side === 'party')[0];
+
+  const b = Events.makeBatch({ commandId: 'pools', actorId: who });
+  Events.push(b, 'pact_slot_spend', { actorId: who, level: 2 }, '');
+  Events.push(b, 'feature_spend', { actorId: who, feature: 'rage' }, '');
+  Events.push(b, 'feature_spend', { actorId: who, feature: 'second_wind' }, '');
+  Events.commit(sess.state, b);
+
+  const rt = sess.state.actors[who].runtime;
+  t.eq(rt.pactSlotsSpent, 1, 'a pact slot is spent before saving');
+  t.eq(rt.featuresSpent.rage, 1, 'and a rage');
+
+  const { loaded } = roundTrip(sess);
+  const back = loaded.state.actors[who].runtime;
+  t.eq(back.pactSlotsSpent, 1, 'the spent pact slot comes back spent');
+  t.eq(back.featuresSpent.rage, 1, 'the spent rage comes back spent');
+  t.eq(back.featuresSpent.second_wind, 1, 'and so does Second Wind');
+}
+
 t.done();
