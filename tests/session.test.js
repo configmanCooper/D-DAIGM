@@ -316,10 +316,40 @@ async function main() {
     }
 
     t.section('typing a turn in your own words');
+    /* Typed text is no longer applied the instant the referee returns it. It
+       is translated first and shown back in the game's own terms — the action,
+       what it costs, the dice about to be rolled — and the player agrees to it
+       or edits it. So this drives the dialog the way a person would. */
     const beforeType = await page.evaluate(() => window.DND.App.session.state.revision);
     await page.click('#say');
     await page.type('#say', 'I look around the chapel for anything worth taking');
     await page.click('#say-btn');
+
+    const dialogUp = await waitFor(page, () => {
+      const m = document.getElementById('modal-confirm');
+      return !!m && !m.hidden && !!m.querySelector('#confirm-go');
+    }, 20000);
+    t.eq(dialogUp, true, 'the game says what it understood before committing anything');
+
+    const shown = await page.evaluate(() => {
+      const m = document.getElementById('modal-confirm');
+      return {
+        said: (m.querySelector('.confirm-said') || {}).textContent || '',
+        action: (m.querySelector('.confirm-action') || {}).textContent || '',
+        hasChoice: !!m.querySelector('#confirm-edit') && !!m.querySelector('#confirm-go'),
+      };
+    });
+    t.ok(/look around the chapel/i.test(shown.said),
+      'it quotes back what you actually typed', '(' + shown.said.slice(0, 70) + ')');
+    t.ok(shown.action.trim().length > 0,
+      'and names the action in the game\u2019s own words', '(' + shown.action + ')');
+    t.eq(shown.hasChoice, true, 'with both a way to agree and a way to change it');
+
+    /* Nothing may have happened yet. */
+    const midway = await page.evaluate(() => window.DND.App.session.state.revision);
+    t.eq(midway, beforeType, 'and nothing is committed while the dialog is up');
+
+    await page.evaluate(() => document.getElementById('confirm-go').click());
     await wait(3000);
 
     const afterType = await page.evaluate(() => {
@@ -330,16 +360,33 @@ async function main() {
         family: last && last.commandId ? true : false,
         beats: last ? last.beats : [],
         inputCleared: document.getElementById('say').value === '',
+        dialogGone: (document.getElementById('modal-confirm') || {}).hidden,
       };
     });
     t.ok(afterType.revision > beforeType, 'free text becomes a real committed turn',
       '(' + beforeType + ' -> ' + afterType.revision + ')');
     t.ok(afterType.beats.length > 0, 'with beats of its own', '(' + afterType.beats[0] + ')');
     t.eq(afterType.inputCleared, true, 'and the composer clears itself');
+    t.eq(afterType.dialogGone, true, 'and the dialog gets out of the way');
 
     await page.screenshot({ path: path.join(SHOTS, 'shot-3-play.png') });
 
     /* ----------------------------------------------------------- panels -- */
+    /* The sheet, inventory, journal and AI seats share one floating panel, and
+       it is closed until asked for — the story has the page now. Open it the
+       way a player does, from the dock. */
+    t.section('the panels open from the dock');
+    const dock = await page.evaluate(() => {
+      const d = document.getElementById('dock');
+      return d ? Array.from(d.querySelectorAll('.dock-btn')).map(b => b.textContent.trim()) : [];
+    });
+    t.ok(dock.length >= 3, 'the dock offers the panels', '(' + dock.join(', ') + ')');
+
+    await page.evaluate(() => window.DND.Windows.open('sheet'));
+    await wait(400);
+    t.eq(await page.evaluate(() => window.DND.Windows.isOpen('sheet')), true,
+      'and the sheet panel opens');
+
     t.section('the character sheet');
     await page.click('#tab-sheet');
     await wait(600);

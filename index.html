@@ -22,48 +22,56 @@
     <button class="chip" id="btn-undo" title="Undo the last committed turn" disabled>↶ Undo</button>
     <button class="chip" id="btn-redo" title="Redo" disabled>↷ Redo</button>
     <button class="chip" id="btn-save" title="Save this session to this browser">Save</button>
-    <button class="chip" id="btn-export" title="Write this session to a file on disk">Export</button>
+    <button class="chip" id="btn-export" title="Download this session as a save file you can keep anywhere">Export</button>
+    <button class="chip" id="btn-transcript" title="Download the story so far as readable text">Transcript</button>
+    <button class="chip" id="btn-load" title="Load a saved game from this browser or from a file">Load</button>
     <button class="chip" id="btn-new" title="Start a new session">New</button>
   </header>
 
   <main id="main">
 
-    <!-- ------------------------------------------------- LEFT: the party -->
-    <section id="party-col" aria-label="Party">
+    <!-- ------------------------------------------------------- THE STORY --
+         The narration is the thing the whole game exists to produce, so it
+         gets the page. Everything else — the sheet, the party, the inventory,
+         the journal, the map — is a panel you open from the dock when you want
+         it and close when you are done. -->
+    <section id="stage" aria-label="Play area">
+      <div id="log" class="log" role="log" aria-live="polite" aria-label="Narrative log"></div>
+
+      <div id="composer">
+        <form id="say-form" autocomplete="off">
+          <label class="sr-only" for="say">What do you do?</label>
+          <input id="say" name="say" placeholder="Describe what you do, or say something in character…" autocomplete="off">
+          <button id="say-btn" type="submit">Act</button>
+        </form>
+        <div id="say-hint" class="hint" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- The dock: one small button per panel. Pressed means open. -->
+    <nav id="dock" aria-label="Panels"></nav>
+
+  </main>
+
+  <!-- Floating panels live here. Each is moved into a window frame by
+       js/ui/windows.js at boot, so every renderer that writes to these ids
+       goes on working exactly as it did in the old fixed layout. -->
+  <div id="windows"></div>
+
+  <!-- Panel contents, hidden until adopted into their windows. -->
+  <div id="panel-source" hidden>
+    <div id="actions-panel">
+      <div id="actionbar" role="group" aria-label="Available actions"></div>
+    </div>
+
+    <div id="party-col" aria-label="Party">
       <h2 class="col-head">Party <span id="death-policy-badge" class="death-badge" hidden></span></h2>
       <div id="party-list"></div>
-    </section>
+    </div>
 
-    <!-- ---------------------------------------------- CENTRE: log / battle -->
-    <section id="centre-col" aria-label="Play area">
+    <div id="battle-view"></div>
 
-      <!-- Narrative play. Hidden while a battle map is showing. -->
-      <div id="narrative-view">
-        <div id="log" class="log" role="log" aria-live="polite" aria-label="Narrative log"></div>
-
-        <div id="composer">
-          <div id="actionbar" role="group" aria-label="Available actions"></div>
-          <form id="say-form" autocomplete="off">
-            <label class="sr-only" for="say">What do you do?</label>
-            <input id="say" name="say" placeholder="Describe what you do, or say something in character…" autocomplete="off">
-            <button id="say-btn" type="submit">Act</button>
-          </form>
-          <div id="say-hint" class="hint" aria-live="polite"></div>
-        </div>
-      </div>
-
-      <!-- Combat takes over the centre. A canvas grid plus a screen-reader
-           table mirror that carries the identical state. -->
-      <div id="battle-view" hidden></div>
-    </section>
-
-    <!-- The drawer handle for narrow screens. Below 960px the context column
-         slides off-screen entirely; without this button the sheet, inventory,
-         journal and AI seats were simply unreachable on a tablet. -->
-    <button type="button" id="context-toggle" aria-controls="context-col" aria-expanded="false">Sheet ▸</button>
-
-    <!-- --------------------------------------------- RIGHT: context panel -->
-    <section id="context-col" aria-label="Character context">
+    <div id="context-col" aria-label="Character context">
       <div id="context-tabs" role="tablist" aria-label="Context panels">
         <button role="tab" id="tab-sheet" aria-controls="pane-sheet" data-tab="sheet" aria-selected="true">Sheet</button>
         <button role="tab" id="tab-inventory" aria-controls="pane-inventory" data-tab="inventory" aria-selected="false">Inventory</button>
@@ -74,9 +82,8 @@
       <div class="pane" id="pane-inventory" role="tabpanel" aria-labelledby="tab-inventory" tabindex="0" hidden></div>
       <div class="pane" id="pane-journal" role="tabpanel" aria-labelledby="tab-journal" tabindex="0" hidden></div>
       <div class="pane" id="pane-watch" role="tabpanel" aria-labelledby="tab-watch" tabindex="0" hidden></div>
-    </section>
-
-  </main>
+    </div>
+  </div>
 </div>
 
 <!-- ------------------------------------------------------- SETUP WIZARD -->
@@ -84,6 +91,10 @@
      be checked without running the page: its first option is always local. -->
 <!-- Someone has died and the table has to decide what that means. -->
   <div class="modal" id="modal-death" role="dialog" aria-modal="true" aria-label="Someone has died" hidden></div>
+
+  <!-- What the Dungeon Master understood you to mean, before any of it is
+       committed. Built by app.js from Preview.forCommand. -->
+  <div class="modal" id="modal-confirm" role="dialog" aria-modal="true" aria-label="Confirm your action" hidden></div>
 
   <div class="modal" id="modal-setup" role="dialog" aria-modal="true" aria-labelledby="setup-title">
   <div class="box" id="setup-box">
@@ -96,7 +107,7 @@
          game wrote saves to localStorage from the first build but never
          offered a way back into them, so Save was a one-way door. -->
     <div class="setup-step" id="setup-step-resume" hidden>
-      <h2>Carry on</h2>
+      <h2>Carry on, or load a save</h2>
       <div id="resume-card"></div>
     </div>
 
@@ -211,6 +222,7 @@
     <!-- What a class feature actually does: the registry keyed by mech.type.
          Loads before character.js, which reads it during derivation. -->
     <script src="js/engine/features.js"></script>
+<script src="js/engine/preview.js"></script>
 <script src="js/engine/character.js"></script>
 <script src="js/engine/rules.js"></script>
 <script src="js/engine/state.js"></script>
@@ -267,6 +279,9 @@
 <script src="js/ui/levelup.js"></script>
 <script src="js/ui/setup.js"></script>
 <script src="js/ui/death.js"></script>
+<!-- The floating-panel manager. Loads before app.js, which defines the panels
+     and boots it once the page is up. -->
+<script src="js/ui/windows.js"></script>
 <script src="js/ui/app.js"></script>
 
 </body>

@@ -52,12 +52,23 @@ async function main() {
     await wait(2500);
 
     /* ------------------------------------------------ nothing to resume -- */
-    t.section('with no save, nothing is offered');
-    const cleanHidden = await page.evaluate(() => {
+    t.section('with no save, only the way in from disk is offered');
+    /* This used to assert the step stayed hidden, which was the bug: the step
+       is the only place a save FILE can be offered, so hiding it whenever this
+       browser held no save meant a player who had exported a game to disk had
+       no route back into it. What must be absent is the Resume card; what must
+       be present is the file loader. */
+    const clean = await page.evaluate(() => {
       const s = document.getElementById('setup-step-resume');
-      return !s || s.hidden;
+      return {
+        stepVisible: !!s && !s.hidden,
+        resumeCard: !!document.getElementById('btn-resume'),
+        importControl: !!document.getElementById('import-save-file'),
+      };
     });
-    t.eq(cleanHidden, true, 'the resume step stays hidden on a first visit');
+    t.eq(clean.resumeCard, false, 'nothing is offered to resume on a first visit');
+    t.eq(clean.stepVisible, true, 'but the step itself is shown');
+    t.eq(clean.importControl, true, 'because it carries the way in from a save file');
 
     /* ------------------------------------------------------ play a bit -- */
     t.section('play, then save');
@@ -197,11 +208,13 @@ async function main() {
     await page.evaluate(() => { window.DND.Save.clearLocal(); });
     await page.reload({ waitUntil: 'networkidle2', timeout: 45000 });
     await wait(2000);
-    const goneNow = await page.evaluate(() => {
-      const s = document.getElementById('setup-step-resume');
-      return !s || s.hidden;
-    });
-    t.eq(goneNow, true, 'a discarded save stops being offered');
+    const goneNow = await page.evaluate(() => ({
+      resumeCard: !!document.getElementById('btn-resume'),
+      importControl: !!document.getElementById('import-save-file'),
+    }));
+    t.eq(goneNow.resumeCard, false, 'a discarded save stops being offered');
+    t.eq(goneNow.importControl, true,
+      'while loading one from disk is still there, because that is a different thing');
 
     t.section('nothing broke along the way');
     t.eq(errors.length, 0, 'no console errors during the whole flow',

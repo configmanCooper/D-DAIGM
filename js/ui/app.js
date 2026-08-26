@@ -46,6 +46,7 @@
 
   function boot() {
     try {
+      definePanels();
       wireChrome();
       reportMissing();
       /* Combat self-registers on load, but be explicit and idempotent so a
@@ -57,6 +58,47 @@
     } catch (e) {
       fatal(e);
     }
+  }
+
+  /**
+   * The panels, and where they start.
+   *
+   * Each `mount` names an element already in the document; the window manager
+   * moves it into a frame, so sheet.js, inventory.js, journal.js, watch.js and
+   * battle.js all go on writing to the same ids they always did.
+   *
+   * Only the party opens by default. The old layout showed everything at once
+   * and left the narration four lines tall, which is the wrong way round: you
+   * read the story continuously and consult a character sheet occasionally.
+   */
+  function definePanels() {
+    var W = DND.Windows;
+    if (!W) return;
+    var vw = window.innerWidth || 1280;
+    var vh = window.innerHeight || 800;
+
+    W.define({
+      id: 'actions', title: 'Actions', dockLabel: 'Actions', icon: '⚡',
+      mount: 'actions-panel', openByDefault: true,
+      initial: {
+        x: 12, y: Math.max(80, vh - 400), w: Math.min(760, vw - 24), h: 260,
+      },
+    });
+    W.define({
+      id: 'party', title: 'Party', dockLabel: 'Party', icon: '👥',
+      mount: 'party-col', openByDefault: true,
+      initial: { x: Math.max(12, vw - 320), y: 96, w: 300, h: Math.min(420, vh - 200) },
+    });
+    W.define({
+      id: 'sheet', title: 'Character sheet', dockLabel: 'Sheet', icon: '📜',
+      mount: 'context-col',
+      initial: { x: Math.max(12, vw - 460), y: Math.min(540, vh - 300), w: 440, h: 400 },
+    });
+    W.define({
+      id: 'battle', title: 'Battle map', dockLabel: 'Map', icon: '⚔',
+      mount: 'battle-view',
+      initial: { x: 20, y: 96, w: Math.min(620, vw - 380), h: Math.min(520, vh - 260) },
+    });
   }
 
   /* A boot or runtime failure becomes a readable panel, never a blank page. */
@@ -169,13 +211,23 @@
         }
         replayTranscript();
       } else {
-        if (DND.Log) DND.Log.system('The table is set. ' + (session.campaign && session.campaign.title ? session.campaign.title + '.' : ''));
-        /* The opening scene puts hostiles in the room. Roll for initiative
-           before anyone is asked to act, so the first turn has an action economy
-           and the monsters are in the order rather than watching from it. */
-        if (DND.Game.ensureEncounter(session) && DND.Log) {
-          DND.Log.system('Roll for initiative.');
-        }
+        /* The opening scene. This used to be two system lines — "The table is
+           set." and "Roll for initiative." — which drops a player who has just
+           built a character into a fight with no world, no place and no idea
+           who is standing next to them. Set the scene first, the way anyone
+           running a game would. */
+        openingScene().then(function () {
+          /* The opening scene puts hostiles in the room. Roll for initiative
+             AFTER the scene has been set, so the fight begins in a place the
+             player has been shown rather than in the dark. */
+          if (DND.Game.ensureEncounter(session) && DND.Log) {
+            DND.Log.system('Roll for initiative.');
+          }
+          renderAll();
+          maybeAutoAdvance();
+        });
+        renderAll();
+        return;
       }
       renderAll();
       // If the opening turn belongs to AI seats, let them go until a human is up.
@@ -183,6 +235,150 @@
     } catch (e) {
       fatal(e);
     }
+  }
+
+  /**
+   * Ask the Dungeon Master to set the scene before anything happens.
+   *
+   * Always resolves — a model that is slow, absent or broken must not leave a
+   * player staring at an empty page, so the offline scene-setter stands in.
+   */
+  function openingScene() {
+    if (!session || !DND.Log) return Promise.resolve();
+    var title = (session.campaign && session.campaign.title) || 'a new session';
+    DND.Log.system('The table is set. ' + title + '.');
+
+    var N = DND.Narrator;
+    if (!N || !N.opening) return Promise.resolve();
+
+    DND.Log.system('The Dungeon Master is setting the scene\u2026');
+    /* The party roster is built by the narrator from the state it already
+       holds. app.js does not read the raw actor table for display, and the one
+       sanctioned door (`layersFor`) covers only human seats, which is not the
+       whole table. */
+    return Promise.resolve(N.opening(session.state, session.store, session.campaign, {
+      locationName: locationName(),
+    })).then(function (res) {
+      /* `narration` takes a PAYLOAD, not a string. Passing the text as the
+         first argument put `undefined` on the page and left a blank entry
+         exactly where the opening scene should have been. */
+      if (res && res.text) {
+        DND.Log.narration({ text: res.text, source: res.source || 'offline' });
+      }
+    }).catch(function () { /* the system lines above are enough to carry on */ });
+  }
+  /* The place, by its readable name rather than its id. */
+  function locationName() {
+    var id = session && session.state && session.state.locationId;
+    if (!id) return null;
+    var locs = (session.campaign && session.campaign.locations) || {};
+    var loc = locs[id] || locs[String(id).toLowerCase()];
+    return (loc && (loc.name || loc.title)) || id;
+  }
+
+  /* ------------------------------------------------- confirm what I meant --
+   *
+   * A typed sentence used to be applied the instant the referee returned it:
+   * the dice were rolled, the action was spent, and the first the player heard
+   * of how their words had been read was the narration afterwards. When the
+   * model read it wrongly — "I swing at the one on the left" landing on the
+   * wrong goblin, or as a Persuasion check — the turn was already gone.
+   *
+   * So the sentence is translated first and shown back in the game's own
+   * terms: this is the action, this is what it costs you, these are the dice
+   * about to be rolled, this is what it spends. Then you agree to it, or you
+   * do not.
+   */
+  function askToConfirm(actorId, text) {
+    setHint('Reading that\u2026');
+    var input = $('say');
+    if (input) input.disabled = true;
+
+    Promise.resolve(DND.Game.interpret(session, actorId, text, {})).then(function (res) {
+      if (input) input.disabled = false;
+      setHint('');
+      if (!res || !res.ok) {
+        setHint('That could not be read: ' + ((res && res.reason) || 'unknown'));
+        return;
+      }
+      if (res.clarify) {
+        setHint(res.clarify);
+        return;
+      }
+      showConfirm(actorId, text, res);
+    }).catch(function (e) {
+      if (input) input.disabled = false;
+      setHint('That could not be read: ' + ((e && e.message) || e));
+    });
+  }
+
+  function showConfirm(actorId, text, res) {
+    var host = $('modal-confirm');
+    if (!host) { commitConfirmed(actorId, text, res); return; }
+    var p = res.preview || {};
+
+    var rows = [];
+    rows.push('<p class="confirm-said">You said: <em>' + esc(text) + '</em></p>');
+    rows.push('<h3 class="confirm-action">' + esc(p.summary || 'An action') + '</h3>');
+
+    if (p.cost) {
+      rows.push('<p class="confirm-cost"><span class="k">Costs</span> ' + esc(p.cost) + '</p>');
+    }
+    if (p.spends && p.spends.length) {
+      rows.push('<p class="confirm-cost"><span class="k">Spends</span> ' +
+        p.spends.map(esc).join(', ') + '</p>');
+    }
+    if (p.rolls && p.rolls.length) {
+      rows.push('<div class="confirm-rolls"><h4>Dice</h4><ul>' +
+        p.rolls.map(function (r) {
+          return '<li><strong>' + esc(r.what) + '</strong> — ' + esc(r.detail) + '</li>';
+        }).join('') + '</ul></div>');
+    }
+    if (p.notes && p.notes.length) {
+      rows.push('<ul class="confirm-notes">' +
+        p.notes.map(function (n) { return '<li>' + esc(n) + '</li>'; }).join('') + '</ul>');
+    }
+    if (p.warnings && p.warnings.length) {
+      rows.push('<ul class="confirm-warn">' +
+        p.warnings.map(function (n) { return '<li>⚠ ' + esc(n) + '</li>'; }).join('') + '</ul>');
+    }
+    if (typeof res.confidence === 'number' && res.confidence < 0.6) {
+      rows.push('<p class="confirm-warn">⚠ The Dungeon Master is not confident it read that ' +
+        'correctly. Check it, or rephrase.</p>');
+    }
+
+    host.innerHTML =
+      '<div class="box confirm-box" role="document">' +
+      '<h2 id="confirm-title">Before you commit</h2>' +
+      rows.join('') +
+      '<div class="confirm-btns">' +
+      '<button type="button" class="ghost" id="confirm-edit">Change what I said</button>' +
+      '<button type="button" id="confirm-go">Do it</button>' +
+      '</div></div>';
+    host.hidden = false;
+    host.setAttribute('aria-labelledby', 'confirm-title');
+
+    var close = function () { host.hidden = true; host.innerHTML = ''; };
+    $('confirm-go').onclick = function () { close(); commitConfirmed(actorId, text, res); };
+    $('confirm-edit').onclick = function () {
+      close();
+      var i = $('say');
+      if (i) { i.value = text; i.focus(); i.select(); }
+    };
+    host.onkeydown = function (ev) {
+      if (ev.key === 'Escape') { close(); var i = $('say'); if (i) i.focus(); }
+    };
+    var go = $('confirm-go');
+    if (go && go.focus) go.focus();
+  }
+
+  /* The player agreed. Apply the command that was actually shown to them —
+     not a fresh parse, which could read the same sentence differently. */
+  function commitConfirmed(actorId, text, res) {
+    var input = $('say');
+    if (DND.Log) DND.Log.player(actorName(actorId), text);
+    if (input) input.value = '';
+    DND.Game.applyCommand(session, res.command, { ctx: ctx() }).then(humanActed);
   }
 
   /**
@@ -666,12 +862,25 @@
 
   /* ---------------------------------------------------- combat view --- */
 
+  /**
+   * Show the battle map when a fight starts.
+   *
+   * It used to REPLACE the narrative view, so the moment initiative was rolled
+   * the story you were reading vanished behind a grid. They are both visible
+   * now: the map is a panel that opens itself when a fight begins and can be
+   * closed, moved or resized like any other.
+   */
   function toggleCombatView() {
     if (!session || !DND.Battle) return;
     var obs = DND.Game.observationFor(session, S.viewerId);
     var inCombat = obs && obs.combat && obs.combat.active;
-    if (inCombat) DND.Battle.show();
-    else DND.Battle.hide();
+    if (inCombat) {
+      DND.Battle.show();
+      if (DND.Windows && !DND.Windows.isOpen('battle')) DND.Windows.open('battle');
+    } else {
+      DND.Battle.hide();
+      if (DND.Windows && DND.Windows.isOpen('battle')) DND.Windows.close('battle');
+    }
   }
 
   /* ============================================================ AI ===== */
@@ -1017,9 +1226,7 @@
       if (!text || !session) return;
       var actorId = actingId();
       if (!actorId) { setHint('It is not a human seat\u2019s turn.'); return; }
-      if (DND.Log) DND.Log.player(actorName(actorId), text);
-      if (input) input.value = '';
-      DND.Game.submitText(session, actorId, text, {}).then(humanActed);
+      askToConfirm(actorId, text);
     };
 
     // context tabs
@@ -1039,46 +1246,42 @@
     bindClick('btn-undo', function () { if (session) { DND.Game.undo(session); afterTurn(); } });    bindClick('btn-redo', function () { if (session) { DND.Game.redo(session); afterTurn(); } });
     bindClick('btn-save', function () { doSave(); });
     bindClick('btn-export', function () { doExport(); });
+    bindClick('btn-transcript', function () { doExportTranscript(); });
+    /* Load reopens the setup wizard, which is where both a browser save and a
+       file on disk are offered. Sending a player back to "New" to find Load
+       was the sort of thing you only forgive in software you wrote yourself. */
+    bindClick('btn-load', function () { DND.Setup && DND.Setup.open(onBegin); });
     bindClick('btn-new', function () { DND.Setup && DND.Setup.open(onBegin); });
+
+    /* The panels only exist once the manager has adopted them. */
+    if (DND.Windows) DND.Windows.boot({ layer: 'windows', dock: 'dock' });
   }
 
   function bindClick(id, fn) { var el = $(id); if (el) el.onclick = fn; }
 
   /* ------------------------------------------------------- the drawer --- */
   /*
-   * Below 960px the context column is translated off-screen and only comes
-   * back when `body.context-open` is set. The stylesheet has always said so,
-   * and there was no button and nothing to set the class — so on a tablet the
-   * character sheet, the inventory, the journal and the AI-seat controls were
-   * all simply unreachable, with no indication they existed.
+   * The narrow-screen drawer is gone, and so is the fixed three-column layout
+   * it existed to rescue. Panels float now, so "unreachable on a tablet" is
+   * answered by the dock rather than by a special case: every panel has a
+   * button, and a window dragged off the edge is clamped back on.
+   *
+   * These remain as no-ops with their old names because the keyboard bindings
+   * and a handful of call sites still reach for them, and because a panel that
+   * has been closed should not be silently reopened by an old code path.
    */
-  function isDrawerLayout() {
-    return typeof window.matchMedia === 'function' &&
-      window.matchMedia('(max-width: 60rem)').matches;
-  }
-
-  function contextOpen() { return document.body.classList.contains('context-open'); }
-
-  function openContext() {
-    document.body.classList.add('context-open');
-    var t = $('context-toggle');
-    if (t) { t.setAttribute('aria-expanded', 'true'); t.textContent = 'Close ✕'; }
-    /* Send focus into the drawer, or a keyboard player opens it and is left
-       with the focus still behind it. */
-    var tab = document.querySelector('#context-tabs [aria-selected="true"]');
-    if (tab && tab.focus) tab.focus();
-  }
-
-  function closeContext() {
-    document.body.classList.remove('context-open');
-    var t = $('context-toggle');
-    if (t) { t.setAttribute('aria-expanded', 'false'); t.textContent = 'Sheet ▸'; }
-  }
-
-  function toggleContext() { if (contextOpen()) closeContext(); else openContext(); }
+  function isDrawerLayout() { return false; }
+  function contextOpen() { return DND.Windows ? DND.Windows.isOpen('sheet') : false; }
+  function openContext() { if (DND.Windows) DND.Windows.open('sheet'); }
+  function closeContext() { if (DND.Windows) DND.Windows.close('sheet'); }
+  function toggleContext() { if (DND.Windows) DND.Windows.toggle('sheet'); }
 
   function selectTab(name) {
     S.view = name;
+    /* Selecting a tab is also a request to see it: the sheet, inventory,
+       journal and AI seats share one window, and asking for the journal while
+       that window is closed used to change a hidden tab and nothing else. */
+    if (DND.Windows && !DND.Windows.isOpen('sheet')) DND.Windows.open('sheet');
     Array.prototype.forEach.call(document.querySelectorAll('#context-tabs [role="tab"]'), function (tab) {
       var on = tab.getAttribute('data-tab') === name;
       tab.setAttribute('aria-selected', on ? 'true' : 'false');
@@ -1097,16 +1300,93 @@
     } catch (e) { if (DND.Log) DND.Log.system('Save failed: ' + (e && e.message)); }
   }
 
+  /**
+   * Export the session to a file.
+   *
+   * Two destinations, because they answer different needs and the button used
+   * to do only the first: the server's `exports/` folder, which is where the
+   * harnesses and the analysis scripts look, and a real browser download, which
+   * is the only way a player gets a file they can put wherever they like — on a
+   * memory stick, in a backup, or into somebody else's copy of the game.
+   *
+   * The download is the part that matters to a person. Writing to the server
+   * silently and calling that "exported" meant the file existed somewhere the
+   * player had never been told about.
+   */
   function doExport() {
     if (!session || !DND.Save) return;
     var meta = { title: session.campaign && session.campaign.title };
-    var fn = DND.Save.exportToServer || DND.Save.saveLocal;
+
+    var blob = null;
+    try { blob = DND.Save.serialize(session, meta); }
+    catch (e) {
+      if (DND.Log) DND.Log.system('Export failed: ' + (e && e.message));
+      return;
+    }
+
+    var name = (DND.Save.suggestedFilename
+      ? DND.Save.suggestedFilename(session, meta)
+      : 'aethertable-save') + '';
+    if (!/\.json$/i.test(name)) name += '.json';
+    var downloaded = downloadFile(name, JSON.stringify(blob, null, 2), 'application/json');
+
+    /* And a copy where the tooling expects one, when a server is there. */
+    var toServer = DND.Save.exportToServer;
+    if (toServer) {
+      try {
+        Promise.resolve(toServer(session, meta)).catch(function () { /* the download is the real one */ });
+      } catch (e) { /* likewise */ }
+    }
+
+    if (DND.Log) {
+      DND.Log.system(downloaded
+        ? 'Exported as ' + name + ' — check your downloads, and keep it anywhere you like.'
+        : 'Exported to the server\u2019s exports folder.');
+    }
+  }
+
+  /**
+   * Hand the browser a file to save.
+   *
+   * An object URL rather than a data URI: a long campaign's save runs to
+   * hundreds of kilobytes and a data URI of that size is refused outright by
+   * some browsers. Revoked on a timer because revoking it immediately can
+   * cancel the download before it starts.
+   */
+  function downloadFile(name, text, mime) {
     try {
-      var r = fn(session, meta);
-      Promise.resolve(r).then(function () {
-        if (DND.Log) DND.Log.system('Session exported.');
-      }).catch(function (e) { if (DND.Log) DND.Log.system('Export failed: ' + (e && e.message)); });
-    } catch (e) { if (DND.Log) DND.Log.system('Export failed: ' + (e && e.message)); }
+      var blob = new Blob([text], { type: (mime || 'text/plain') + ';charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 2000);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** The story so far as readable prose, for anyone who wants to keep it. */
+  function doExportTranscript() {
+    if (!session || !DND.Save || !DND.Save.toMarkdown) return;
+    try {
+      var md = DND.Save.toMarkdown(session, { title: session.campaign && session.campaign.title });
+      var name = (DND.Save.suggestedFilename
+        ? DND.Save.suggestedFilename(session, {}) : 'aethertable-session') + '';
+      name = name.replace(/\.json$/i, '') + '.md';
+      if (downloadFile(name, md, 'text/markdown') && DND.Log) {
+        DND.Log.system('Transcript exported as ' + name + '.');
+      }
+    } catch (e) {
+      if (DND.Log) DND.Log.system('Transcript export failed: ' + (e && e.message));
+    }
   }
 
   /* ============================================================ export = */

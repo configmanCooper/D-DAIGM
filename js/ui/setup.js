@@ -97,62 +97,133 @@
     if (!step || !host) return;
 
     var Save = global.DND && global.DND.Save;
-    if (!Save || !Save.hasLocal || !Save.hasLocal()) { step.hidden = true; return; }
-
-    var peek = null;
-    try { peek = JSON.parse(localStorage.getItem(Save.STORAGE_KEY)); } catch (e) { peek = null; }
-    if (!peek) { step.hidden = true; return; }
-
-    var title = peek.title || (peek.digest && peek.digest.campaign) || peek.campaignId || 'a saved game';
-    var when = peek.savedAt ? new Date(peek.savedAt) : null;
-    var whenText = when && !isNaN(when.getTime())
-      ? when.toLocaleString()
-      : 'at an unrecorded time';
-    var who = (peek.digest && peek.digest.sheets)
-      ? Object.keys(peek.digest.sheets).map(function (k) {
-        return (peek.digest.sheets[k] && peek.digest.sheets[k].name) || k;
-      }).filter(Boolean)
-      : [];
-
     step.hidden = false;
     host.innerHTML = '';
 
-    var card = document.createElement('button');
-    card.className = 'campaign-card resume-card';
-    card.type = 'button';
-    card.id = 'btn-resume';
-    card.innerHTML =
-      '<strong>Resume — ' + esc(String(title)) + '</strong>' +
-      '<span class="sub">Saved ' + esc(whenText) + '.</span>' +
-      (who.length ? '<span class="sub">' + esc(who.join(', ')) + '</span>' : '');
-    card.onclick = resumeGame;
-    host.appendChild(card);
+    /* A saved game in this browser, if there is one. The step used to be
+       hidden outright when there was not, which also hid the only way to bring
+       a save in from a file — so a player who had exported a game to disk had
+       no route back into it at all. */
+    var peek = null;
+    if (Save && Save.hasLocal && Save.hasLocal()) {
+      try { peek = JSON.parse(localStorage.getItem(Save.STORAGE_KEY)); } catch (e) { peek = null; }
+    }
 
-    var discard = document.createElement('button');
-    discard.className = 'ghost';
-    discard.type = 'button';
-    discard.id = 'btn-discard-save';
-    discard.textContent = 'Discard this save and start fresh';
-    discard.onclick = function () {
-      if (Save.clearLocal) Save.clearLocal();
-      renderResume();
+    if (peek) {
+      var title = peek.title || (peek.digest && peek.digest.campaign) || peek.campaignId || 'a saved game';
+      var when = peek.savedAt ? new Date(peek.savedAt) : null;
+      var whenText = when && !isNaN(when.getTime()) ? when.toLocaleString() : 'at an unrecorded time';
+      var who = (peek.digest && peek.digest.sheets)
+        ? Object.keys(peek.digest.sheets).map(function (k) {
+          return (peek.digest.sheets[k] && peek.digest.sheets[k].name) || k;
+        }).filter(Boolean)
+        : [];
+
+      var card = document.createElement('button');
+      card.className = 'campaign-card resume-card';
+      card.type = 'button';
+      card.id = 'btn-resume';
+      card.innerHTML =
+        '<strong>Resume \u2014 ' + esc(String(title)) + '</strong>' +
+        '<span class="sub">Saved ' + esc(whenText) + '.</span>' +
+        (who.length ? '<span class="sub">' + esc(who.join(', ')) + '</span>' : '');
+      card.onclick = resumeGame;
+      host.appendChild(card);
+
+      var discard = document.createElement('button');
+      discard.className = 'ghost';
+      discard.type = 'button';
+      discard.id = 'btn-discard-save';
+      discard.textContent = 'Discard this save and start fresh';
+      discard.onclick = function () {
+        if (Save.clearLocal) Save.clearLocal();
+        renderResume();
+      };
+      host.appendChild(discard);
+    }
+
+    /* Loading a save file from disk. Always offered, whether or not this
+       browser happens to be holding one: a save is a file you can keep, move
+       between machines and hand to somebody else, and until now the game could
+       write one and never read it back. */
+    var importBtn = document.createElement('button');
+    importBtn.className = peek ? 'ghost' : 'campaign-card resume-card';
+    importBtn.type = 'button';
+    importBtn.id = 'btn-import-save';
+    importBtn.innerHTML = peek
+      ? 'Load a save file from disk\u2026'
+      : '<strong>Load a saved game</strong>' +
+        '<span class="sub">Open an exported <code>.json</code> save from anywhere on this machine.</span>';
+    importBtn.onclick = function () { if (fileInput) fileInput.click(); };
+    host.appendChild(importBtn);
+
+    var fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.id = 'import-save-file';
+    fileInput.accept = 'application/json,.json';
+    fileInput.style.display = 'none';
+    fileInput.onchange = function () {
+      var f = fileInput.files && fileInput.files[0];
+      if (f) importSaveFile(f);
+      fileInput.value = '';
     };
-    host.appendChild(discard);
+    host.appendChild(fileInput);
+
+    var note = document.createElement('p');
+    note.className = 'hint';
+    note.id = 'import-status';
+    note.textContent = '';
+    host.appendChild(note);
   }
 
-  function resumeGame() {
+  /**
+   * Read a save file the player has chosen and start it.
+   *
+   * Everything that can go wrong with somebody else's file goes wrong here —
+   * the wrong file entirely, a truncated download, a save from a newer build —
+   * so each failure gets its own sentence rather than a silent nothing.
+   */
+  function importSaveFile(file) {
     var Save = global.DND && global.DND.Save;
+    var status = document.getElementById('import-status');
+    var say = function (msg, bad) {
+      if (!status) return;
+      status.textContent = msg;
+      status.className = bad ? 'hint bad' : 'hint';
+    };
+    if (!Save || !Save.deserialize) { say('The save system is not loaded.', true); return; }
+
+    say('Reading ' + file.name + '\u2026');
+    var reader = new FileReader();
+    reader.onerror = function () { say('That file could not be read.', true); };
+    reader.onload = function () {
+      var blob;
+      try { blob = JSON.parse(String(reader.result)); }
+      catch (e) { say('That is not a save file \u2014 it is not even JSON.', true); return; }
+
+      var loaded;
+      try { loaded = Save.deserialize(blob, {}); }
+      catch (e) {
+        say((e && e.message) || 'That save could not be loaded.', true);
+        return;
+      }
+      if (!loaded || !loaded.state) { say('That save has no game in it.', true); return; }
+      beginFromLoaded(loaded);
+    };
+    reader.readAsText(file);
+  }
+
+  /**
+   * Start playing a save, whatever it was read from.
+   *
+   * Extracted from `resumeGame` when loading from a file arrived: the browser
+   * slot and a file on disk deserialise to exactly the same thing, and having
+   * two copies of this would guarantee they drifted.
+   */
+  function beginFromLoaded(loaded) {
     var Game = global.DND && global.DND.Game;
     var box = document.getElementById('setup-validation');
-    if (!Save || !Game) return;
-
-    var loaded;
-    try { loaded = Save.loadLocal(); }
-    catch (e) { loaded = null; }
-    if (!loaded) {
-      if (box) { box.className = 'validation'; box.textContent = 'That save could not be read.'; }
-      return;
-    }
+    if (!Game) return;
 
     /* Prefer the campaign the session recorded — a generated sandbox names
        itself, and matching only on the static list threw that away. */
@@ -170,7 +241,7 @@
        shape is a definition, and only where you ARE was ever saved. */
     session.locations = (campaign && campaign.locations) || null;
     session.questDefs = questDefsFor(campaign && campaign.id);
-    if (global.DND.Game.settle) global.DND.Game.settle(session);
+    if (Game.settle) Game.settle(session);
     /* Carry the DM's working memory across, or the model resumes with no idea
        what it has already narrated and repeats the opening scene. */
     if (loaded.session) {
@@ -179,6 +250,7 @@
       session.summaries = loaded.session.summaries || [];
     }
 
+    if (box) { box.className = 'validation'; box.textContent = ''; }
     close();
     if (onBeginCb) {
       onBeginCb(session, {
@@ -191,6 +263,21 @@
         warnings: loaded.warnings || [],
       });
     }
+  }
+
+  function resumeGame() {
+    var Save = global.DND && global.DND.Save;
+    var box = document.getElementById('setup-validation');
+    if (!Save) return;
+
+    var loaded;
+    try { loaded = Save.loadLocal(); }
+    catch (e) { loaded = null; }
+    if (!loaded) {
+      if (box) { box.className = 'validation'; box.textContent = 'That save could not be read.'; }
+      return;
+    }
+    beginFromLoaded(loaded);
   }
 
   function renderCampaigns() {
@@ -648,6 +735,12 @@
     if (gmBtn) gmBtn.onclick = function () {
       var B = Backstory();
       if (!B) return;
+      /* The backend is configured when the GAME begins, and the character
+         builder runs before that — so `Backend.available()` was false for the
+         whole of setup and "Ask the GM to rewrite it" always fell back to a
+         seed, however good a Dungeon Master the player had just chosen. Tell
+         it what they picked, now, before asking. */
+      var chosen = useChosenDm();
       gmBtn.disabled = true;
       if (status) status.textContent = 'The GM is writing…';
       B.generate(backstorySpecFor(seat), { rng: newRng() }).then(function (res) {
@@ -655,11 +748,38 @@
         b.backstorySource = (res && res.source) || 'gm';
         var ta = host.querySelector('[data-b-text="backstory"]');
         if (ta) ta.value = b.backstory;
-        if (status) status.textContent = res && res.source === 'seed' ? 'No model available — took a seed instead.' : 'Written by the GM.';
+        if (status) {
+          status.textContent = res && res.source === 'seed'
+            ? (chosen
+              ? 'The Dungeon Master could not be reached \u2014 took a seed instead.'
+              : 'No Dungeon Master chosen yet \u2014 took a seed instead. Pick one above.')
+            : 'Written by the GM.';
+        }
         gmBtn.disabled = false;
         gmBtn.textContent = 'Ask the GM to rewrite it';
       });
     };
+  }
+
+  /**
+   * Point the AI backend at whatever Dungeon Master the wizard has selected.
+   *
+   * Returns whether there is one at all, so the caller can tell "the model
+   * failed" from "you have not chosen a model" — two very different messages
+   * for a player staring at a button that did nothing.
+   */
+  function useChosenDm() {
+    var el = document.getElementById('dm-model');
+    var model = (el && el.value) || '';
+    var B = global.DND && global.DND.Backend;
+    if (!B || !B.configure) return false;
+    if (!model) { B.configure({ kind: 'offline', model: null }); return false; }
+    if (model.indexOf('copilot:') === 0) {
+      B.configure({ kind: 'copilot', model: model.slice(8) });
+    } else {
+      B.configure({ kind: 'ollama', model: model });
+    }
+    return true;
   }
 
   function backstorySpecFor(seat) {

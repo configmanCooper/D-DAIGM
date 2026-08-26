@@ -249,4 +249,62 @@ t.section('every script the page loads is actually in the repository');
   }
 }
 
+t.section('every way in and out of a save is actually wired up');
+/*
+ * The game could write a save file and had no way to read one back: the
+ * "Carry on" step was hidden outright whenever this browser held no save, and
+ * that step was the only place a file could have been offered. Export wrote to
+ * the server's exports folder and told the player "Session exported" without
+ * saying where, so the file existed somewhere they had never been told about.
+ */
+{
+  const need = ['btn-save', 'btn-export', 'btn-transcript', 'btn-load', 'btn-new'];
+  need.forEach(id => {
+    t.ok(html.indexOf('id="' + id + '"') >= 0,
+      'index.html has ' + id);
+  });
+
+  const app = read('js/ui/app.js');
+  need.forEach(id => {
+    t.ok(new RegExp("bindClick\\('" + id + "'").test(app),
+      'and app.js binds a handler to ' + id);
+  });
+
+  /* Export has to reach the player, not only the server. */
+  t.ok(/downloadFile\(/.test(app),
+    'exporting downloads a file rather than only writing to the server');
+  t.ok(/createObjectURL/.test(app),
+    'and does it with an object URL, which survives a large save');
+
+  /* And the setup screen has to offer a way in from disk. */
+  const setup = read('js/ui/setup.js');
+  t.ok(/import-save-file/.test(setup), 'the setup screen has a file input for a save');
+  t.ok(/accept = 'application\/json,\.json'/.test(setup), 'accepting a .json save');
+  t.ok(/function importSaveFile/.test(setup), 'and a reader for it');
+  t.ok(/function beginFromLoaded/.test(setup),
+    'sharing one path with Resume, so a browser save and a file cannot drift apart');
+  t.eq(/step\.hidden = true; return;/.test(setup), false,
+    'and the step is never hidden outright, which is what hid the only way in');
+}
+
+t.section('the backstory writer is told which Dungeon Master was chosen');
+/*
+ * `Backend.configure` was called in `onBegin` — when the GAME starts — and the
+ * character builder runs before that. So `Backend.available()` was false for
+ * the whole of setup and "Ask the GM to rewrite it" always fell back to a
+ * canned seed, however good a model the player had just chosen. Reported live
+ * as "No model available", which is untrue and unhelpful in the same breath.
+ */
+{
+  const setup = read('js/ui/setup.js');
+  t.ok(/function useChosenDm/.test(setup),
+    'setup can point the backend at the selected Dungeon Master');
+  t.ok(/useChosenDm\(\)/.test(setup),
+    'and the backstory button does so before asking');
+  t.ok(/No Dungeon Master chosen yet/.test(setup),
+    'and distinguishes "you picked none" from "the model failed"');
+  t.ok(/could not be reached/.test(setup),
+    'which is a different sentence from the other case');
+}
+
 t.done();

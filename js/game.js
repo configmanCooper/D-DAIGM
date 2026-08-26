@@ -33,6 +33,7 @@
   var Mortality = (global.DND && global.DND.Mortality) || req('./engine/mortality.js');
   var Combat = (global.DND && global.DND.Combat) || req('./engine/combat.js');
   var Prepare = (global.DND && global.DND.Prepare) || req('./engine/prepare.js');
+  var Preview = (global.DND && global.DND.Preview) || req('./engine/preview.js');
   var RNG = (global.DND && global.DND.RNG) || (req('./rng.js') || {}).RNG;
 
   function createSession(spec) {
@@ -336,6 +337,52 @@
       session.busy = false;
       emit(session, 'error', { where: 'submitText', error: String((e && e.message) || e) });
       return { ok: false, reason: String((e && e.message) || e) };
+    });
+  }
+
+  /**
+   * Read a sentence into a command WITHOUT doing it.
+   *
+   * The confirmation step needs the parse and nothing else: no dice, no state,
+   * no action spent. `submitText` used to be the only way in, and it committed
+   * the moment the referee returned — so the first a player heard about how
+   * their sentence had been read was the narration afterwards, by which time
+   * the turn was gone and the model's misreading was already history.
+   *
+   * Deliberately does not set `session.busy`: nothing has happened yet, and
+   * holding the session while a player reads a dialog would block the table.
+   */
+  function interpret(session, actorId, text, opts) {
+    opts = opts || {};
+    var ctx = optionsFor(session, actorId);
+    var actor = session.state.actors[actorId];
+
+    return Referee.parse(text, ctx.observation, ctx.options, {
+      actorId: actorId,
+      actorName: actor && actor.name,
+      sessionId: session.state.sessionId,
+      stateRevision: session.state.revision,
+      turnEpoch: session.state.turnEpoch,
+      source: opts.source || 'human',
+      inCombat: !!(session.state.combat && session.state.combat.active),
+      signal: opts.signal,
+    }).then(function (parsed) {
+      var preview = null;
+      if (Preview && Preview.forCommand) {
+        try {
+          preview = Preview.forCommand(session.state, actorId, parsed.command, sceneCtx(session));
+        } catch (e) { preview = null; }
+      }
+      return {
+        ok: true,
+        command: parsed.command,
+        confidence: parsed.confidence,
+        clarify: parsed.command.needsClarification ? parsed.command.clarificationQuestion : null,
+        preview: preview,
+        utterance: text,
+      };
+    }).catch(function (e) {
+      return { ok: false, reason: String((e && e.message) || e), utterance: text };
     });
   }
 
@@ -1437,6 +1484,7 @@
     seatTheInitiative: seatTheInitiative,
     settle: settle,
     submitText: submitText,
+    interpret: interpret,
     applyCommand: applyCommand,
     narrateBatch: narrateBatch,
     partySummary: partySummary,

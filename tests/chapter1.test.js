@@ -166,62 +166,72 @@ async function main() {
     /* ----------------------------------------- the narrow-screen drawer -- */
     t.section('the character sheet is reachable on a narrow screen');
     /*
-     * Below 960px the context column is translated off-screen and only comes
-     * back when `body.context-open` is set. The stylesheet said so from the
-     * first build; there was no button and nothing set the class, so the
-     * sheet, the inventory, the journal and the AI-seat controls were simply
-     * unreachable on a tablet, with no sign that they existed.
+     * The tablet drawer is gone, and so is the fixed three-column layout it
+     * existed to rescue. Panels float now and every one of them has a dock
+     * button, so "unreachable on a tablet" is answered by the dock rather than
+     * by a special case — and a window dragged off a narrow screen is clamped
+     * back onto it instead of being lost.
      *
-     * Then the handle itself was invisible: its base `display: none` was
-     * declared BELOW the media query that reveals it, and at equal specificity
-     * the later rule wins.
+     * What still has to be true is the thing the old test was really about: on
+     * a tablet, a player can reach the character sheet, and it has their
+     * character in it.
      */
     await page.setViewport({ width: 820, height: 900 });
     await startCampaign(page, 'sandbox');
 
-    const drawer = await page.evaluate(() => {
-      const t = document.getElementById('context-toggle');
-      const col = document.getElementById('context-col');
-      if (!t || !col) return { error: 'no toggle or column' };
-      const bx = t.getBoundingClientRect();
+    const shut = await page.evaluate(() => {
+      const dock = document.getElementById('dock');
+      const btn = dock && dock.querySelector('[data-win="sheet"]');
+      if (!btn) return { error: 'no dock button for the sheet' };
+      const bx = btn.getBoundingClientRect();
       const top = document.elementFromPoint(bx.left + bx.width / 2, bx.top + bx.height / 2);
       return {
-        display: getComputedStyle(t).display,
-        receivesClick: top === t || t.contains(top),
-        colOffScreen: col.getBoundingClientRect().left >= window.innerWidth,
+        visible: getComputedStyle(btn).display !== 'none',
+        receivesClick: top === btn || btn.contains(top),
+        open: window.DND.Windows.isOpen('sheet'),
+        pressed: btn.getAttribute('aria-pressed'),
       };
     });
-    t.eq(drawer.error, undefined, 'the drawer handle exists', drawer.error || '');
-    t.ok(drawer.display !== 'none', 'and is visible at tablet width',
-      '(' + drawer.display + ')');
-    t.eq(drawer.receivesClick, true, 'and nothing is covering it');
-    t.eq(drawer.colOffScreen, true, 'the panel starts off-screen, as designed');
+    t.eq(shut.error, undefined, 'the dock offers the sheet at tablet width', shut.error || '');
+    t.eq(shut.visible, true, 'and its button is visible');
+    t.eq(shut.receivesClick, true, 'and nothing is covering it');
+    t.eq(shut.open, false, 'the panel starts closed, so the story has the page');
+    t.eq(shut.pressed, 'false', 'and says so to a screen reader');
 
-    const handle = await page.$('#context-toggle');
-    if (handle) await handle.click();
+    const btn = await page.$('#dock [data-win="sheet"]');
+    if (btn) await btn.click();
     await wait(500);
     const open = await page.evaluate(() => {
-      const col = document.getElementById('context-col');
-      const b = col.getBoundingClientRect();
+      const win = document.getElementById('win-sheet');
+      const b = win.getBoundingClientRect();
       return {
-        onScreen: b.left < window.innerWidth && b.right > 0,
-        expanded: document.getElementById('context-toggle').getAttribute('aria-expanded'),
+        onScreen: b.left < window.innerWidth && b.right > 0 &&
+          b.top < window.innerHeight && b.bottom > 0,
+        pressed: document.querySelector('#dock [data-win="sheet"]').getAttribute('aria-pressed'),
         sheetText: (document.getElementById('pane-sheet') || {}).textContent || '',
+        hasChrome: !!win.querySelector('[data-act="min"]') &&
+          !!win.querySelector('[data-act="max"]') &&
+          !!win.querySelector('[data-act="close"]'),
       };
     });
-    t.eq(open.onScreen, true, 'clicking it brings the panel in');
-    t.eq(open.expanded, 'true', 'and says so to a screen reader');
+    t.eq(open.onScreen, true, 'clicking it brings the panel onto the screen');
+    t.eq(open.pressed, 'true', 'and says so to a screen reader');
     t.ok(/STR|Strength/i.test(open.sheetText), 'with the character sheet actually in it');
+    t.eq(open.hasChrome, true, 'and it can be rolled up, maximised or closed');
 
     /* Escape must close it, or a keyboard player is trapped behind it. */
-    await page.keyboard.press('Escape');
+    await page.evaluate(() => {
+      const win = document.getElementById('win-sheet');
+      win.focus();
+      win.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
     await wait(400);
     const closed = await page.evaluate(() => ({
-      expanded: document.getElementById('context-toggle').getAttribute('aria-expanded'),
-      open: document.body.classList.contains('context-open'),
+      open: window.DND.Windows.isOpen('sheet'),
+      pressed: document.querySelector('#dock [data-win="sheet"]').getAttribute('aria-pressed'),
     }));
     t.eq(closed.open, false, 'and Escape closes it again');
-    t.eq(closed.expanded, 'false', 'saying so too');
+    t.eq(closed.pressed, 'false', 'saying so too');
   } finally {
     await browser.close();
   }

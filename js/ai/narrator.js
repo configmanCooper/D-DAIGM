@@ -411,6 +411,152 @@
   }
 
   /**
+   * The opening scene: where you are, who you are, and what is in front of you.
+   *
+   * The game used to begin with two system lines — "The table is set. A matter
+   * at the Ashford toll bridge." and then "Roll for initiative." — and drop
+   * straight into a fight. A player who had just built a character was given
+   * no world, no place, no sense of who was standing next to them and no idea
+   * why anyone was drawing steel. That is not how a session starts at a table;
+   * a Dungeon Master sets a scene first.
+   *
+   * Written through the same knowledge-gated path as every other narration, so
+   * it can describe only what the party could actually perceive: no secrets, no
+   * foreshadowing of anything the campaign has not revealed, no naming of
+   * something nobody has seen.
+   */
+  function opening(state, store, campaign, opts) {
+    opts = opts || {};
+    /* The roster is built HERE rather than passed in from the UI. app.js has a
+       standing rule that it never reads `state.actors` for display — the one
+       sanctioned door is `App.layersFor`, and that deliberately covers only
+       human-controlled seats, which is not the party. The narrator is engine
+       side and already receives the state and the knowledge store, so this is
+       where the question belongs. */
+    var party = opts.party || partyRoster(state);
+    var built = Prompt.forNarration(state, store, campaign, [], Object.assign({}, opts, {
+      party: party,
+      maxWords: opts.maxWords || 220,
+      sentences: 10,
+      paragraphs: 3,
+    }));
+
+    var roster = party.map(function (p) {
+      return '- ' + p.name + (p.race || p.klass
+        ? ' (' + [p.race, p.klass].filter(Boolean).join(' ') +
+          (p.level ? ', level ' + p.level : '') + ')'
+        : '') +
+        (p.backstory ? ' — their own history: ' + p.backstory : '');
+    }).join('\n');
+
+    var stage = built.stage +
+      '\n\n[NOW — THE OPENING OF THE SESSION]\n' +
+      'This is the first thing anyone reads. Nobody has been told anything yet.\n' +
+      'Write three short paragraphs:\n' +
+      '1. The world and the moment — where this is, what kind of place it is, the ' +
+      'hour and the weather, in a couple of sentences. Concrete and physical.\n' +
+      '2. The party, by name. One clause each, describing how they LOOK and carry ' +
+      'themselves — not their statistics. Use these people and no others:\n' +
+      roster + '\n' +
+      '3. What is in front of them right now, and why it matters enough to stop for.\n\n' +
+      'Rules: reveal nothing the party has not learned. No prophecy, no hints at ' +
+      'what is really going on, no villain the party has not met. Do not mention ' +
+      'dice, rules, levels, hit points or classes. Do not tell anyone what they ' +
+      'feel or decide. End on the situation, not on a question.';
+
+    if (!Backend.available()) {
+      return Promise.resolve({
+        text: offlineOpening(state, campaign, party, built.ctx),
+        source: 'offline', report: { issues: ['fallback:no backend'] },
+      });
+    }
+
+    return Backend.chat({
+      profile: 'narrator',
+      messages: [{ role: 'system', content: built.system }, { role: 'user', content: stage }],
+      numPredict: 420,
+      onToken: opts.onToken,
+      signal: opts.signal,
+    }).then(function (res) {
+      var gated = applyGates(res.text, {
+        playerCharacters: built.ctx.playerCharacters,
+        mustNotName: built.ctx.mustNotName,
+        recent: [],
+        maxWords: 320,
+      });
+      var text = gated.text;
+      if (!text || text.length < 60) {
+        return { text: offlineOpening(state, campaign, party, built.ctx), source: 'offline',
+          report: { issues: ['fallback:too short'] } };
+      }
+      return { text: text, source: res.kind, report: gated.report };
+    }).catch(function () {
+      return { text: offlineOpening(state, campaign, party, built.ctx), source: 'offline',
+        report: { issues: ['fallback:error'] } };
+    });
+  }
+
+  /**
+   * Everyone at the table, as the Dungeon Master would describe them: name,
+   * what they visibly are, and whatever history the player wrote for them.
+   */
+  function partyRoster(state) {
+    return Object.keys((state && state.actors) || {})
+      .filter(function (id) {
+        var a = state.actors[id];
+        return a && a.side === 'party' && a.runtime && !a.runtime.dead;
+      })
+      .map(function (id) {
+        var a = state.actors[id];
+        var base = a.base || {};
+        var cls = (base.classes && base.classes[0] && base.classes[0].classId) || null;
+        return {
+          name: a.name || id,
+          race: base.subraceId || base.raceId || null,
+          klass: cls,
+          level: (a.derivedCache && a.derivedCache.level) || null,
+          /* A backstory the player wrote is theirs, and the Dungeon Master was
+             given it for exactly this moment. */
+          backstory: (base.backstory || '').slice(0, 240) || null,
+        };
+      });
+  }
+
+  /**
+   * An opening with no model at all.
+   *
+   * Still a scene rather than a stub: the place, the cast and what is waiting.
+   * A player running offline deserves to know where they are standing.
+   */
+  function offlineOpening(state, campaign, party, ctx) {
+    var where = (ctx && ctx.locationName) || (state && state.locationId) || 'somewhere unmarked';
+    var title = (campaign && campaign.title) || 'this business';
+    var lines = [];
+
+    lines.push('You are at ' + where + '. ' +
+      (campaign && campaign.premise ? campaign.premise : 'The matter at hand is ' + title + '.'));
+
+    if (party.length) {
+      var who = party.map(function (p) {
+        var bits = [p.name];
+        var kind = [p.race, p.klass].filter(Boolean).join(' ');
+        if (kind) bits.push('the ' + kind.toLowerCase());
+        return bits.join(', ');
+      });
+      lines.push('With you: ' + who.join('; ') + '.');
+    }
+
+    var foes = (ctx && ctx.enemies) || [];
+    if (foes.length) {
+      lines.push('Ahead of you: ' + foes.map(function (e) { return e.name; }).join(', ') +
+        '. Nobody has moved yet.');
+    } else {
+      lines.push('Nothing is threatening you yet. What you do next is yours to choose.');
+    }
+    return lines.join('\n\n');
+  }
+
+  /**
    * A single NPC line, used when the DM is voicing one character rather than
    * describing a scene. Same gates, shorter budget.
    */
@@ -466,6 +612,7 @@
     correctionFor: correctionFor,
     narrate: narrate,
     speak: speak,
+    opening: opening,
   };
 
   global.DND = global.DND || {};

@@ -124,7 +124,7 @@ button { cursor: pointer; }
 .chip:hover:not(:disabled) { border-color: var(--gold-dim); background: #322915; }
 .chip:disabled { opacity: 0.45; cursor: not-allowed; }
 
-#main { display: flex; flex: 1 1 auto; min-height: 0; }
+#main { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 
 .col-head {
   font-family: var(--sans); font-size: 0.72rem; letter-spacing: 0.18em;
@@ -132,51 +132,142 @@ button { cursor: pointer; }
   margin: 0; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--line);
 }
 
-/* left */
-#party-col {
-  /* Narrower than it was (15–19rem): with a single-seat party it reserved a
-     wide column, held one card and left several hundred pixels of empty black
-     beside it, while squeezing the map and the log that needed the room. */
-  flex: 0 0 clamp(12rem, 16vw, 15rem); display: flex; flex-direction: column;
-  background: var(--bg-2); border-right: 1px solid var(--line); min-height: 0;
+/* ------------------------------------------------------------- the stage --
+   The narration fills the page. It used to be a strip between the battle map
+   above it and the action bar below, four or five lines tall — for the thing
+   the entire game exists to produce. Everything else floats over it now, on
+   request, and can be moved out of the way. */
+#stage {
+  flex: 1 1 auto; display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
 }
-#party-list { overflow-y: auto; padding: 0.6rem; min-height: 0; }
 
-/* centre */
-#centre-col { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-#narrative-view { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
-#battle-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+/* Panels that have not been adopted into a window yet must not flash on the
+   page during boot. */
+#panel-source { display: none; }
 
-/* In a fight the map is the primary object, so it takes the top of the column
-   and the log yields — but the controls stay put. Hiding the narrative view
-   wholesale, as this used to, took the action bar, the composer and End turn
-   away at exactly the moment a player needs them.
-
-   `overflow: hidden` matters: without it the panel's contents ignored the
-   46vh cap and the map's legend row printed straight over the first lines of
-   the log beneath it. The canvas wrap scrolls internally instead. */
-body.in-combat #battle-view {
-  /* The tokens are legible because `fitCell` sizes from WIDTH, not because
-     the panel is tall — so this can stay modest and leave the log something
-     to read in. At 56vh the log was a clipped two-line sliver. */
-  order: -1; flex: 0 0 auto; max-height: 46vh; overflow: hidden;
-  border-bottom: 1px solid var(--line);
-}
-body.in-combat #log { flex: 1 1 auto; min-height: 9rem; }
-
-/* On a short window the map's 46vh, the log's minimum and a tall action bar
-   together overflowed the column, pushing the composer off the bottom of the
-   screen. Give the map less of a short screen — it is still the largest thing
-   in the column, and everything stays reachable without scrolling the page. */
-@media (max-height: 820px) {
-  body.in-combat #battle-view { max-height: 34vh; }
-  body.in-combat #log { min-height: 4rem; }
-  #actionbar { max-height: 26vh; }
-}
+#party-col { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+#party-list { overflow-y: auto; padding: 0.6rem; min-height: 0; flex: 1 1 auto; }
+#battle-view { min-height: 0; height: 100%; display: flex; flex-direction: column; }
 
 .log {
   flex: 1 1 auto; overflow-y: auto; min-height: 0;
-  padding: 1rem 1.4rem; background: var(--bg);
+  padding: 1.2rem clamp(1.4rem, 6vw, 5rem); background: var(--bg);
+  /* A comfortable measure. Full-bleed prose across a wide monitor is a wall
+     of text nobody reads; this is the width a book uses, centred. */
+  font-size: 1.02rem; line-height: 1.65;
+}
+.log > * { max-width: 46rem; margin-left: auto; margin-right: auto; }
+
+/* --------------------------------------------------------------- the dock --
+   One small button per panel, along the bottom. Pressed means open. */
+#dock {
+  flex: 0 0 auto; display: flex; gap: 0.4rem; align-items: center;
+  padding: 0.4rem 0.7rem; background: var(--panel);
+  border-top: 1px solid var(--line); flex-wrap: wrap;
+}
+.dock-btn {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  background: var(--panel-2); border: 1px solid var(--line-2); color: var(--ink-dim);
+  padding: 0.28rem 0.6rem; border-radius: var(--radius);
+  font-family: var(--sans); font-size: 0.78rem; cursor: pointer;
+  transition: border-color .12s ease, color .12s ease, background .12s ease;
+}
+.dock-btn:hover { border-color: var(--gold); color: var(--ink); }
+.dock-btn.on {
+  border-color: var(--gold); color: var(--gold-bright);
+  background: color-mix(in srgb, var(--gold) 14%, var(--panel-2));
+}
+/* Colour alone must not carry the state. */
+.dock-btn.on::before { content: '● '; font-size: 0.6em; }
+.dock-btn.ghost { opacity: 0.7; margin-left: auto; }
+.dock-icon { font-size: 0.95em; }
+
+/* ------------------------------------------------------------- windows --- */
+#windows {
+  position: fixed; inset: 0; pointer-events: none; z-index: 30;
+}
+.win {
+  position: absolute; pointer-events: auto;
+  display: flex; flex-direction: column;
+  background: var(--bg-2); border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  box-shadow: 0 1.4rem 3rem rgba(0, 0, 0, 0.55);
+  min-width: 16rem; overflow: hidden;
+}
+.win[hidden] { display: none; }
+.win.dragging { opacity: 0.94; }
+.win.maximised { border-radius: 0; }
+
+.win-bar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.35rem 0.4rem 0.35rem 0.7rem;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  cursor: grab; user-select: none; touch-action: none;
+}
+.win.dragging .win-bar { cursor: grabbing; }
+.win-title {
+  flex: 1 1 auto; min-width: 0;
+  font-family: var(--sans); font-size: 0.74rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ink-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.win-btns { flex: 0 0 auto; display: flex; gap: 0.15rem; }
+.win-btn {
+  background: transparent; border: 1px solid transparent; color: var(--ink-dim);
+  width: 1.6rem; height: 1.5rem; border-radius: 4px;
+  font-size: 0.85rem; line-height: 1; cursor: pointer;
+}
+.win-btn:hover { border-color: var(--line-2); color: var(--ink); background: var(--panel-2); }
+.win-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+
+.win-body { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.win.minimised .win-body { display: none; }
+.win.minimised .win-grip { display: none; }
+
+.win-grip {
+  position: absolute; right: 0; bottom: 0; width: 1rem; height: 1rem;
+  cursor: nwse-resize; touch-action: none;
+  background:
+    linear-gradient(135deg, transparent 0 50%, var(--line-2) 50% 60%, transparent 60% 70%,
+      var(--line-2) 70% 80%, transparent 80%);
+}
+
+/* ---------------------------------------------- confirm what I meant --
+   The translation of a typed sentence into the game's own terms, shown before
+   anything is rolled or spent. */
+.confirm-box { max-width: 34rem; }
+.confirm-said { color: var(--ink-dim); font-size: 0.9rem; margin: 0 0 0.8rem; }
+.confirm-said em { color: var(--ink); font-style: italic; }
+.confirm-action {
+  font-family: var(--serif); color: var(--gold-bright);
+  font-size: 1.25rem; margin: 0 0 0.7rem;
+}
+.confirm-cost { margin: 0.25rem 0; font-size: 0.92rem; }
+.confirm-cost .k {
+  display: inline-block; min-width: 4.2rem;
+  font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.confirm-rolls { margin: 0.9rem 0 0.4rem; }
+.confirm-rolls h4 {
+  font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-faint); margin: 0 0 0.35rem;
+}
+.confirm-rolls ul, .confirm-notes, .confirm-warn { margin: 0; padding-left: 1.1rem; }
+.confirm-rolls li { margin-bottom: 0.25rem; font-size: 0.92rem; }
+.confirm-notes { margin-top: 0.7rem; color: var(--ink-dim); font-size: 0.86rem; }
+.confirm-warn { margin-top: 0.7rem; color: var(--warn, #d9a441); font-size: 0.88rem; list-style: none; padding-left: 0; }
+.confirm-btns { display: flex; gap: 0.6rem; justify-content: flex-end; margin-top: 1.2rem; }
+.confirm-btns button {
+  padding: 0.5rem 1rem; border-radius: var(--radius);
+  background: var(--gold-dim); border: 1px solid var(--gold); color: #150f04; font-weight: 600;
+}
+.confirm-btns .ghost { background: transparent; color: var(--ink-dim); border-color: var(--line-2); font-weight: 400; }
+.confirm-btns .ghost:hover { color: var(--ink); border-color: var(--gold); }
+
+@media (prefers-reduced-motion: reduce) {
+  .dock-btn, .win-btn { transition: none; }
 }
 
 #composer { flex: 0 0 auto; border-top: 1px solid var(--line); background: var(--panel); padding: 0.6rem 0.9rem; }
@@ -184,8 +275,12 @@ body.in-combat #log { flex: 1 1 auto; min-height: 9rem; }
    the bottom of the window and took the text box and the Act button with it —
    leaving a player in combat with no way to do anything. Cap it and let it
    scroll; the composer below it is what must never be pushed off. */
-#actionbar { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; max-height: 34vh; overflow-y: auto; }
-#actionbar:empty { margin-bottom: 0; }
+#actions-panel { padding: 0.6rem; height: 100%; }
+#actionbar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-content: flex-start; }
+#actionbar:empty::after {
+  content: 'Nothing to choose right now — describe what you do instead.';
+  color: var(--ink-faint); font-size: 0.82rem;
+}
 /* ------------------------------------------------------- the action bar --
    Two steps: pick a verb, then pick a target. The bar used to hold one button
    per legal MOVE, which is every verb times every target — twenty-five
@@ -267,10 +362,11 @@ body.show-keys .target-btn[data-key]::after { opacity: 1; transform: scale(1); }
 #say-btn:hover:not(:disabled) { background: var(--gold); }
 .hint { color: var(--ink-faint); font-size: 0.8rem; margin-top: 0.35rem; min-height: 1em; }
 
-/* right */
+/* The sheet/inventory/journal/AI-seats panel, now the body of a window rather
+   than a fixed right-hand column. */
 #context-col {
-  flex: 0 0 clamp(19rem, 28vw, 26rem); display: flex; flex-direction: column;
-  background: var(--panel); border-left: 1px solid var(--line); min-height: 0;
+  display: flex; flex-direction: column; min-height: 0; height: 100%;
+  background: var(--panel);
 }
 #context-tabs { display: flex; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
 #context-tabs button {
@@ -568,46 +664,31 @@ body.show-keys .target-btn[data-key]::after { opacity: 1; transform: scale(1); }
    and the map fell far below the fold. So the columns fold away rather than
    compress — the centre column is where the game is played and it gets the
    room. */
-@media (max-width: 68rem) {
-  #party-col { flex-basis: 11rem; }
-  #context-col { flex-basis: 16rem; }
-}
+/* The old fixed-column responsive rules are gone with the columns. A floating
+   panel needs none of them: it is already the size the player made it, the
+   dock reaches it at any width, and `clamp()` in windows.js pulls anything
+   dragged off a narrow screen back on.
 
-/* The drawer handle, hidden entirely when the column is simply visible.
-   Declared BEFORE the media queries: this is the same specificity as the rule
-   that reveals it, so whichever comes last wins — and with this block sitting
-   below, `display: none` beat `display: inline-flex` and the handle was
-   invisible on every screen narrow enough to need it. */
-#context-toggle {
-  display: none; position: fixed; top: 0.55rem; right: 0.6rem; z-index: 41;
-  background: var(--panel-2); border: 1px solid var(--gold-dim); color: var(--ink);
-  border-radius: var(--radius); padding: 0.3rem 0.6rem; font-size: 0.8rem;
-}
-
+   What a small screen does still need is for a panel not to open larger than
+   the screen it is on, and for the story to keep the room. */
 @media (max-width: 60rem) {
-  /* The context panel becomes a drawer over the table rather than a sliver
-     beside it. `#context-col` keeps its tablist, so nothing is lost. */
-  #context-col {
-    position: fixed; top: 0; right: 0; bottom: 0; z-index: 40;
-    width: min(22rem, 88vw); flex-basis: auto;
-    transform: translateX(100%); transition: transform .18s ease;
-    box-shadow: -8px 0 24px rgba(0,0,0,.45);
-  }
-  body.context-open #context-col { transform: translateX(0); }
-  #context-toggle { display: inline-flex; }
-  #party-col { flex-basis: 10rem; }
+  .win { max-width: calc(100vw - 1rem); }
+  .log { padding-left: 1rem; padding-right: 1rem; }
+  #dock { gap: 0.3rem; padding: 0.35rem 0.5rem; }
+  .dock-btn { font-size: 0.72rem; padding: 0.24rem 0.45rem; }
 }
 
 @media (max-width: 46rem) {
-  /* Phone and small tablet: the party becomes a strip along the top and the
-     narrative gets the whole width. */
-  .app { flex-direction: column; }
-  #party-col {
-    flex: 0 0 auto; flex-basis: auto; max-height: 8.5rem;
-    border-right: none; border-bottom: 1px solid var(--line);
+  /* On a phone a floating window is closer to a sheet: full width, docked to
+     the bottom, still closable. Dragging a 4-inch window around a 5-inch
+     screen is not a feature anybody wants. */
+  .win:not(.minimised) {
+    left: 0 !important; right: 0; width: 100% !important;
+    top: auto !important; bottom: 0; height: min(70vh, 32rem) !important;
+    border-radius: var(--radius) var(--radius) 0 0;
   }
-  #party-list { display: flex; gap: 0.4rem; overflow-x: auto; }
-  #party-list > * { flex: 0 0 13rem; }
+  .win-grip { display: none; }
+  .dock-label { font-size: 0.7rem; }
 }
 
 /* ----------------------------------------------------- reduced motion -- */
