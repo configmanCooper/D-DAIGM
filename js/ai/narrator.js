@@ -462,7 +462,9 @@
       'Rules: reveal nothing the party has not learned. No prophecy, no hints at ' +
       'what is really going on, no villain the party has not met. Do not mention ' +
       'dice, rules, levels, hit points or classes. Do not tell anyone what they ' +
-      'feel or decide. End on the situation, not on a question.';
+      'feel or decide. End on the situation, not on a question.\n' +
+      'Separate the three paragraphs with a blank line. Keep sentences short — ' +
+      'two clauses at most. Around 180 words in total, and never more than 250.';
 
     if (!Backend.available()) {
       return Promise.resolve({
@@ -482,7 +484,7 @@
         playerCharacters: built.ctx.playerCharacters,
         mustNotName: built.ctx.mustNotName,
         recent: [],
-        maxWords: 320,
+        maxWords: 260,
       });
       var text = gated.text;
       if (!text || text.length < 60) {
