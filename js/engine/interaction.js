@@ -718,27 +718,107 @@
   /**
    * Who a spell actually lands on.
    *
-   * A single-target spell hits what the caster named. An area spell hits
-   * everyone hostile who is present — the engine has no positional geometry
-   * for blast radii, and silently treating a fireball as a single-target
-   * spell would be a much worse lie than treating it as "everyone in the
-   * fight". Allies are spared, which is generous and keeps an AI seat from
-   * wiping its own party with a spell it does not understand.
+   * A single-target spell hits what the caster named. An area spell hits every
+   * creature whose square lies inside the shape — friend, foe and, if they are
+   * standing in it, the caster.
+   *
+   * This used to take every hostile creature in the encounter and spare every
+   * ally, with no radius and no positions at all: a Fireball caught an enemy a
+   * hundred yards away and never singed the fighter standing beside it. The
+   * comment justifying it said the engine had no positional geometry for blast
+   * radii — true when it was written, and untrue since weapon reach was
+   * enforced. `squaresInSphere` and `squaresInCone` were already here,
+   * correctly implementing the 2014 grid rulings, and nothing called them.
+   *
+   * Bursts are centred on a grid intersection, which IS the standard ruling for
+   * "a point you choose"; a cone or cube emanating from you does not include
+   * you. Where an actor has no position at all there is nothing to measure, so
+   * the old side-based behaviour remains as the fallback rather than silently
+   * hitting nobody.
    */
   function spellTargets(state, command, spell, effects) {
     var named = (command.primary.targetIds || []).filter(function (id) { return actor(state, id); });
-    var isArea = (effects || []).some(function (e) { return e.kind === 'area'; }) ||
+    var area = (effects || []).filter(function (e) { return e.kind === 'area'; })[0];
+    var isArea = !!area ||
       (spell && spell.mech && spell.mech.targets && spell.mech.targets.type === 'area');
     if (!isArea) return named.length ? named : [];
 
     var caster = actor(state, command.actorId);
     var focus = named[0] ? actor(state, named[0]) : null;
-    var enemySide = focus ? focus.side : (caster && caster.side === 'party' ? 'enemy' : 'party');
-    var hit = Object.keys(state.actors).filter(function (id) {
+
+    function everyoneHostile() {
+      var enemySide = focus ? focus.side : (caster && caster.side === 'party' ? 'enemy' : 'party');
+      var hit = Object.keys(state.actors).filter(function (id) {
+        var o = state.actors[id];
+        return o.side === enemySide && o.runtime && !o.runtime.dead && o.runtime.hp > 0;
+      });
+      return hit.length ? hit : named;
+    }
+
+    var Combat = combatModule();
+    var shape = (area && area.shape) || 'sphere';
+    var size = (area && area.size) || 20;
+    var selfOrigin = area && area.origin === 'self';
+    var originPos = selfOrigin
+      ? (caster && caster.runtime && caster.runtime.pos)
+      : ((focus && focus.runtime && focus.runtime.pos) ||
+         (caster && caster.runtime && caster.runtime.pos));
+
+    if (!Combat || !originPos || !Combat.squaresInSphere) return everyoneHostile();
+
+    var squares;
+    if (shape === 'cone' && Combat.squaresInCone) {
+      var from = (caster && caster.runtime && caster.runtime.pos) || originPos;
+      var toward = (focus && focus.runtime && focus.runtime.pos) || { x: from.x + 1, y: from.y };
+      var dir = { x: toward.x - from.x, y: toward.y - from.y };
+      if (!dir.x && !dir.y) dir = { x: 1, y: 0 };
+      squares = Combat.squaresInCone(from, dir, size);
+    } else if (shape === 'cube' || shape === 'line') {
+      /* A cube is measured by its edge and a line by its length; both are
+         close enough to a square footprint on a grid, and erring outward is
+         the kinder error for a shape the data does not orient. */
+      squares = [];
+      var reach = Math.ceil(size / (Combat.CELL || 5));
+      for (var dx = -reach; dx <= reach; dx++) {
+        for (var dy = -reach; dy <= reach; dy++) {
+          squares.push({ x: originPos.x + dx, y: originPos.y + dy });
+        }
+      }
+    } else {
+      squares = Combat.squaresInSphere(originPos, size);
+    }
+
+    var inside = {};
+    squares.forEach(function (s) { inside[s.x + ',' + s.y] = true; });
+
+    var caught = Object.keys(state.actors).filter(function (id) {
       var o = state.actors[id];
-      return o.side === enemySide && o.runtime && !o.runtime.dead && o.runtime.hp > 0;
+      if (!o || !o.runtime || o.runtime.dead || o.runtime.hp <= 0) return false;
+      if (!o.runtime.pos) return false;
+      /* A cone or cube that emanates from you starts at your square; you are
+         not in your own Burning Hands. A sphere centred on a point you chose
+         is a different matter, and catching yourself in your own Fireball is
+         a real and famous risk. */
+      if (selfOrigin && id === command.actorId) return false;
+      return !!inside[o.runtime.pos.x + ',' + o.runtime.pos.y];
     });
-    return hit.length ? hit : named;
+
+    /* Nobody positioned anywhere near it. Falling back to the old behaviour
+       here would resurrect the bug; but a named target the geometry missed
+       (because a campaign placed an actor without a position) should still be
+       hit rather than the spell doing nothing at all. */
+    if (!caught.length) {
+      var positioned = Object.keys(state.actors).some(function (id) {
+        var o = state.actors[id];
+        return o && o.runtime && o.runtime.pos && !o.runtime.dead;
+      });
+      if (!positioned) return everyoneHostile();
+      return named.filter(function (id) {
+        var o = actor(state, id);
+        return o && !(o.runtime && o.runtime.pos);
+      });
+    }
+    return caught;
   }
 
   /**
@@ -969,6 +1049,67 @@
     return bonus ? dice + '+' + bonus : dice;
   }
 
+  /**
+   * What a turn's worth of item handling costs.
+   *
+   * 2014, "Other Activity on Your Turn" and "Use an Object": you get one free
+   * object interaction a turn — drawing a sword, opening a door, pulling a
+   * potion from a pack. Anything beyond that costs the Use an Object action.
+   * Drinking a potion or using an item whose activation is an action costs the
+   * action outright. Dropping something is free.
+   *
+   * None of this was enforced. `resolveItem` committed its events and never
+   * looked at the turn record, so a character on 5 hit points could drink three
+   * healing potions in a single turn and come out on 23 with their action still
+   * untouched — verified by probe before this was written.
+   */
+  var ITEM_COST = {
+    drink: 'action', use: 'action', throw: 'action',
+    equip: 'object', unequip: 'object', give: 'object', pick_up: 'object',
+    drop: 'free',
+    attune: 'rest', unattune: 'free',
+  };
+
+  function spendForItem(state, command, b, a, verb) {
+    var turn = a.runtime && a.runtime.turn;
+    var fighting = !!(state.combat && state.combat.active);
+    var cost = ITEM_COST[verb];
+
+    /* Attuning is an hour's work over a short rest, not something done with a
+       hobgoblin swinging at you. */
+    if (cost === 'rest' && fighting) {
+      return Events.refuse(b, 'not-in-combat',
+        'attuning to an item takes a short rest spent with it');
+    }
+
+    /* Outside an encounter nobody is counting actions. A missing turn record
+       means unconstrained, not forbidden — reading it the other way is what
+       once left out-of-combat characters with no legal moves at all. */
+    if (!fighting || !turn || !cost || cost === 'free' || cost === 'rest') return null;
+
+    if (cost === 'action') {
+      if (!turn.action) {
+        return Events.refuse(b, 'no-action',
+          a.name + ' has already used their action this turn');
+      }
+      Events.push(b, 'action_economy', { actorId: command.actorId, action: false }, '');
+      return null;
+    }
+
+    /* An object interaction: free the first time, the Use an Object action
+       after that. */
+    if (turn.objectInteraction) {
+      Events.push(b, 'action_economy', { actorId: command.actorId, objectInteraction: false }, '');
+      return null;
+    }
+    if (turn.action) {
+      Events.push(b, 'action_economy', { actorId: command.actorId, action: false }, '');
+      return null;
+    }
+    return Events.refuse(b, 'no-action',
+      a.name + ' has already handled something this turn, and has no action left to do it again');
+  }
+
   function resolveItem(state, command, ctx) {
     ctx = ctx || {};
     var b = Events.makeBatch(command);
@@ -983,6 +1124,11 @@
       return Events.refuse(b, 'not-carried', 'that is not something ' + a.name + ' is carrying');
     }
     var label = entry ? (entry.name || entry.id) : 'it';
+
+    /* Pay for it before doing it, so a refusal leaves the batch empty rather
+       than half-applied. */
+    var refusal = spendForItem(state, command, b, a, verb);
+    if (refusal) return refusal;
 
     switch (verb) {
       case 'drink':
@@ -1210,6 +1356,23 @@
       });
     });
 
+    /* Only what this turn can still pay for.
+       The costs above are declared on every move; enforcing them in the
+       resolver without filtering here would just move the problem, turning
+       "Drink Potion of Healing" into a button that refuses on click once the
+       action is gone. Out of combat nothing is counted, so nothing is hidden. */
+    if (state.combat && state.combat.active && a.runtime && a.runtime.turn) {
+      var turn = a.runtime.turn;
+      var canObject = !!turn.objectInteraction || !!turn.action;
+      moves = moves.filter(function (m) {
+        var cost = ITEM_COST[m.step.verb];
+        if (cost === 'action') return !!turn.action;
+        if (cost === 'object') return canObject;
+        if (cost === 'rest') return false;   // attuning needs a short rest
+        return true;                          // free, and anything uncosted
+      });
+    }
+
     return moves;
   };
 
@@ -1324,25 +1487,55 @@
     if (level > 0 && !asRitual) {
       var spent = (a.runtime.slotsSpent && a.runtime.slotsSpent[level]) || 0;
       var maxSlots = (d && d.spellcasting && d.spellcasting.slotsMax && d.spellcasting.slotsMax[level]) || 0;
-      if (maxSlots && spent >= maxSlots) {
-        return Events.refuse(b, 'no-slot', a.name + ' has no level ' + level + ' slots left');
+
+      /* Pact Magic is a second, separate pool. A warlock has no ordinary slots
+         at all, so reading `slotsMax` alone refused every levelled spell they
+         had — verified by probe: a level-3 warlock with two pact slots was told
+         "has no level 2 slots at all" for Shatter, Darkness and everything else
+         on their list.
+         Pact slots are all of the same level and always the highest the warlock
+         has, so one covers any spell up to that level (PHB, Pact Magic). */
+      var pact = (d && d.spellcasting && d.spellcasting.pactSlots) || null;
+      var pactMax = (pact && pact.max) || 0;
+      var pactLevel = (pact && pact.level) || 0;
+      var pactSpent = a.runtime.pactSlotsSpent || 0;
+      var wantLevel = (spell && spell.level) || level;
+      var usePact = pactMax > 0 && pactLevel >= wantLevel &&
+        /* Prefer an ordinary slot when one is genuinely available, so a
+           multiclassed warlock does not burn the short-rest pool first. */
+        !(maxSlots && spent < maxSlots);
+
+      if (usePact) {
+        if (pactSpent >= pactMax) {
+          return Events.refuse(b, 'no-pact-slot',
+            a.name + ' has no Pact Magic slots left \u2014 they come back on a short rest');
+        }
+        /* A pact slot is always cast at its own level, however low the spell. */
+        level = pactLevel;
+        Events.push(b, 'pact_slot_spend', { actorId: command.actorId, level: pactLevel },
+          a.name + ' spends a Pact Magic slot (' + (pactSpent + 1) + ' of ' + pactMax +
+          ' used, level ' + pactLevel + ').');
+      } else {
+        if (maxSlots && spent >= maxSlots) {
+          return Events.refuse(b, 'no-slot', a.name + ' has no level ' + level + ' slots left');
+        }
+        if (!maxSlots) {
+          return Events.refuse(b, 'no-slot', a.name + ' has no level ' + level + ' slots at all');
+        }
+        /* You cannot cast a spell with a slot lower than its own level. Nothing
+           compared the two, so a level-1 slot cast Fireball. */
+        if (spell && spell.level > level) {
+          return Events.refuse(b, 'slot-too-low',
+            (spell.name || spellId) + ' is a level ' + spell.level +
+            ' spell and cannot be cast with a level ' + level + ' slot');
+        }
+        /* A dedicated slot event, so the spend lands in `slotsSpent` — the very
+           pool the check above reads. It previously emitted a generic resource
+           called "slot1", which the applier wrote to `runtime.resources`, so the
+           check never saw it and every caster had unlimited slots. */
+        Events.push(b, 'slot_spend', { actorId: command.actorId, level: level },
+          a.name + ' spends a level ' + level + ' slot (' + (spent + 1) + ' of ' + maxSlots + ' used).');
       }
-      if (!maxSlots) {
-        return Events.refuse(b, 'no-slot', a.name + ' has no level ' + level + ' slots at all');
-      }
-      /* You cannot cast a spell with a slot lower than its own level. Nothing
-         compared the two, so a level-1 slot cast Fireball. */
-      if (spell && spell.level > level) {
-        return Events.refuse(b, 'slot-too-low',
-          (spell.name || spellId) + ' is a level ' + spell.level +
-          ' spell and cannot be cast with a level ' + level + ' slot');
-      }
-      /* A dedicated slot event, so the spend lands in `slotsSpent` — the very
-         pool the check above reads. It previously emitted a generic resource
-         called "slot1", which the applier wrote to `runtime.resources`, so the
-         check never saw it and every caster had unlimited slots. */
-      Events.push(b, 'slot_spend', { actorId: command.actorId, level: level },
-        a.name + ' spends a level ' + level + ' slot (' + (spent + 1) + ' of ' + maxSlots + ' used).');
     }
 
     var name = (spell && spell.name) || spellId;
@@ -1578,6 +1771,31 @@
     return b;
   }
 
+  /**
+   * Is there anything left to cast this with?
+   *
+   * Both pools, because a warlock has only the pact one and a multiclassed
+   * warlock has both. A cantrip is always yes: it costs nothing, which is what
+   * makes it the thing a caster falls back on when the slots are gone.
+   */
+  function castableNow(a, sc, spell) {
+    var lvl = (spell && spell.level) || 0;
+    if (!lvl) return true;
+
+    var slotsMax = (sc && sc.slotsMax) || {};
+    var spentMap = (a.runtime && a.runtime.slotsSpent) || {};
+    for (var L = lvl; L <= 9; L++) {
+      var max = slotsMax[L] || 0;
+      if (max && (spentMap[L] || 0) < max) return true;
+    }
+
+    var pact = (sc && sc.pactSlots) || null;
+    if (pact && pact.max && (pact.level || 0) >= lvl &&
+        (a.runtime.pactSlotsSpent || 0) < pact.max) return true;
+
+    return false;
+  }
+
   resolveSpell.legalMoves = function (state, actorId, ctx) {
     var a = actor(state, actorId);
     if (!a || downed(a)) return [];
@@ -1601,10 +1819,17 @@
     allies.sort(function (x, y) {
       return (state.actors[x].runtime.hp || 0) - (state.actors[y].runtime.hp || 0);
     });
+    var foes = perceivedFoes(state, actorId);
 
     known.slice(0, 12).forEach(function (spellId) {
       var spell = SPELLS && SPELLS[spellId];
       var name = (spell && spell.name) || spellId;
+      /* Nothing that could only refuse. A caster out of slots was still shown
+         every levelled spell they knew, so the bar filled with buttons that
+         answered "no slots left" on click — the same trap as offering a
+         purchase you cannot afford, and for a warlock it was every spell on
+         the list. Cantrips cost nothing and are always offered. */
+      if (!castableNow(a, sc, spell)) return;
       if (isHealing(spell)) {
         allies.forEach(function (id) {
           var target = state.actors[id];
@@ -1615,6 +1840,26 @@
             (dying ? ' \u2014 they are dying' : ''), 'action',
           { spellId: spellId, targetIds: [id] },
           dying ? 'they are at zero hit points and making death saves' : null);
+          moves.push(tagSpell(m, spell));
+        });
+      } else if (isOffensiveSpell(spell) && foes.length) {
+        /* An offensive spell needs somewhere to land. It used to be offered
+           with no target at all, which for an AREA spell meant the burst was
+           centred on the caster: an unaimed Fireball went off at the wizard's
+           own feet. Naming the enemy gives the geometry an origin.
+
+           And now that an area spell really does catch everyone standing in
+           it, the bar has to say who — a player choosing between two goblins
+           should be told that one of them is next to their own fighter. */
+        foes.forEach(function (foeId) {
+          var caught = alliesCaughtBy(state, actorId, spell, foeId);
+          var m = mv('cast', 'Cast ' + name + ' at ' + nameOf(state, foeId), 'action',
+            { spellId: spellId, targetIds: [foeId] },
+            caught.length
+              ? 'catches ' + caught.map(function (id) { return nameOf(state, id); }).join(' and ')
+                + ' in the blast'
+              : null);
+          m.friendlyFire = caught.length;
           moves.push(tagSpell(m, spell));
         });
       } else {
@@ -1747,6 +1992,34 @@
    * ever spent by anyone the engine ran. The UI ignores these; they cost
    * nothing and they make good play possible.
    */
+  /**
+   * Which of your own side an area spell would catch if you aimed it there.
+   *
+   * Used to warn in the action bar and to keep a companion from dropping a
+   * Fireball on the fighter. Returns an empty list for anything that is not an
+   * area spell, so a single-target ray is never flagged.
+   */
+  function alliesCaughtBy(state, actorId, spell, focusId) {
+    var effects = (spell && spell.mech && spell.mech.effects) || [];
+    var isArea = effects.some(function (e) { return e.kind === 'area'; }) ||
+      (spell && spell.mech && spell.mech.targets && spell.mech.targets.type === 'area');
+    if (!isArea) return [];
+    var me = actor(state, actorId);
+    if (!me) return [];
+    var caught = spellTargets(state, {
+      actorId: actorId, primary: { targetIds: [focusId] },
+    }, spell, effects) || [];
+    return caught.filter(function (id) {
+      var o = actor(state, id);
+      return o && o.side === me.side && id !== actorId;
+    });
+  }
+
+  function isOffensiveSpell(spell) {
+    var S = spellModuleFor();
+    return !!(S && S.isOffensive && S.isOffensive(spell));
+  }
+
   function tagSpell(m, spell) {
     if (!m || !spell) return m;
     m.spellLevel = spell.level || 0;

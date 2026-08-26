@@ -960,4 +960,378 @@ t.section('a weapon only reaches as far as it reaches');
     '(' + closing[0].what + ')');
 }
 
+t.section('using an item costs what using an item costs');
+/*
+ * `resolveItem` committed its events and never looked at the turn record, so
+ * the action economy simply did not apply to items. Probed before writing this:
+ * a character on 5 hit points drank three healing potions in one turn and came
+ * out on 23 with their action still untouched.
+ *
+ * 2014, "Other Activity on Your Turn" and "Use an Object": one free object
+ * interaction a turn, anything past that costs the Use an Object action, and an
+ * item whose activation is an action costs the action outright.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+
+  const potion = uid => ({ uid, id: 'potion_healing', name: 'Potion of Healing',
+    heal: '2d4+2', consumable: true });
+
+  function scene() {
+    const st = State.create({ seed: 'item-economy' });
+    State.addActor(st, {
+      id: 'pc1', name: 'Drinker', side: 'party', kind: 'pc',
+      base: { name: 'Drinker', abilities: { str: 12, dex: 12, con: 12, int: 10, wis: 10, cha: 10 } },
+      progression: { xp: 0, levels: [] },
+      runtime: {
+        hp: 5, hpMax: 40, tempHp: 0, conditions: {}, exhaustion: 0,
+        concentratingOn: null, attuned: [], equipped: {}, deathSaves: {},
+        gold: 0, pos: { x: 0, y: 0 }, resources: {}, speed: 30, ac: 12, reach: 5,
+        inventory: [potion('p1'), potion('p2'), potion('p3'),
+          { uid: 's1', id: 'longsword', name: 'Longsword', category: 'weapon' }],
+      },
+    });
+    State.addActor(st, {
+      id: 'foe1', name: 'Ogre', side: 'enemy', kind: 'monster',
+      base: { name: 'Ogre', abilities: { str: 16, dex: 8, con: 16, int: 5, wis: 7, cha: 7 } },
+      progression: { levels: [] },
+      runtime: { hp: 30, hpMax: 30, conditions: {}, inventory: [], deathSaves: {},
+        pos: { x: 1, y: 0 }, ac: 11, speed: 30, reach: 5 },
+    });
+    State.refreshAllDerived(st);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: ['pc1', 'foe1'] };
+    st.activeActorId = 'pc1';
+    Events.commit(st, Combat.startTurn(st, 'pc1'));
+    return st;
+  }
+
+  const act = (st, verb, itemId) => Dispatch.dispatch(st, { past: [], future: [] }, {
+    v: 1, family: 'item', commandId: 'i' + Math.random(), actorId: 'pc1',
+    stateRevision: st.revision, turnEpoch: st.turnEpoch,
+    primary: { verb, itemId, targetIds: [] },
+  }, {});
+
+  {
+    const st = scene();
+    const first = act(st, 'drink', 'p1');
+    t.eq(!!(first.batch && first.batch.refused), false, 'the first potion goes down');
+    t.ok(st.actors.pc1.runtime.hp > 5, 'and heals', '(5 -> ' + st.actors.pc1.runtime.hp + ')');
+    t.eq(st.actors.pc1.runtime.turn.action, false, 'and it costs the action');
+
+    const healed = st.actors.pc1.runtime.hp;
+    const second = act(st, 'drink', 'p2');
+    t.eq(!!(second.batch && second.batch.refused), true,
+      'the second potion in the same turn is refused');
+    t.eq(st.actors.pc1.runtime.hp, healed, 'and heals nothing');
+    t.eq(st.actors.pc1.runtime.inventory.filter(i => i.uid === 'p2').length, 1,
+      'and is not consumed by the attempt');
+  }
+
+  /* Drawing a weapon is the free object interaction; a second one is not. */
+  {
+    const st = scene();
+    const draw = act(st, 'equip', 's1');
+    t.eq(!!(draw.batch && draw.batch.refused), false, 'drawing a sword is free the first time');
+    t.eq(st.actors.pc1.runtime.turn.objectInteraction, false,
+      'and spends the turn\u2019s one object interaction');
+    t.eq(st.actors.pc1.runtime.turn.action, true, 'without touching the action');
+
+    const stow = act(st, 'unequip', 's1');
+    t.eq(!!(stow.batch && stow.batch.refused), false,
+      'a second interaction is allowed as the Use an Object action');
+    t.eq(st.actors.pc1.runtime.turn.action, false, 'and that is what it spends');
+  }
+
+  /* Dropping something is explicitly free, however much else you have done. */
+  {
+    const st = scene();
+    act(st, 'drink', 'p1');
+    const drop = act(st, 'drop', 'p2');
+    t.eq(!!(drop.batch && drop.batch.refused), false,
+      'dropping an item is free even with the action gone');
+  }
+
+  /* And none of it may be offered once it cannot be paid for. */
+  {
+    const st = scene();
+    act(st, 'drink', 'p1');
+    const offered = Dispatch.legalMoves(st, 'pc1', {})
+      .filter(m => m.family === 'item' && /drink/i.test(m.step.verb));
+    t.eq(offered.length, 0,
+      'and with the action spent, no potion is offered that would only refuse');
+  }
+
+  /* Out of combat nobody is counting. */
+  {
+    const st = scene();
+    st.combat = { active: false, order: [], turnIndex: 0, round: 1 };
+    st.actors.pc1.runtime.turn = null;
+    act(st, 'drink', 'p1');
+    const after = st.actors.pc1.runtime.hp;
+    act(st, 'drink', 'p2');
+    t.ok(st.actors.pc1.runtime.hp > after,
+      'two potions out of combat are both drunk, because no turn is being counted',
+      '(-> ' + st.actors.pc1.runtime.hp + ')');
+  }
+}
+
+t.section('a warlock can actually cast, and gets it back on a short rest');
+/*
+ * Pact Magic is a SEPARATE pool. `resolveSpell` read `slotsMax` alone, and a
+ * warlock has no ordinary slots at all, so probing a level-3 warlock produced
+ * "Vex has no level 2 slots at all" for Shatter, Darkness, Enthrall and Mirror
+ * Image — every levelled spell they knew was offered in the bar and refused on
+ * click. The character could cast nothing but cantrips for the whole campaign.
+ *
+ * The recovery half was equally dead: pact slots were restored on a LONG rest
+ * only, and through a generic `resource` event whose applier writes to
+ * `runtime.resources` — a field nothing reads — so a pact slot never actually
+ * came back. In 2014 they come back on a short rest, which is the entire shape
+ * of the class.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+  const Rules = require('../js/engine/rules.js');
+
+  function warlock() {
+    const c = Character.buildFromSpec({
+      name: 'Vex', raceId: 'human', classId: 'warlock', levels: 3,
+      backgroundId: 'charlatan',
+      abilities: { str: 8, dex: 14, con: 14, int: 12, wis: 10, cha: 17 },
+      proficiencies: { skills: [] },
+    });
+    const st = State.create({ seed: 'pact-magic' });
+    State.addActor(st, { id: 'pc1', name: 'Vex', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime });
+    State.addActor(st, { id: 'foe1', name: 'Ogre', side: 'enemy', kind: 'monster',
+      base: { name: 'Ogre', abilities: { str: 16, dex: 8, con: 16, int: 5, wis: 7, cha: 7 } },
+      progression: { levels: [] },
+      runtime: { hp: 40, hpMax: 40, conditions: {}, inventory: [], deathSaves: {},
+        pos: { x: 1, y: 0 }, ac: 11, speed: 30, reach: 5 } });
+    State.refreshAllDerived(st);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: ['pc1', 'foe1'] };
+    st.activeActorId = 'pc1';
+    return st;
+  }
+
+  const st = warlock();
+  const sc = st.actors.pc1.derivedCache.spellcasting || {};
+  t.eq(Object.keys(sc.slotsMax || {}).length, 0,
+    'a pure warlock has no ordinary spell slots at all');
+  t.eq((sc.pactSlots || {}).max, 2, 'but two Pact Magic slots at level 3');
+  t.eq((sc.pactSlots || {}).level, 2, 'and they are level 2 slots');
+
+  const castShatter = () => {
+    Events.commit(st, Combat.startTurn(st, 'pc1'));
+    return Dispatch.dispatch(st, { past: [], future: [] }, {
+      v: 1, family: 'spell', commandId: 's' + Math.random(), actorId: 'pc1',
+      stateRevision: st.revision, turnEpoch: st.turnEpoch,
+      primary: { verb: 'cast', spellId: 'shatter', targetIds: ['foe1'], slotLevel: null },
+    }, {});
+  };
+
+  const one = castShatter();
+  t.eq(!!(one.batch && one.batch.refused), false, 'Shatter is cast, not refused',
+    one.batch && one.batch.refused ? '(' + one.batch.refused.detail + ')' : '');
+  t.eq(st.actors.pc1.runtime.pactSlotsSpent, 1, 'and it spends a pact slot');
+  t.eq(Object.keys(st.actors.pc1.runtime.slotsSpent || {}).length, 0,
+    'not an ordinary one, which they do not have');
+
+  const two = castShatter();
+  t.eq(!!(two.batch && two.batch.refused), false, 'the second is cast too');
+  t.eq(st.actors.pc1.runtime.pactSlotsSpent, 2, 'spending the last slot');
+
+  const three = castShatter();
+  t.eq(!!(three.batch && three.batch.refused), true,
+    'the third is refused, because there are only two');
+  t.ok(/pact/i.test((three.batch.refused || {}).detail || ''),
+    'and it says why in the language of the class',
+    '(' + ((three.batch.refused || {}).detail || '') + ')');
+
+  /* The short rest is the whole point. */
+  const rest = Rules.restoreOnRest(
+    st.actors.pc1.base, st.actors.pc1.progression, st.actors.pc1.runtime, 'short',
+    { actorId: 'pc1', derived: st.actors.pc1.derivedCache, spendHitDice: [] });
+  const kinds = (rest.events || []).map(e => e.kind);
+  t.ok(kinds.indexOf('pact_slot_restore') >= 0,
+    'a short rest gives Pact Magic back', '(' + kinds.join(', ') + ')');
+
+  const b = Events.makeBatch({ commandId: 'rest1', actorId: 'pc1' });
+  (rest.events || []).forEach(e => b.events.push(e));
+  Events.commit(st, b);
+  t.eq(st.actors.pc1.runtime.pactSlotsSpent, 0,
+    'and the slots are genuinely back in the pool, not written somewhere nothing reads');
+
+  const again = castShatter();
+  t.eq(!!(again.batch && again.batch.refused), false,
+    'so the warlock can cast again after an hour\u2019s rest');
+
+  /* The event kinds have to be on the whitelist or commit silently drops them —
+     which is exactly how the first version of this fix appeared to work while
+     changing nothing. */
+  t.ok(Events.KINDS.indexOf('pact_slot_spend') >= 0,
+    'pact_slot_spend is a registered event kind');
+  t.ok(Events.KINDS.indexOf('pact_slot_restore') >= 0,
+    'and so is pact_slot_restore');
+
+  /* And nothing may be offered that could only refuse. A caster out of slots
+     was still shown every levelled spell they knew. */
+  const offeredWith = spentSlots => {
+    const s2 = warlock();
+    s2.actors.pc1.runtime.pactSlotsSpent = spentSlots;
+    s2.actors.pc1.runtime.turn = { action: true, bonus: true, reaction: true,
+      objectInteraction: true, movementRemaining: 30 };
+    return Dispatch.legalMoves(s2, 'pc1', {})
+      .filter(m => m.family === 'spell' && /^Cast /.test(m.what))
+      .map(m => m.what.replace(/^Cast /, ''));
+  };
+  /* Matched by mention, not by exact label: an offensive spell is offered as
+     "Cast Shatter at Ogre" now that an area spell needs an origin to measure
+     its blast from. */
+  const mentions = (list, name) => list.some(s => s.indexOf(name) >= 0);
+  t.ok(mentions(offeredWith(0), 'Shatter'), 'with slots in hand, Shatter is offered',
+    '(' + offeredWith(0).join(', ') + ')');
+  t.eq(mentions(offeredWith(2), 'Shatter'), false,
+    'with the pact pool empty it is not offered at all',
+    '(' + offeredWith(2).join(', ') + ')');
+  t.ok(offeredWith(2).length > 0,
+    'but the cantrips remain, which is what a spent caster falls back on',
+    '(' + offeredWith(2).join(', ') + ')');
+
+  /* The same filter must not break ordinary casters. */
+  {
+    const w = Character.buildFromSpec({
+      name: 'Wiz', raceId: 'human', classId: 'wizard', levels: 3, backgroundId: 'sage',
+      abilities: { str: 8, dex: 14, con: 14, int: 17, wis: 10, cha: 12 },
+      proficiencies: { skills: [] },
+    });
+    const ws = State.create({ seed: 'wiz-slots' });
+    State.addActor(ws, { id: 'pc1', name: 'Wiz', side: 'party', kind: 'pc',
+      base: w.base, progression: w.progression, runtime: w.runtime });
+    State.refreshAllDerived(ws);
+    ws.combat = { active: true, round: 1, turnIndex: 0, order: ['pc1'] };
+    ws.activeActorId = 'pc1';
+    ws.actors.pc1.runtime.turn = { action: true, bonus: true, reaction: true,
+      objectInteraction: true, movementRemaining: 30 };
+    const fresh = Dispatch.legalMoves(ws, 'pc1', {})
+      .filter(m => m.family === 'spell' && /^Cast /.test(m.what)).length;
+    ws.actors.pc1.runtime.slotsSpent = { 1: 4, 2: 3 };
+    const drained = Dispatch.legalMoves(ws, 'pc1', {})
+      .filter(m => m.family === 'spell' && /^Cast /.test(m.what)).length;
+    t.ok(fresh > drained, 'a wizard out of slots is offered fewer spells than a rested one',
+      '(' + fresh + ' -> ' + drained + ')');
+    t.ok(drained > 0, 'and still has cantrips', '(' + drained + ')');
+  }
+}
+
+t.section('an area spell hits what is in the area, friend or foe');
+/*
+ * `spellTargets` took every hostile creature in the encounter and spared every
+ * ally, with no radius and no positions at all. A Fireball caught a goblin two
+ * hundred feet away and never singed the fighter standing beside the blast.
+ *
+ * The comment defending it said the engine had no positional geometry for
+ * blast radii. That was true when it was written and untrue since weapon reach
+ * was enforced — `squaresInSphere` and `squaresInCone` were already in
+ * combat.js, implementing the 2014 grid rulings correctly, and nothing called
+ * them. The data was right, the geometry was right, and nothing read either.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+
+  const mk = (id, name, side, pos) => ({
+    id, name, side, kind: side === 'party' ? 'pc' : 'monster',
+    base: { name, abilities: { str: 12, dex: 12, con: 12, int: 10, wis: 10, cha: 10 } },
+    progression: { levels: [] },
+    runtime: { hp: 60, hpMax: 60, conditions: {}, inventory: [], deathSaves: {},
+      pos, ac: 12, speed: 30, reach: 5, equipped: {}, attuned: [], resources: {} },
+  });
+
+  function blastScene() {
+    const c = Character.buildFromSpec({
+      name: 'Pyro', raceId: 'human', classId: 'wizard', levels: 5, backgroundId: 'sage',
+      abilities: { str: 8, dex: 14, con: 14, int: 18, wis: 10, cha: 10 },
+      proficiencies: { skills: [] },
+    });
+    const st = State.create({ seed: 'fireball-geometry' });
+    State.addActor(st, { id: 'pc1', name: 'Pyro', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime });
+    st.actors.pc1.runtime.pos = { x: 0, y: 0 };
+    State.addActor(st, mk('ally1', 'Fighter', 'party', { x: 11, y: 0 }));   // beside the blast
+    State.addActor(st, mk('foe1', 'Goblin A', 'enemy', { x: 10, y: 0 }));   // the mark, 50 ft out
+    State.addActor(st, mk('foe2', 'Goblin B', 'enemy', { x: 11, y: 1 }));   // beside it
+    State.addActor(st, mk('faraway', 'Goblin Z', 'enemy', { x: 40, y: 40 })); // 200 ft away
+    State.refreshAllDerived(st);
+    const sc = st.actors.pc1.derivedCache.spellcasting;
+    sc.prepared = (sc.prepared || []).concat(['fireball']);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: ['pc1'] };
+    st.activeActorId = 'pc1';
+    Events.commit(st, Combat.startTurn(st, 'pc1'));
+    return st;
+  }
+
+  const st = blastScene();
+  const before = {};
+  Object.keys(st.actors).forEach(id => { before[id] = st.actors[id].runtime.hp; });
+
+  const r = Dispatch.dispatch(st, { past: [], future: [] }, {
+    v: 1, family: 'spell', commandId: 'fb1', actorId: 'pc1',
+    stateRevision: st.revision, turnEpoch: st.turnEpoch,
+    primary: { verb: 'cast', spellId: 'fireball', targetIds: ['foe1'], slotLevel: 3 },
+  }, {});
+  t.eq(!!(r.batch && r.batch.refused), false, 'the Fireball goes off',
+    r.batch && r.batch.refused ? '(' + r.batch.refused.detail + ')' : '');
+
+  const hurt = id => before[id] - st.actors[id].runtime.hp;
+  t.ok(hurt('foe1') > 0, 'the goblin at the centre is burned', '(' + hurt('foe1') + ')');
+  t.ok(hurt('foe2') > 0, 'and the one beside it', '(' + hurt('foe2') + ')');
+  t.ok(hurt('ally1') > 0,
+    'and so is the fighter standing five feet away, because fire does not pick sides',
+    '(' + hurt('ally1') + ')');
+  t.eq(hurt('faraway'), 0,
+    'the goblin two hundred feet away is untouched, which was the other half of the bug');
+  t.eq(hurt('pc1'), 0, 'and the caster, fifty feet back, is outside their own blast');
+
+  /* A cone or cube emanating from you starts at your square: you are not in
+     your own Burning Hands. */
+  {
+    const st2 = blastScene();
+    const sc = st2.actors.pc1.derivedCache.spellcasting;
+    sc.prepared = (sc.prepared || []).concat(['burning-hands']);
+    st2.actors.ally1.runtime.pos = { x: 1, y: 0 };   // right beside the caster
+    const hpBefore = { pc1: st2.actors.pc1.runtime.hp, ally1: st2.actors.ally1.runtime.hp };
+    Dispatch.dispatch(st2, { past: [], future: [] }, {
+      v: 1, family: 'spell', commandId: 'bh1', actorId: 'pc1',
+      stateRevision: st2.revision, turnEpoch: st2.turnEpoch,
+      primary: { verb: 'cast', spellId: 'burning-hands', targetIds: ['ally1'], slotLevel: 1 },
+    }, {});
+    t.eq(st2.actors.pc1.runtime.hp, hpBefore.pc1,
+      'a cone that comes out of your hands does not burn you');
+    t.ok(st2.actors.ally1.runtime.hp < hpBefore.ally1,
+      'but it does burn whoever is standing in front of them');
+  }
+
+  /* The bar has to say so, and a companion has to look before it throws. */
+  {
+    const st3 = blastScene();
+    const offers = Dispatch.legalMoves(st3, 'pc1', {})
+      .filter(m => m.family === 'spell' && /Fireball/.test(m.what));
+    const atA = offers.filter(m => /Goblin A/.test(m.what))[0];
+    const atZ = offers.filter(m => /Goblin Z/.test(m.what))[0];
+    t.ok(!!atA && !!atZ, 'an area spell is offered against each enemy, so it has somewhere to land');
+    if (atA && atZ) {
+      t.ok(atA.friendlyFire > 0, 'aiming at the goblin next to the fighter is flagged',
+        '(' + (atA.warn || '') + ')');
+      t.ok(/Fighter/.test(atA.warn || ''), 'and names who would be caught');
+      t.eq(atZ.friendlyFire || 0, 0, 'the clean shot across the field is not flagged');
+    }
+  }
+}
+
 t.done();

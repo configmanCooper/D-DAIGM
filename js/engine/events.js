@@ -36,6 +36,7 @@
     'help', 'help_used', 'help_expire', 'hidden',   // the Help grant, and who cannot see whom
     'resource',          // hit dice, ki, rage, channel divinity, lay on hands...
     'slot_spend', 'slot_restore',   // spell slots, kept in their own pool
+    'pact_slot_spend', 'pact_slot_restore',   // Pact Magic, a separate pool that refills on a SHORT rest
     'prepare_spells',    // a prepared caster's slate for the day
     'action_economy',    // an action, bonus action, reaction, object interaction or movement was spent this turn
     'move',
@@ -255,6 +256,26 @@
       if (e.all) { a.runtime.slotsSpent = {}; return; }
       var lvl = e.level;
       a.runtime.slotsSpent[lvl] = Math.max(0, (a.runtime.slotsSpent[lvl] || 0) - (e.count || 1));
+    },
+
+    /* Pact Magic is a separate pool, and it has to be its own event.
+       It used to be spent and restored through the generic `resource` event,
+       which writes to `runtime.resources` — somewhere nothing reads — so the
+       count the caster was checked against never moved. Combined with
+       `resolveSpell` looking only at `slotsMax`, a warlock could not cast a
+       single levelled spell: every one was offered in the bar and refused on
+       click with "has no level 2 slots at all". */
+    pact_slot_spend: function (state, e) {
+      var a = actor(state, e.actorId);
+      if (!a) return;
+      a.runtime.pactSlotsSpent = (a.runtime.pactSlotsSpent || 0) + (e.count || 1);
+    },
+
+    pact_slot_restore: function (state, e) {
+      var a = actor(state, e.actorId);
+      if (!a) return;
+      if (e.all) { a.runtime.pactSlotsSpent = 0; return; }
+      a.runtime.pactSlotsSpent = Math.max(0, (a.runtime.pactSlotsSpent || 0) - (e.count || 1));
     },
 
     /* The Help action's grant: one ally, one target, consumed by the next

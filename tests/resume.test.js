@@ -172,8 +172,17 @@ async function main() {
     t.eq(after.actors, before.actors, 'everyone who was there is still there');
     t.deep(after.names, before.names, 'by name');
     t.deep(after.hp, before.hp, 'carrying the hit points they had, not fresh ones');
-    t.eq(after.revision, saved.revision, 'at the revision the game was saved on',
-      '(' + saved.revision + ')');
+    /* At LEAST the saved revision, not exactly it. The table is live once it
+       loads: an ambient rumour, a companion's aside or the DM finishing a
+       narration all commit a batch, and demanding equality asks a running game
+       to hold its breath for the length of an assertion. It failed roughly one
+       run in ten on a +1 that meant nothing was wrong. Resuming BEHIND the save
+       is the real fault — that is state lost — and that is what is checked.
+       Identity of the world is proved by the seed, campaign, cast and hit
+       points above. */
+    t.ok(after.revision >= saved.revision,
+      'at or after the revision the game was saved on, never behind it',
+      '(saved ' + saved.revision + ' -> resumed ' + after.revision + ')');
 
     /* The point of resuming is to keep playing. A restored world that offers
        no legal move is a museum piece. */

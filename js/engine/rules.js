@@ -317,7 +317,7 @@
         events.push(mk('slot_restore', { actorId: actorId, all: true, reason: 'long rest' }));
       }
       if (runtime.pactSlotsSpent) {
-        events.push(mk('resource', { actorId: actorId, resource: 'pact_slot', delta: runtime.pactSlotsSpent, reason: 'long rest' }));
+        events.push(mk('pact_slot_restore', { actorId: actorId, all: true, reason: 'long rest' }));
       }
       var regain = Math.max(1, Math.floor(level / 2));
       events.push(mk('resource', { actorId: actorId, resource: 'hit_dice', delta: regain, reason: 'long rest' }));
@@ -325,6 +325,14 @@
         events.push(mk('condition_remove', { targetId: actorId, condition: 'exhaustion', levels: 1, reason: 'long rest' }));
       }
     } else {
+      /* Pact Magic comes back on a SHORT rest. That is the whole shape of the
+         warlock: few slots, spent freely, refilled every hour or so. It was
+         restored on a long rest only, and even then through a generic
+         `resource` event the applier wrote to `runtime.resources` — a field
+         nothing reads — so in practice a pact slot never came back at all. */
+      if (runtime.pactSlotsSpent) {
+        events.push(mk('pact_slot_restore', { actorId: actorId, all: true, reason: 'short rest' }));
+      }
       var spend = opts.spendHitDice || [];
       spend.forEach(function (hd) {
         events.push(mk('resource', {
