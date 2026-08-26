@@ -403,4 +403,72 @@ t.section('somebody holds the initiative out of combat, from the first moment');
   t.eq(st.activeActorId, 'foe', 'but settling during a fight leaves the order alone');
 }
 
+/* ---------------------------------------------------------------------------
+   The heroic policy protects CHARACTERS, not everything that breathes.
+
+   Found by having Opus 5 play a campaign under it. Ninety turns went by in a
+   fight against three Gate-Born that had all been beaten and not one of which
+   could be killed: every enemy reduced to 0 hit points was "left stable
+   instead", so no encounter could ever end, no experience was awarded and no
+   quest advanced. A heroic campaign was literally unwinnable.
+
+   The check that was missing is the one the resurrection branch two lines
+   below already used. The policy exists so a story is not ended by bad luck,
+   and bad luck is a thing that happens to characters, not to the ogre.
+--------------------------------------------------------------------------- */
+t.section('a heroic campaign still lets you kill the monsters');
+{
+  const st = scene('heroic');
+  const b = Events.makeBatch({ commandId: 'slay' });
+  Events.push(b, 'hp', { targetId: 'foe', delta: -100 }, 'down');
+  Events.commit(st, b);
+
+  const out = Mortality.resolveLethal(st, 'foe', {});
+  t.eq(out.died, true, 'the enemy dies');
+  t.eq(out.events.some(e => e.kind === 'death'), true, 'and a death event is emitted');
+  t.eq(out.events.some(e => e.kind === 'stabilise'), false,
+    'it is NOT quietly left stable instead');
+  t.ok(/dies/.test(out.beats.join(' ')), 'and the log says so', out.beats.join(' | '));
+}
+
+t.section('while the party is still protected by it');
+{
+  const st = scene('heroic');
+  const out = Mortality.resolveLethal(st, 'hero', {});
+  t.eq(out.died, false, 'a player character who would die does not');
+  t.eq(out.events.some(e => e.kind === 'stabilise'), true, 'they are left stable instead');
+}
+
+t.section('and a named ally is protected too, but a nameless enemy is not');
+{
+  const st = scene('heroic');
+  State.addActor(st, actorFixture('vip', 'Someone Important', 'neutral', 10, { important: true }));
+  State.refreshAllDerived(st);
+
+  t.eq(Mortality.resolveLethal(st, 'ally', {}).died, false, 'an ally is protected');
+  t.eq(Mortality.resolveLethal(st, 'vip', {}).died, false, 'so is a named NPC');
+  t.eq(Mortality.resolveLethal(st, 'foe', {}).died, true, 'the enemy is not');
+}
+
+t.section('a fight under heroic rules can actually END');
+{
+  /* The shape of the live failure: beat every enemy, and check that the
+     engine agrees there are none left standing. */
+  const st = scene('heroic');
+  const b = Events.makeBatch({ commandId: 'wipe' });
+  Events.push(b, 'hp', { targetId: 'foe', delta: -100 }, 'down');
+  Events.commit(st, b);
+  const out = Mortality.resolveLethal(st, 'foe', {});
+  const b2 = Events.makeBatch({ commandId: 'wipe2' });
+  out.events.forEach(e => {
+    const payload = Object.assign({}, e); delete payload.kind; delete payload.seq;
+    Events.push(b2, e.kind, payload);
+  });
+  Events.commit(st, b2);
+
+  t.eq(State.livingEnemies(st).length, 0,
+    'with the last enemy dead, nothing hostile is left standing \u2014 so the ' +
+    'encounter can end and the campaign can move on');
+}
+
 t.done();

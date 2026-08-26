@@ -173,9 +173,18 @@
     var name = (a && a.name) || actorId;
     var out = { events: [], beats: [], died: false, campaignOver: false };
 
-    if (!p.allowDeath && (opts.protect !== false)) {
+    if (!p.allowDeath && (opts.protect !== false) && matters(state, actorId)) {
       /* Heroic: the blow that would have killed leaves them stable instead.
-         Narrated as a near thing rather than as a rule being applied. */
+         Narrated as a near thing rather than as a rule being applied.
+
+         `matters` is the whole of it. Without that check the protection
+         applied to EVERYONE, monsters included, and a heroic campaign became
+         literally unwinnable: every enemy survived at 0 hit points, no
+         encounter could ever end, no experience was awarded and no quest
+         advanced. A live playthrough spent ninety turns in a fight against
+         three Gate-Born that had all been beaten and none of which could be
+         killed. The policy exists so that a story is not ended by bad luck,
+         which is a thing that happens to characters, not to the ogre. */
       out.events.push({ kind: 'stabilise', actorId: actorId });
       out.beats.push(name + ' should not have survived that, and somehow has \u2014 down, ' +
         'and barely breathing, but alive.');
