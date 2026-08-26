@@ -345,6 +345,24 @@
     var mk = function (kind, payload) { return Events ? Events.makeEvent(kind, payload) : Object.assign({ kind: kind }, payload); };
     var level = Character ? Character.characterLevel(base, progression) : (progression.levels || []).length;
 
+    /* Class feature pools come back on their own schedule: Second Wind, Action
+       Surge, Ki and Channel Divinity on a short rest; Rage, Lay on Hands,
+       Sorcery Points and Bardic Inspiration on a long one. Which is which is
+       declared in the feature registry rather than listed again here, so a
+       feature added to the data recovers correctly without this function being
+       touched. Nothing restored ANY of them before: the pools did not exist. */
+    var pools = (derived && derived.featureResources) || {};
+    var spent = (runtime && runtime.featuresSpent) || {};
+    var due = Object.keys(pools).filter(function (id) {
+      if (!(spent[id] > 0)) return false;
+      return type === 'long' ? true : pools[id].per === 'short';
+    });
+    if (due.length) {
+      events.push(mk('feature_restore', {
+        actorId: actorId, all: true, features: due, reason: type + ' rest',
+      }));
+    }
+
     if (type === 'long') {
       if (derived) {
         var heal = derived.hpMax - (runtime.hp || 0);

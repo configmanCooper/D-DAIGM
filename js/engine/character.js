@@ -149,6 +149,15 @@
     return null;
   }
 
+  /* Features owns what a class feature does. Same lazy lookup, same reason. */
+  function featuresModule() {
+    if (global.DND && global.DND.Features) return global.DND.Features;
+    if (typeof require !== 'undefined') {
+      try { return require('./features.js'); } catch (e) { return null; }
+    }
+    return null;
+  }
+
   /**
    * Resolve an equipment slot, preferring what the character is actually
    * carrying. A campaign item with its own history and its own AC block (a
@@ -323,18 +332,20 @@
       requires: function (ctx) { return !ctx.hasArmor; },
     });
 
-    (base.classes || []).forEach(function (c) {
-      var cd = cls(c.classId);
-      if (!cd || !cd.unarmoredDefense) return;
-      var ab = cd.unarmoredDefense;               // 'con' (Barbarian) or 'wis' (Monk)
-      var monkStyle = ab === 'wis';
-      contribs.push({
-        type: 'base', source: c.classId + '_unarmored_defense',
-        value: 10 + mods.dex + mods[ab],
-        /* The Barbarian may hold a shield; the Monk may not. */
-        requires: function (ctx) { return !ctx.hasArmor && (!monkStyle || !ctx.hasShield); },
-      });
-    });
+    /* Class features that change Armour Class — Unarmored Defense for the
+       barbarian and monk, Draconic Resilience for the sorcerer.
+
+       There was a block here that read `cls.unarmoredDefense`. No class has
+       that field: the data carries it as a level-1 feature with
+       `mech.type: 'unarmored_defense'` and a `secondAbility`. So the block
+       never ran, not once, and a level-5 barbarian with Constitution 16
+       derived AC 12 instead of 15 — the defining defensive feature of the
+       class, absent for the whole game. It comes from the feature registry
+       now, which reads the data as it is actually written. */
+    var Features = featuresModule();
+    if (Features && Features.acContributions) {
+      Features.acContributions(base).forEach(function (c) { contribs.push(c); });
+    }
 
     if (hasShield) {
       contribs.push({ type: 'add', source: 'shield', value: shieldAdd || 2, requires: function () { return true; } });
@@ -598,6 +609,15 @@
          level-twenty fighter swung once. That is not a rounding error: it is
          a quarter of the character. */
       attacksPerAction: extraAttacks(base),
+      /* What the class features actually grant. Sixty machine-readable feature
+         types were in the data and two were read; these come from the registry
+         in features.js so the sheet, the rest and the action bar all agree.
+         `narrativeFeatures` is the honest half — the features carried as text
+         for the Dungeon Master to adjudicate, named so a player is told which
+         rather than discovering it by trying. */
+      features: featureList(base),
+      featureResources: featurePools(base, abilityMods),
+      narrativeFeatures: narrativeFeatureNames(base),
       senses: deriveSenses(base, runtime),
       resistances: gatherDamageKeys(base, activeEffects, 'resist'),
       immunities: gatherDamageKeys(base, activeEffects, 'immune'),
@@ -615,8 +635,7 @@
    * at or below the level they have IN that class — Extra Attack does not
    * stack across classes in the 2014 rules, you simply use the best one.
    */
-  function extraAttacks(base) {
-    var best = 1;
+  function extraAttacks(base) {    var best = 1;
     (base.classes || []).forEach(function (c) {
       var cd = cls(c.classId);
       if (!cd || !cd.features) return;
@@ -631,8 +650,27 @@
     return best;
   }
 
-  function deriveSpeed(base, runtime, exhaustion) {
-    if (runtime.activeForm && runtime.activeForm.speed != null) return runtime.activeForm.speed;
+  /* ------------------------------------------------------- class features --- */
+
+  /* Thin wrappers over the registry, so `derive` reads the same way as the
+     rest of the file and a missing features.js degrades to an empty sheet
+     rather than throwing. */
+  function featureList(base) {
+    var F = featuresModule();
+    return F && F.gained ? F.gained(base) : [];
+  }
+
+  function featurePools(base, mods) {
+    var F = featuresModule();
+    return F && F.resources ? F.resources(base, mods) : {};
+  }
+
+  function narrativeFeatureNames(base) {
+    var F = featuresModule();
+    return F && F.narrativeOnly ? F.narrativeOnly(base) : [];
+  }
+
+  function deriveSpeed(base, runtime, exhaustion) {    if (runtime.activeForm && runtime.activeForm.speed != null) return runtime.activeForm.speed;
     var r = (function () { var T = table('RACES'); return T[base.subraceId] || T[base.raceId]; })();
     var speed = (r && r.speed) || base.speed || 30;
     /* Grappled, restrained, paralyzed, petrified, stunned and unconscious all

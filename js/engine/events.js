@@ -37,6 +37,7 @@
     'resource',          // hit dice, ki, rage, channel divinity, lay on hands...
     'slot_spend', 'slot_restore',   // spell slots, kept in their own pool
     'pact_slot_spend', 'pact_slot_restore',   // Pact Magic, a separate pool that refills on a SHORT rest
+    'feature_spend', 'feature_restore',       // rage, ki, action surge, lay on hands and the rest of the class pools
     'prepare_spells',    // a prepared caster's slate for the day
     'action_economy',    // an action, bonus action, reaction, object interaction or movement was spent this turn
     'move',
@@ -276,6 +277,35 @@
       if (!a) return;
       if (e.all) { a.runtime.pactSlotsSpent = 0; return; }
       a.runtime.pactSlotsSpent = Math.max(0, (a.runtime.pactSlotsSpent || 0) - (e.count || 1));
+    },
+
+    /* Class feature pools — rage uses, ki, sorcery points, action surge, lay
+       on hands, bardic inspiration, channel divinity. Held as SPENT counts, in
+       the same shape as `slotsSpent`, so the maximum can change underneath
+       them (it does, every level) without the remaining count going stale.
+       Their own event rather than the generic `resource` one, because that
+       writes to `runtime.resources`, which nothing checks against a maximum. */
+    feature_spend: function (state, e) {
+      var a = actor(state, e.actorId);
+      if (!a || !e.feature) return;
+      a.runtime.featuresSpent = a.runtime.featuresSpent || {};
+      a.runtime.featuresSpent[e.feature] =
+        (a.runtime.featuresSpent[e.feature] || 0) + (e.count || 1);
+    },
+
+    feature_restore: function (state, e) {
+      var a = actor(state, e.actorId);
+      if (!a) return;
+      a.runtime.featuresSpent = a.runtime.featuresSpent || {};
+      if (e.all) {
+        (e.features || Object.keys(a.runtime.featuresSpent)).forEach(function (id) {
+          a.runtime.featuresSpent[id] = 0;
+        });
+        return;
+      }
+      if (!e.feature) return;
+      a.runtime.featuresSpent[e.feature] =
+        Math.max(0, (a.runtime.featuresSpent[e.feature] || 0) - (e.count || 1));
     },
 
     /* The Help action's grant: one ally, one target, consumed by the next

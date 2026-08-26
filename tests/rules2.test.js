@@ -1470,4 +1470,136 @@ t.section('Appendix A conditions actually do something');
     '(' + Object.keys(Effects.CONDITIONS).length + ')');
 }
 
+t.section('class features are mechanics, not decoration');
+/*
+ * The class data has been machine-readable from the start: sixty distinct
+ * `mech.type` values describing Rage, Sneak Attack, Ki, Lay on Hands, Action
+ * Surge, Second Wind, Unarmored Defense and the rest, each with its own
+ * progression table. Searching every engine, ai, ui and gen source file for
+ * those sixty names found exactly TWO being read — `asi` and `extra_attack`.
+ *
+ * That is worse than not having them: a barbarian's sheet listed Rage, the
+ * level-up screen congratulated them on gaining it, and there was no rage in
+ * the game. And Unarmored Defense was a special case of the recurring bug —
+ * character.js DID have a block for it, reading `cls.unarmoredDefense`, a
+ * field no class has. It never ran once. A level-5 barbarian with Constitution
+ * 16 derived AC 12 instead of 15, all game.
+ */
+{
+  const Features = require('../js/engine/features.js');
+  const Rules = require('../js/engine/rules.js');
+
+  const build = (classId, levels, abilities) => Character.buildFromSpec({
+    name: 'T', raceId: 'human', classId, levels, backgroundId: 'soldier',
+    abilities, proficiencies: { skills: [] },
+  });
+  const sheet = (classId, levels, abilities) => {
+    const c = build(classId, levels, abilities);
+    return Character.derive(c.base, c.progression, c.runtime, []);
+  };
+
+  /* Every type in the data has a decision recorded against it. A feature the
+     registry has never heard of is one nobody decided about, and it would
+     silently do nothing — which is exactly the state this fixes. */
+  t.deep(Features.unregisteredTypes(), [],
+    'every feature type in the class data is registered');
+
+  /* --- Unarmored Defense, which had never once been applied --- */
+  {
+    const barb = sheet('barbarian', 5, { str: 16, dex: 14, con: 16, int: 8, wis: 10, cha: 8 });
+    t.eq(barb.ac, 15, 'a barbarian with Dex 14 and Con 16 has AC 15, not 12',
+      '(' + barb.acBreakdown.filter(b => b.applied).map(b => b.source).join(', ') + ')');
+
+    const monk = sheet('monk', 5, { str: 12, dex: 18, con: 14, int: 10, wis: 16, cha: 10 });
+    t.eq(monk.ac, 17, 'a monk with Dex 18 and Wis 16 has AC 17');
+
+    const sorc = sheet('sorcerer', 5, { str: 8, dex: 14, con: 14, int: 10, wis: 10, cha: 17 });
+    t.eq(sorc.ac, 15, 'Draconic Resilience gives the sorcerer 13 + Dex');
+
+    /* Armour still wins where it should: this must not quietly buff everyone. */
+    const fighter = sheet('fighter', 5, { str: 16, dex: 12, con: 14, int: 10, wis: 10, cha: 10 });
+    t.ok(fighter.acBreakdown.some(b => b.applied && /mail|plate|leather|armor/i.test(b.source)),
+      'a fighter in armour still derives from the armour',
+      '(' + fighter.acBreakdown.filter(b => b.applied).map(b => b.source).join(' + ') + ')');
+  }
+
+  /* --- pools, at the right size, from the right row of the table --- */
+  {
+    const barb = sheet('barbarian', 9, { str: 16, dex: 14, con: 16, int: 8, wis: 10, cha: 8 });
+    t.eq(barb.featureResources.rage.max, 4, 'a level-9 barbarian has four rages');
+    t.eq(Features.rageDamageBonus(build('barbarian', 9,
+      { str: 16, dex: 14, con: 16, int: 8, wis: 10, cha: 8 }).base), 3,
+    'and a rage damage bonus of +3');
+
+    /* A feature granted again at a higher level must supersede the first
+       grant, or a level-17 fighter has the one Action Surge the level-2 row
+       described. */
+    const f17 = sheet('fighter', 17, { str: 16, dex: 14, con: 14, int: 10, wis: 10, cha: 10 });
+    t.eq(f17.featureResources.action_surge.max, 2,
+      'a level-17 fighter has two Action Surges, not the one granted at level 2');
+    const cleric18 = sheet('cleric', 18, { str: 12, dex: 12, con: 14, int: 10, wis: 18, cha: 10 });
+    t.eq(cleric18.featureResources.channel_divinity.max, 3,
+      'and a level-18 cleric has three Channel Divinities');
+
+    const pal = sheet('paladin', 6, { str: 16, dex: 10, con: 14, int: 10, wis: 10, cha: 16 });
+    t.eq(pal.featureResources.lay_on_hands.max, 30, 'Lay on Hands is five points per level');
+    const monk = sheet('monk', 10, { str: 12, dex: 18, con: 14, int: 10, wis: 16, cha: 10 });
+    t.eq(monk.featureResources.ki.max, 10, 'a monk has ki equal to their level');
+    const bard = sheet('bard', 5, { str: 8, dex: 14, con: 12, int: 12, wis: 10, cha: 17 });
+    t.eq(bard.featureResources.bardic_inspiration.max, 3,
+      'Bardic Inspiration is Charisma modifier many');
+    t.eq(Features.sneakAttackDice(build('rogue', 11,
+      { str: 10, dex: 18, con: 14, int: 12, wis: 12, cha: 12 }).base), '6d6',
+    'a level-11 rogue sneak attacks for 6d6');
+  }
+
+  /* --- recovery, on the rest each pool actually uses --- */
+  {
+    const c = build('fighter', 9, { str: 16, dex: 12, con: 14, int: 10, wis: 10, cha: 10 });
+    const st = State.create({ seed: 'feature-rest' });
+    State.addActor(st, { id: 'pc1', name: 'T', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime });
+    State.refreshAllDerived(st);
+
+    const spend = names => {
+      const b = Events.makeBatch({ commandId: 's' + Math.random(), actorId: 'pc1' });
+      names.forEach(f => Events.push(b, 'feature_spend', { actorId: 'pc1', feature: f }, ''));
+      Events.commit(st, b);
+    };
+    const rest = kind => {
+      const r = Rules.restoreOnRest(st.actors.pc1.base, st.actors.pc1.progression,
+        st.actors.pc1.runtime, kind,
+        { actorId: 'pc1', derived: st.actors.pc1.derivedCache, spendHitDice: [] });
+      const b = Events.makeBatch({ commandId: 'r' + Math.random(), actorId: 'pc1' });
+      (r.events || []).forEach(e => b.events.push(e));
+      Events.commit(st, b);
+    };
+
+    spend(['second_wind', 'action_surge', 'indomitable']);
+    const after = () => st.actors.pc1.runtime.featuresSpent;
+    t.eq(after().second_wind, 1, 'spending Second Wind is recorded');
+
+    rest('short');
+    t.eq(after().second_wind, 0, 'a short rest gives Second Wind back');
+    t.eq(after().action_surge, 0, 'and Action Surge');
+    t.eq(after().indomitable, 1, 'but not Indomitable, which is once per long rest');
+
+    rest('long');
+    t.eq(after().indomitable, 0, 'a long rest gives Indomitable back too');
+
+    t.ok(Events.KINDS.indexOf('feature_spend') >= 0, 'feature_spend is a registered event kind');
+    t.ok(Events.KINDS.indexOf('feature_restore') >= 0, 'and feature_restore');
+  }
+
+  /* --- and the honest half --- */
+  {
+    const barb = sheet('barbarian', 9, { str: 16, dex: 14, con: 16, int: 8, wis: 10, cha: 8 });
+    t.ok(barb.narrativeFeatures.length > 0,
+      'features the engine does not simulate are named rather than implied',
+      '(' + barb.narrativeFeatures.slice(0, 3).join(', ') + ')');
+    t.eq(barb.narrativeFeatures.indexOf('Rage'), -1,
+      'and Rage is not among them, because it is real now');
+  }
+}
+
 t.done();
