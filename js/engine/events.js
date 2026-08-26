@@ -55,6 +55,7 @@
     'mount',             // got on or off a mount
     'time',              // minutes/hours/days passed
     'long_rest_taken',   // when the last long rest finished: one per 24 hours
+    'spell_cast_marker', // what has been cast this turn: the bonus-action spell rule
     'xp', 'level',
     'spawn', 'despawn',
     'narration',         // prose attached to this batch, after the fact
@@ -698,6 +699,17 @@
        resource game from slots, hit dice and every per-rest class feature. */
     long_rest_taken: function (state, e) {
       state.lastLongRestAt = typeof e.at === 'number' ? e.at : (state.clock || 0);
+    },
+
+    /* What has been cast this turn, so the bonus-action spell restriction can
+       be enforced. Held on the turn record, so it clears with the turn like
+       every other part of the economy. */
+    spell_cast_marker: function (state, e) {
+      var a = actor(state, e.actorId);
+      if (!a || !a.runtime.turn) return;
+      a.runtime.turn.spellsCast = (a.runtime.turn.spellsCast || []).concat([{
+        spellId: e.spellId, castTime: e.castTime, level: e.level || 0,
+      }]);
     },
 
     xp: function (state, e) {

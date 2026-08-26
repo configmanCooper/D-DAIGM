@@ -203,10 +203,27 @@
     var raw = [];
     for (var i = 0; i < n; i++) raw.push(die(rng, 20));
 
-    /* Halfling Lucky replaces a natural 1 on the die that would be used. It is
-       applied per-die before selection, which is how the rule reads. */
-    if (opts.luckyReroll) {
-      for (var j = 0; j < raw.length; j++) if (raw[j] === 1) raw[j] = die(rng, 20);
+    /* Halfling Lucky: "when you roll a 1 on the d20, you can reroll the die".
+       One die, the die you would actually use. This rerolled EVERY die showing
+       a 1, which with advantage is strictly more generous than the rule — and
+       with advantage, rerolling a 1 that was going to be discarded anyway is
+       not a use of the feature at all.
+
+         no advantage : the single die, if it is a 1
+         advantage    : only when BOTH come up 1, since otherwise the other one
+                        is the one being used
+         disadvantage : the lower die, which is the one that counts */
+    if (opts.luckyReroll && raw.length) {
+      var pick = 0;
+      if (net > 0) {
+        pick = raw.every(function (v) { return v === 1; }) ? 0 : -1;
+      } else if (net < 0) {
+        pick = raw.indexOf(Math.min.apply(null, raw));
+        if (raw[pick] !== 1) pick = -1;
+      } else {
+        pick = raw[0] === 1 ? 0 : -1;
+      }
+      if (pick >= 0) raw[pick] = die(rng, 20);
     }
 
     var natural;

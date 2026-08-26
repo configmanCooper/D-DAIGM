@@ -2274,4 +2274,250 @@ t.section('a spell takes as long as it takes');
   }
 }
 
+t.section('a multiclassed caster uses the right ability for each spell');
+/*
+ * Only one global DC and attack bonus existed, taken from whichever caster
+ * class happened to come first in the list. A cleric/wizard cast every spell
+ * off Wisdom, so half their list was resolved against the wrong ability
+ * entirely.
+ */
+{
+  const c = Character.buildFromSpec({
+    name: 'M', raceId: 'human', classId: 'cleric', levels: 3, backgroundId: 'acolyte',
+    abilities: { str: 10, dex: 12, con: 14, int: 10, wis: 18, cha: 8 },
+    proficiencies: { skills: [] },
+  });
+  c.base.classes.push({ classId: 'wizard', levels: 3 });
+  const d = Character.derive(c.base, c.progression, c.runtime, []);
+  const by = d.spellcasting.byClass;
+  t.ok(!!by, 'the sheet carries per-class spellcasting numbers');
+  t.eq(by.cleric.ability, 'wis', 'the cleric half casts off Wisdom');
+  t.eq(by.wizard.ability, 'int', 'and the wizard half off Intelligence');
+  t.ok(by.cleric.dc > by.wizard.dc,
+    'so with Wisdom 18 and Intelligence 10 the two DCs differ',
+    '(' + by.cleric.dc + ' vs ' + by.wizard.dc + ')');
+
+  /* A single-class caster must be unaffected. */
+  const solo = Character.buildFromSpec({
+    name: 'W', raceId: 'human', classId: 'wizard', levels: 5, backgroundId: 'sage',
+    abilities: { str: 8, dex: 14, con: 14, int: 18, wis: 10, cha: 10 },
+    proficiencies: { skills: [] },
+  });
+  const sd = Character.derive(solo.base, solo.progression, solo.runtime, []);
+  t.eq(sd.spellcasting.byClass.wizard.dc, sd.spellcasting.dc,
+    'a single-class caster\u2019s per-class DC is the same as their global one');
+}
+
+t.section('a bonus-action spell closes the turn to other spells');
+/*
+ * 2014: cast a spell with a bonus action and you may cast nothing else that
+ * turn except a cantrip with a casting time of one action. Nothing tracked
+ * what had been cast, so a sorcerer could Healing Word AND then cast a
+ * levelled spell with their action — the most-exploited hole in 5e's action
+ * economy.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+
+  function sorc() {
+    const s = Character.buildFromSpec({
+      name: 'S', raceId: 'human', classId: 'sorcerer', levels: 5, backgroundId: 'sage',
+      abilities: { str: 8, dex: 14, con: 14, int: 10, wis: 10, cha: 18 },
+      proficiencies: { skills: [] },
+    });
+    const st = State.create({ seed: 'bonus-spell' });
+    State.addActor(st, { id: 'pc1', name: 'S', side: 'party', kind: 'pc',
+      base: s.base, progression: s.progression, runtime: s.runtime });
+    st.actors.pc1.runtime.pos = { x: 0, y: 0 };
+    State.addActor(st, { id: 'foe1', name: 'Ogre', side: 'enemy', kind: 'monster',
+      base: { name: 'Ogre', abilities: { str: 16, dex: 8, con: 16, int: 5, wis: 7, cha: 7 } },
+      progression: { levels: [] },
+      runtime: { hp: 90, hpMax: 90, conditions: {}, inventory: [], deathSaves: {},
+        pos: { x: 1, y: 0 }, ac: 11, speed: 30, reach: 5 } });
+    State.refreshAllDerived(st);
+    const sc = st.actors.pc1.derivedCache.spellcasting;
+    sc.prepared = ['healing-word', 'magic-missile'];
+    sc.cantripsKnown = ['fire-bolt'];
+    st.combat = { active: true, round: 1, turnIndex: 0, order: ['pc1', 'foe1'] };
+    st.activeActorId = 'pc1';
+    Events.commit(st, Combat.startTurn(st, 'pc1'));
+    return st;
+  }
+  const cast = (st, id, lvl) => Dispatch.dispatch(st, { past: [], future: [] }, {
+    v: 1, family: 'spell', commandId: 'c' + Math.random(), actorId: 'pc1',
+    stateRevision: st.revision, turnEpoch: st.turnEpoch,
+    primary: { verb: 'cast', spellId: id, targetIds: ['foe1'], slotLevel: lvl },
+  }, {});
+
+  {
+    const st = sorc();
+    t.eq(!!cast(st, 'healing-word', 1).batch.refused, false, 'Healing Word goes off as a bonus action');
+    const after = cast(st, 'magic-missile', 1);
+    t.eq(!!after.batch.refused, true, 'and no levelled spell may follow it that turn');
+    t.ok(/bonus action/i.test((after.batch.refused || {}).detail || ''),
+      'and it says why', '(' + ((after.batch.refused || {}).detail || '') + ')');
+    t.eq(!!cast(st, 'fire-bolt', 0).batch.refused, false,
+      'but a cantrip with a casting time of one action still may');
+  }
+
+  {
+    /* And the other way round: having cast with your action, no bonus spell. */
+    const st = sorc();
+    t.eq(!!cast(st, 'magic-missile', 1).batch.refused, false, 'the action spell goes off');
+    t.eq(!!cast(st, 'healing-word', 1).batch.refused, true,
+      'and a bonus-action spell may not follow it either');
+  }
+
+  t.ok(Events.KINDS.indexOf('spell_cast_marker') >= 0,
+    'spell_cast_marker is a registered kind, or nothing would be remembered');
+}
+
+t.section('multiclassing has prerequisites, and grants only a subset');
+/*
+ * You must meet the ability requirement of the class you are leaving AND the
+ * one you are entering. Nothing checked, so a fighter with Intelligence 8
+ * could take a level of wizard — the requirement is the only thing stopping a
+ * character cherry-picking the best first-level feature of every class.
+ */
+{
+  const attempt = (from, abilities, into) => {
+    const c = Character.buildFromSpec({
+      name: 'X', raceId: 'human', classId: from, levels: 3, backgroundId: 'soldier',
+      abilities, proficiencies: { skills: [] },
+    });
+    try { return { ok: true, result: Character.levelUp(c.base, c.progression, { classId: into }) }; }
+    catch (e) { return { ok: false, why: e.message }; }
+  };
+
+  const dull = attempt('fighter', { str: 8, dex: 8, con: 14, int: 8, wis: 8, cha: 8 }, 'wizard');
+  t.eq(dull.ok, false, 'a fighter with Strength 8 and Intelligence 8 cannot become a wizard');
+  t.ok(/int 13/.test(dull.why || ''), 'and the refusal names what is missing',
+    '(' + (dull.why || '').slice(0, 90) + ')');
+
+  const able = attempt('fighter', { str: 16, dex: 12, con: 14, int: 14, wis: 10, cha: 10 }, 'wizard');
+  t.eq(able.ok, true, 'one who meets both requirements can');
+
+  const halfWay = attempt('wizard', { str: 8, dex: 10, con: 14, int: 16, wis: 10, cha: 10 }, 'fighter');
+  t.eq(halfWay.ok, false,
+    'and meeting only the class you are leaving is not enough');
+
+  /* The proficiencies gained are the multiclass subset, never the starting
+     kit — a wizard who takes a fighter level does not get heavy armour. */
+  const gained = attempt('wizard',
+    { str: 14, dex: 14, con: 14, int: 16, wis: 10, cha: 10 }, 'fighter');
+  t.eq(gained.ok, true, 'a wizard with Strength 14 may take a fighter level');
+  const profs = gained.result.base.proficiencies;
+  t.ok((profs.armor || []).indexOf('medium') >= 0, 'and gains medium armour');
+  t.eq((profs.armor || []).indexOf('heavy'), -1, 'but never heavy armour');
+  t.ok((profs.weapons || []).indexOf('martial') >= 0, 'and martial weapons');
+}
+
+t.section('you cannot attune to two copies of the same thing');
+/*
+ * The cap of three was checked; sameness was not. Two copies of an amulet have
+ * different uids, so a character could attune to three identical rings and
+ * stack the effect three times.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  const c = Character.buildFromSpec({
+    name: 'A', raceId: 'human', classId: 'fighter', levels: 3, backgroundId: 'soldier',
+    abilities: { str: 14, dex: 12, con: 14, int: 10, wis: 10, cha: 10 },
+    proficiencies: { skills: [] },
+  });
+  c.runtime.inventory = c.runtime.inventory.concat([
+    { uid: 'r1', id: 'ring-of-protection', name: 'a ring' },
+    { uid: 'r2', id: 'ring-of-protection', name: 'another ring' },
+    { uid: 'x1', id: 'cloak-of-protection', name: 'a cloak' },
+  ]);
+  c.runtime.attuned = ['r1'];
+  const st = State.create({ seed: 'attune-dupe' });
+  State.addActor(st, { id: 'pc1', name: 'A', side: 'party', kind: 'pc',
+    base: c.base, progression: c.progression, runtime: c.runtime });
+  State.refreshAllDerived(st);
+  st.combat = { active: false, order: [], turnIndex: 0, round: 0 };
+  const attune = uid => Dispatch.dispatch(st, { past: [], future: [] }, {
+    v: 1, family: 'item', commandId: 'a' + Math.random(), actorId: 'pc1',
+    stateRevision: st.revision, turnEpoch: st.turnEpoch,
+    primary: { verb: 'attune', itemId: uid, targetIds: [] },
+  }, {});
+
+  const dupe = attune('r2');
+  t.eq(!!dupe.batch.refused, true, 'a second copy of the same ring is refused');
+  t.ok(/second copy/i.test((dupe.batch.refused || {}).detail || ''),
+    'and says plainly that it would do nothing');
+  t.eq(!!attune('x1').batch.refused, false, 'while a different item attunes normally');
+}
+
+t.section('Halfling Lucky rerolls one die, and the one that counts');
+/*
+ * It rerolled EVERY die showing a 1. With advantage that is strictly more
+ * generous than the rule — and rerolling a 1 that was going to be discarded
+ * anyway is not a use of the feature at all.
+ */
+{
+  const Dice = require('../js/engine/dice.js');
+  const seq = list => { let i = 0; return { int: () => list[i++ % list.length], next: () => 0.5 }; };
+
+  const spare = Dice.d20({ rng: seq([1, 15, 20]), advantage: ['x'], luckyReroll: true });
+  t.deep(spare.rolls, [1, 15],
+    'with advantage, a 1 alongside a 15 is left alone \u2014 the 15 is the die being used');
+  t.eq(spare.natural, 15, 'and the 15 is what counts');
+
+  const both = Dice.d20({ rng: seq([1, 1, 19]), advantage: ['x'], luckyReroll: true });
+  t.eq(both.rolls.filter(r => r === 1).length, 1,
+    'with two 1s exactly one is rerolled, not both',
+    '(' + JSON.stringify(both.rolls) + ')');
+
+  const flat = Dice.d20({ rng: seq([1, 17]), luckyReroll: true });
+  t.eq(flat.natural, 17, 'a straight roll of 1 is rerolled');
+
+  const low = Dice.d20({ rng: seq([1, 12, 18]), disadvantage: ['x'], luckyReroll: true });
+  t.eq(low.rolls.indexOf(1), -1,
+    'with disadvantage the 1 is the die that counts, so it is the one rerolled',
+    '(' + JSON.stringify(low.rolls) + ')');
+}
+
+t.section('a mount that goes down puts its rider on the ground');
+/*
+ * `mountedOn` was set and cleared only by the rider's own mount and dismount
+ * verbs, so a knight whose horse had been killed under him rode the corpse for
+ * the rest of the fight — still at the mount's speed.
+ */
+{
+  require('../js/engine/combat.js');
+  const mk = (id, name) => ({
+    id, name, side: 'party', kind: 'npc',
+    base: { name, abilities: { str: 14, dex: 12, con: 12, int: 8, wis: 10, cha: 8 } },
+    progression: { levels: [] },
+    runtime: { hp: 20, hpMax: 20, conditions: {}, inventory: [], deathSaves: {},
+      pos: { x: 0, y: 0 }, ac: 12, speed: 30, reach: 5 },
+  });
+  const st = State.create({ seed: 'dismount' });
+  State.addActor(st, mk('knight', 'Knight'));
+  State.addActor(st, mk('horse', 'Warhorse'));
+  State.refreshAllDerived(st);
+  st.actors.knight.runtime.mountedOn = 'horse';
+  st.actors.knight.runtime.mountName = 'Warhorse';
+  st.combat = { active: true, order: ['knight', 'horse'], turnIndex: 0, round: 1 };
+  st.activeActorId = 'knight';
+
+  /* Still mounted while the horse is fine. */
+  Events.commit(st, Combat.startTurn(st, 'knight'));
+  t.eq(st.actors.knight.runtime.mountedOn, 'horse', 'a live horse keeps its rider');
+
+  const kill = Events.makeBatch({ commandId: 'kill' });
+  Events.push(kill, 'hp', { targetId: 'horse', delta: -100 }, '');
+  Events.commit(st, kill);
+  Events.commit(st, Combat.startTurn(st, 'knight'));
+
+  t.eq(st.actors.knight.runtime.mountedOn, null,
+    'but once it is down the rider is no longer on it');
+  t.eq(!!(st.actors.knight.runtime.conditions || {}).prone, true,
+    'and lands prone, which is where being thrown puts you');
+}
+
 t.done();

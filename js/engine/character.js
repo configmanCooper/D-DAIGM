@@ -482,10 +482,32 @@
 
     var ability = primary ? primary.cd.spellcasting.ability : null;
     var mod = ability ? mods[ability] : 0;
+
+    /* Per-class spellcasting, for a character who has more than one.
+       Each spell uses the ability of the CLASS it came from — a cleric/wizard
+       casts Cure Wounds off Wisdom and Magic Missile off Intelligence. Only one
+       global DC and attack bonus was produced, taken from whichever caster
+       class happened to come first, so half of a multiclassed caster's spells
+       were resolved against the wrong ability entirely. The single-class case
+       is unaffected: there is one entry and it matches the global one. */
+    var byClass = {};
+    (base.classes || []).forEach(function (c) {
+      var cd = cls(c.classId);
+      if (!cd || !cd.spellcasting || !cd.spellcasting.ability) return;
+      var ab = cd.spellcasting.ability;
+      byClass[c.classId] = {
+        classId: c.classId,
+        ability: ab,
+        dc: 8 + prof + (mods[ab] || 0),
+        attackBonus: prof + (mods[ab] || 0),
+      };
+    });
+
     return {
       ability: ability,
       dc: ability ? 8 + prof + mod : null,
       attackBonus: ability ? prof + mod : null,
+      byClass: byClass,
       casterLevel: combined,
       slotsMax: slotsMax,
       slotsRemaining: slotsRemaining,
@@ -733,6 +755,52 @@
      Validate and append exactly one level. Subclass timing is read from the
      class data (Cleric/Sorcerer/Warlock at 1, Wizard at 2, most at 3) and never
      hard-coded, so homebrew and errata cannot desync from it. */
+  /**
+   * The 2014 multiclassing table, verbatim.
+   *
+   * You must meet the requirement of the class you are leaving AND the one you
+   * are entering. Nothing enforced it, which made multiclassing free — a
+   * character could take one level of every class and collect the best
+   * first-level feature of each with no cost at all.
+   */
+  var MULTICLASS_PREREQ = {
+    barbarian: { all: ['str'], score: 13 },
+    bard: { all: ['cha'], score: 13 },
+    cleric: { all: ['wis'], score: 13 },
+    druid: { all: ['wis'], score: 13 },
+    fighter: { any: ['str', 'dex'], score: 13 },
+    monk: { all: ['dex', 'wis'], score: 13 },
+    paladin: { all: ['str', 'cha'], score: 13 },
+    ranger: { all: ['dex', 'wis'], score: 13 },
+    rogue: { all: ['dex'], score: 13 },
+    sorcerer: { all: ['cha'], score: 13 },
+    warlock: { all: ['cha'], score: 13 },
+    wizard: { all: ['int'], score: 13 },
+  };
+
+  /**
+   * What a new class actually grants when taken as a multiclass.
+   *
+   * You do NOT get the class's starting proficiencies; you get a named subset
+   * (PHB "Multiclassing: Proficiencies"). Everything was granted, so a wizard
+   * who took one level of fighter walked away with heavy armour and every
+   * martial weapon.
+   */
+  var MULTICLASS_PROFS = {
+    barbarian: { armor: ['shield'], weapons: ['simple', 'martial'] },
+    bard: { armor: ['light'], weapons: [], skills: 1, tools: 1 },
+    cleric: { armor: ['light', 'medium', 'shield'], weapons: [] },
+    druid: { armor: ['light', 'medium', 'shield'], weapons: [] },
+    fighter: { armor: ['light', 'medium', 'shield'], weapons: ['simple', 'martial'] },
+    monk: { armor: [], weapons: ['simple', 'shortsword'] },
+    paladin: { armor: ['light', 'medium', 'shield'], weapons: ['simple', 'martial'] },
+    ranger: { armor: ['light', 'medium', 'shield'], weapons: ['simple', 'martial'], skills: 1 },
+    rogue: { armor: ['light'], weapons: [], skills: 1, tools: ['thieves-tools'] },
+    sorcerer: { armor: [], weapons: [] },
+    warlock: { armor: ['light'], weapons: ['simple'] },
+    wizard: { armor: [], weapons: [] },
+  };
+
   function levelUp(base, progression, choice) {
     choice = choice || {};
     var classId = choice.classId;
@@ -748,6 +816,36 @@
     var classLevelAfter = (existing ? existing.levels : 0) + 1;
     var globalLevelAfter = newProg.levels.length + 1;
     if (globalLevelAfter > 20) throw new Error('levelUp: character is already level 20');
+
+    /* Multiclass prerequisites (2014, "Multiclassing"): you must meet the
+       ability requirement of the class you are LEAVING and the one you are
+       entering. Nothing checked, so a fighter with Intelligence 8 could take a
+       level of wizard — the requirement is the only thing that stops a
+       character cherry-picking the best level-1 feature of every class.
+
+       Only applied when this is genuinely a NEW class for the character;
+       advancing a class you already have has no prerequisite. */
+    var isNewClass = !existing && (newBase.classes || []).length > 0;
+    if (isNewClass && !choice.ignorePrerequisites) {
+      var scores = (newBase.abilities || {});
+      var unmet = [];
+      var need = function (cid) {
+        var req = MULTICLASS_PREREQ[cid];
+        if (!req) return;
+        var ok = req.any
+          ? req.any.some(function (ab) { return (scores[ab] || 0) >= req.score; })
+          : req.all.every(function (ab) { return (scores[ab] || 0) >= req.score; });
+        if (!ok) {
+          unmet.push(cid + ' needs ' +
+            (req.any ? req.any.join(' or ') : req.all.join(' and ')) + ' ' + req.score);
+        }
+      };
+      (newBase.classes || []).forEach(function (c) { need(c.classId); });
+      need(classId);
+      if (unmet.length) {
+        throw new Error('levelUp: multiclass prerequisites not met \u2014 ' + unmet.join('; '));
+      }
+    }
 
     var subclassLevel = cd.subclassLevel || 3;
     var hasSubclass = existing ? !!existing.subclassId : false;
@@ -769,6 +867,29 @@
     if (existing) existing.levels = classLevelAfter;
     else newBase.classes.push({ classId: classId, subclassId: choice.subclassId || null, levels: 1 });
     if (choice.subclassId && existing) existing.subclassId = choice.subclassId;
+
+    /* Only the multiclass subset of proficiencies. A wizard who takes one
+       level of fighter gets light and medium armour, shields and martial
+       weapons — not the whole starting kit, and never heavy armour. Nothing
+       granted anything at all before, which is a different kind of wrong: a
+       fighter/wizard could not use the armour their fighter levels should have
+       given them. */
+    if (isNewClass) {
+      var gain = MULTICLASS_PROFS[classId];
+      if (gain) {
+        newBase.proficiencies = newBase.proficiencies || {};
+        var addTo = function (key, list) {
+          if (!list || !list.length) return;
+          newBase.proficiencies[key] = (newBase.proficiencies[key] || []).slice();
+          list.forEach(function (v) {
+            if (newBase.proficiencies[key].indexOf(v) < 0) newBase.proficiencies[key].push(v);
+          });
+        };
+        addTo('armor', gain.armor);
+        addTo('weapons', gain.weapons);
+        if (Array.isArray(gain.tools)) addTo('tools', gain.tools);
+      }
+    }
 
     newProg.levels.push({
       level: globalLevelAfter, classId: classId,

@@ -896,7 +896,7 @@
     if (!t) return false;
     var Combat = combatModule();
     var ac = Combat && Combat.targetAc ? Combat.targetAc(state, tid) : 10;
-    var bonus = (d && d.spellcasting && d.spellcasting.attackBonus) || 0;
+    var bonus = castingNumbers(d, spell).attackBonus;
     var roll = Dice.attack({ rng: state.rng, mod: bonus, ac: ac });
     Events.push(b, 'roll', { of: 'spell_attack', actorId: command.actorId, targetId: tid, result: roll },
       a.name + ' casts ' + name + ' at ' + t.name + '.');
@@ -917,7 +917,7 @@
   function resolveSpellSave(state, b, command, a, d, spell, e, tid, name, upcastBy) {
     var t = actor(state, tid);
     if (!t) return;
-    var dc = (d && d.spellcasting && d.spellcasting.dc) || 10;
+    var dc = castingNumbers(d, spell).dc;
     var td = derivedOf(state, tid);
     var save = Rules.savingThrow
       ? Rules.savingThrow(td, e.ability, { rng: state.rng, dc: dc })
@@ -1205,6 +1205,18 @@
       case 'attune': {
         var attuned = (a.runtime.attuned || []).length;
         if (attuned >= 3) return Events.refuse(b, 'attunement-full', a.name + ' is already attuned to three items');
+        /* You cannot attune to more than one copy of the same item (DMG,
+           "Attunement"). The check compared uids, and two copies of the same
+           amulet have different uids, so a character could attune to three
+           identical rings and stack the effect three times. */
+        var already = (a.runtime.attuned || []).some(function (ref) {
+          var other = inv.filter(function (i) { return (i.uid || i.id) === ref; })[0];
+          return other && entry && other !== entry && other.id === entry.id;
+        });
+        if (already) {
+          return Events.refuse(b, 'duplicate-attunement',
+            a.name + ' is already attuned to ' + label + ' \u2014 a second copy does nothing');
+        }
         Events.push(b, 'item_attune', { actorId: command.actorId, uid: uid },
           a.name + ' attunes to ' + label + '.');
         return b;
@@ -1481,6 +1493,37 @@
     })[0] || null;
   }
 
+  /**
+   * The spellcasting numbers for the class this particular spell belongs to.
+   *
+   * A cleric/wizard casts Cure Wounds off Wisdom and Magic Missile off
+   * Intelligence. Only one global DC and attack bonus existed, taken from
+   * whichever caster class came first in the list, so half a multiclassed
+   * caster's spells were resolved against the wrong ability. For a
+   * single-class caster this returns exactly what the global values were.
+   */
+  function castingNumbers(d, spell) {
+    var sc = (d && d.spellcasting) || {};
+    var fallback = { ability: sc.ability, dc: sc.dc || 10, attackBonus: sc.attackBonus || 0 };
+    var byClass = sc.byClass;
+    if (!byClass) return fallback;
+
+    var owners = (spell && spell.classes) || [];
+    var mine = Object.keys(byClass);
+    if (mine.length <= 1 || !owners.length) return fallback;
+
+    /* Where the character has more than one caster class and the spell belongs
+       to several of them, take the best — a player choosing which class to
+       prepare a shared spell from would choose the same. */
+    var best = null;
+    owners.forEach(function (cid) {
+      var entry = byClass[cid];
+      if (!entry) return;
+      if (!best || entry.dc > best.dc) best = entry;
+    });
+    return best || fallback;
+  }
+
   function resolveSpell(state, command, ctx) {
     ctx = ctx || {};
     var b = Events.makeBatch(command);
@@ -1576,6 +1619,30 @@
         return Events.refuse(b, 'no-' + castTime,
           a.name + ' has no ' + castTime + ' left this turn');
       }
+
+      /* 2014, "Bonus Action" under Casting a Spell: if you cast a spell with a
+         bonus action, you cannot cast another spell that turn except a cantrip
+         with a casting time of one action. Nothing tracked what had been cast,
+         so a sorcerer could Quicken a Fireball and then cast a second levelled
+         spell with their action — which is the single most-exploited hole in
+         5e's action economy. */
+      var castThisTurn = (a.runtime.turn && a.runtime.turn.spellsCast) || [];
+      var bonusAlready = castThisTurn.some(function (c) { return c.castTime === 'bonus'; });
+      var isCantripAction = (spell && spell.level === 0) && castTime === 'action';
+      if (bonusAlready && !isCantripAction) {
+        return Events.refuse(b, 'bonus-spell-used',
+          a.name + ' already cast a spell as a bonus action this turn \u2014 only a ' +
+          'cantrip with a casting time of one action may follow it');
+      }
+      if (castTime === 'bonus' && castThisTurn.length) {
+        return Events.refuse(b, 'spell-already-cast',
+          a.name + ' has already cast a spell this turn, so no bonus-action spell may follow');
+      }
+
+      Events.push(b, 'spell_cast_marker', {
+        actorId: command.actorId, spellId: spellId, castTime: castTime,
+        level: (spell && spell.level) || 0,
+      }, '');
     }
 
     /* A ritual costs no spell slot. That is the entire point of the ritual tag

@@ -396,6 +396,23 @@
         name + ' loses the opening their ally made.');
     }
 
+    /* You cannot stay on a mount that is dead, unconscious or no longer there.
+       `mountedOn` was set and cleared only by the rider's own mount/dismount
+       verbs, so a knight whose horse had been killed under him rode the corpse
+       for the rest of the fight — still at the mount's speed. */
+    if (a.runtime.mountedOn) {
+      var beast = actor(state, a.runtime.mountedOn);
+      var gone = !beast || beast.runtime.dead || (beast.runtime.hp || 0) <= 0 ||
+        (beast.runtime.conditions && (beast.runtime.conditions.unconscious ||
+          beast.runtime.conditions.paralyzed || beast.runtime.conditions.petrified));
+      if (gone) {
+        Events.push(b, 'mount', { actorId: actorId, mountId: null },
+          name + ' is thrown clear as ' + ((beast && beast.name) || 'their mount') + ' goes down.');
+        Events.push(b, 'condition_add', { targetId: actorId, condition: 'prone' },
+          name + ' lands hard.');
+      }
+    }
+
     /* A character at 0 hit points is unconscious: they do not act, they make a
        death saving throw. A playtest caught Shen dropping to 0 and then taking
        a swing on his next turn, which is both a rules violation and the kind
