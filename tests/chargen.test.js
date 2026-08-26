@@ -337,6 +337,7 @@ Backstory.generate({ name: 'Test', raceId: 'human', classId: 'fighter', abilitie
     t.eq(res.source, 'seed', 'a model that breaks character falls back to a seed');
     Backend.configure({ kind: 'offline' });
     runCasterTests();
+    runSkillProficiencyTests();
     t.done();
   })
   .catch(e => { console.error(e); process.exit(1); });
@@ -351,6 +352,98 @@ Backstory.generate({ name: 'Test', raceId: 'human', classId: 'fighter', abilitie
  * class's own list, of a level the character can actually cast, and not
  * repeated.
  */
+/**
+ * Skill proficiencies have to survive the trip from the builder to the sheet.
+ *
+ * They did not. The builder picked them and wrote them to `spec.skills`;
+ * `buildFromSpec` read only `spec.proficiencies.skills`, which the builder
+ * never sets; and `derive()` reads that array to decide who is proficient.
+ * The result was that EVERY generated character had an empty proficiency
+ * list, and every skill check in the game — Stealth, Perception, Athletics,
+ * the lot — was rolled at the bare ability modifier. A rogue was no better at
+ * sneaking than a barbarian.
+ *
+ * It is exactly the bug that had already been found and fixed one field along,
+ * for saving throws, which is why it is worth pinning both here: the shape
+ * recurs, and it is silent every time.
+ */
+function runSkillProficiencyTests() {
+  t.section('generated characters actually have their skill proficiencies');
+
+  const classes = ['wizard', 'rogue', 'fighter', 'cleric', 'barbarian', 'bard'];
+  let noneAtAll = 0;
+  const missed = [];
+
+  classes.forEach(classId => {
+    const spec = Chargen.generate({ rng: new RNG('skl-' + classId), fixed: { classId, levels: 5 } });
+    const built = Character.buildFromSpec(spec);
+    const derived = Character.derive(built.base, built.progression, built.runtime, []);
+    const proficient = Object.keys(derived.skills).filter(k => derived.skills[k].proficient);
+
+    if (!proficient.length) noneAtAll++;
+    (spec.skills || []).forEach(s => {
+      if (proficient.indexOf(s) < 0) missed.push(classId + ':' + s);
+    });
+  });
+
+  t.eq(noneAtAll, 0, 'no generated character comes out with an empty skill list');
+  t.deep(missed, [], 'every skill the builder chose reaches the derived sheet');
+
+  t.section('a background grants its skills');
+  {
+    const BACKGROUNDS = require('../js/data/srd_rules.js').BACKGROUNDS;
+    const built = Character.buildFromSpec({
+      name: 'Sage', raceId: 'human', classId: 'wizard', levels: 1,
+      backgroundId: 'sage', skills: ['investigation'],
+      abilities: { str: 10, dex: 10, con: 10, int: 16, wis: 10, cha: 10 },
+    });
+    const derived = Character.derive(built.base, built.progression, built.runtime, []);
+    (BACKGROUNDS.sage.skillProfs || []).forEach(s => {
+      t.eq(!!derived.skills[s].proficient, true, 'the Sage background grants ' + s);
+    });
+    t.eq(derived.skills.investigation.proficient, true,
+      'and the class skill chosen alongside it survives too');
+  }
+
+  t.section('being proficient actually changes the roll');
+  {
+    const built = Character.buildFromSpec({
+      name: 'Sneak', raceId: 'human', classId: 'rogue', levels: 5,
+      backgroundId: 'criminal', skills: ['stealth'],
+      abilities: { str: 10, dex: 16, con: 10, int: 10, wis: 10, cha: 10 },
+    });
+    const derived = Character.derive(built.base, built.progression, built.runtime, []);
+    const dex = derived.abilityMods.dex;
+    t.eq(derived.skills.stealth.proficient, true, 'the rogue is proficient in Stealth');
+    t.ok(derived.skills.stealth.mod > dex,
+      'and their Stealth modifier beats their bare Dexterity modifier',
+      '(' + derived.skills.stealth.mod + ' vs ' + dex + ')');
+    t.eq(derived.skills.stealth.mod, dex + derived.proficiencyBonus,
+      'by exactly the proficiency bonus');
+    t.eq(derived.skills.nature.mod, derived.abilityMods.int,
+      'while an unproficient skill is just the ability modifier');
+  }
+
+  t.section('passive Perception reflects the proficiency');
+  {
+    const watcher = Character.buildFromSpec({
+      name: 'Watcher', raceId: 'human', classId: 'ranger', levels: 3,
+      skills: ['perception'],
+      abilities: { str: 10, dex: 10, con: 10, int: 10, wis: 16, cha: 10 },
+    });
+    const blind = Character.buildFromSpec({
+      name: 'Oblivious', raceId: 'human', classId: 'ranger', levels: 3,
+      skills: ['survival'],
+      abilities: { str: 10, dex: 10, con: 10, int: 10, wis: 16, cha: 10 },
+    });
+    const a = Character.derive(watcher.base, watcher.progression, watcher.runtime, []);
+    const b = Character.derive(blind.base, blind.progression, blind.runtime, []);
+    t.ok(a.passives.perception > b.passives.perception,
+      'the one trained in Perception notices more',
+      '(' + a.passives.perception + ' vs ' + b.passives.perception + ')');
+  }
+}
+
 function runCasterTests() {
   const SPELLS = require('../js/data/srd_spells.js').SPELLS;
   const CASTERS = ['wizard', 'cleric', 'bard', 'sorcerer', 'warlock', 'druid'];

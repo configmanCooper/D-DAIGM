@@ -159,6 +159,38 @@ button { cursor: pointer; }
 }
 .log > * { max-width: 46rem; margin-left: auto; margin-right: auto; }
 
+/* Out of character: a question to the Dungeon Master and their answer. Set
+   apart from the story deliberately — a player must never mistake a rules
+   answer for something that happened in the fiction. */
+.entry.ooc {
+  border-left: 2px dashed var(--line-2);
+  padding-left: 0.8rem;
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  opacity: 0.92;
+}
+.entry.ooc .speaker { color: var(--ink-faint); letter-spacing: 0.1em; }
+.entry.ooc .body { font-style: normal; color: var(--ink-dim); }
+.entry.ooc-reply { border-left-color: var(--gold-dim); }
+.entry.ooc-reply .speaker { color: var(--gold-dim); }
+.entry.ooc-reply .body { color: var(--ink); }
+
+/* "There is more below" — shown only when the reader has scrolled away from
+   the bottom and the Dungeon Master is still writing. The log used to be
+   yanked down on every token, which made it impossible to re-read anything
+   while the story was being told. */
+#stage { position: relative; }
+.log-more {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: 0.6rem; z-index: 5;
+  background: var(--panel-2); border: 1px solid var(--gold-dim); color: var(--gold-bright);
+  border-radius: 999px; padding: 0.3rem 0.9rem;
+  font-family: var(--sans); font-size: 0.76rem; cursor: pointer;
+  box-shadow: 0 0.4rem 1rem rgba(0, 0, 0, 0.5);
+}
+.log-more:hover { border-color: var(--gold); }
+.log-more[hidden] { display: none; }
+
 /* --------------------------------------------------------------- the dock --
    One small button per panel, along the bottom. Pressed means open. */
 #dock {

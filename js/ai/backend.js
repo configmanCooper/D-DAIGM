@@ -36,6 +36,15 @@
     narrator: { temperature: 0.7, top_p: 0.9, num_predict: 200, stream: true, repeat_penalty: 1.15 },
     /* A single NPC line. Short and a little warmer than narration. */
     voice: { temperature: 0.8, top_p: 0.92, num_predict: 90, stream: true, repeat_penalty: 1.12 },
+    /* The referee answering a question out of character.
+       Cold on purpose. This ran on `voice` at first, and at temperature 0.8 a
+       4B model given "level 3: 2 of 2" in its prompt still answered that the
+       third-level slots were "fully depleted", invented an ogre's hit points
+       it had been told it did not know, and offered the player spells they had
+       never learned. None of that is creativity worth having when someone has
+       asked what their Armour Class is: the answer is already in the prompt
+       and the only job is to read it out. */
+    rules: { temperature: 0.15, top_p: 0.85, num_predict: 320, stream: true, repeat_penalty: 1.05 },
     /* Compression. Deterministic, and the one place thinking earns its cost. */
     summary: { temperature: 0.1, top_p: 0.9, num_predict: 260, stream: false, repeat_penalty: 1.0, think: true },
     /* An AI player seat choosing a move. Structured, unhurried. */

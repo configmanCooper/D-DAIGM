@@ -23,6 +23,16 @@
     (typeof require !== 'undefined' ? require('../engine/knowledge.js') : null);
   var Offline = (global.DND && global.DND.Offline) ||
     (typeof require !== 'undefined' ? require('./offline.js') : null);
+  var Rulebook = (global.DND && global.DND.Rulebook) ||
+    (typeof require !== 'undefined' ? require('./rulebook.js') : null);
+  /* Resolved lazily inside tableFacts, not here: dispatch.js pulls in every
+     resolver, and those require knowledge.js, which requires this file. Taking
+     the reference at load time closes that circle and one of the two modules
+     gets a half-built export. */
+  function dispatch() {
+    return (global.DND && global.DND.Dispatch) ||
+      (typeof require !== 'undefined' ? require('../engine/dispatch.js') : null);
+  }
 
   /* Phrases that mean the model has stopped being a narrator. */
   var BREAKS_CHARACTER = /\b(?:as an ai|as a language model|i'?m an ai|i cannot (?:fulfil|fulfill|comply)|i'?m sorry,? but i|as a large language model|i don'?t have (?:personal|the ability))\b/i;
@@ -599,6 +609,314 @@
     });
   }
 
+  /**
+   * A question to the Dungeon Master, out of character.
+   *
+   * "OOC: can I see the far bank from here?" or "OOC: how does grappling
+   * work?" — the two things a player at a table asks between turns, and
+   * neither of them is a move. Answered as the referee rather than as the
+   * fiction: plain, brief, and with no dice rolled and no turn spent.
+   *
+   * The knowledge gate still applies. A player asking "OOC: who is really
+   * behind this?" gets what their character could know and nothing else — an
+   * out-of-character question is not a back door into the campaign's secrets,
+   * and the same `mustNotName` list that governs narration governs this.
+   */
+  function answer(state, store, campaign, question, opts) {
+    opts = opts || {};
+    var built = Prompt.forNarration(state, store, campaign, [], Object.assign({}, opts, {
+      maxWords: opts.maxWords || 110,
+      sentences: 4,
+      paragraphs: 1,
+    }));
+
+    /* Real numbers, so it never has to guess at the player's own sheet.
+       Without these the model answers "what is my Armour Class?" by inventing
+       a plausible number, which is worse than refusing. */
+    var facts = tableFacts(state, opts.actorId);
+
+    /* And the actual rule, so it never has to remember one. A 4B model asked
+       about grappling recalled "a check against their AC" and "restrained";
+       handed the SRD passage it paraphrases it correctly. */
+    var rules = Rulebook ? Rulebook.forPrompt(question, 3) : '';
+
+    var stage =
+      'A player has stopped play to ask you something directly:\n\n' +
+      '  "' + String(question).slice(0, 400) + '"\n\n' +
+      (rules ? '=== THE RULES THAT APPLY ===\n' +
+        'Quoted from the rulebook. These are authoritative. Use them, and do ' +
+        'not contradict them from memory.\n\n' + rules + '\n\n' : '') +
+      '=== THE SITUATION, for your reference only ===\n' + built.stage + '\n\n' +
+      /* The facts go LAST, immediately before the question is repeated,
+         because that is the position a small model actually attends to. With
+         them earlier in the prompt the model read "level 3: 2 of 2" and still
+         answered that those slots were spent. */
+      (facts ? '=== THE FACTS ===\n' +
+        'Taken directly from the game right now. Every number here is correct. ' +
+        'If the question is about any of it, READ THE NUMBER OUT rather than ' +
+        'working it out or recalling it:\n' + facts + '\n\n' : '') +
+      'The question again: "' + String(question).slice(0, 400) + '"\n\n' +
+      'Answer it in two or three plain sentences, beginning with the answer.';
+
+    if (!Backend.available()) {
+      return Promise.resolve({
+        text: offlineAnswer(question, built.ctx, facts, rules),
+        source: 'offline', report: { issues: ['fallback:no backend'] },
+      });
+    }
+
+    /* A referee's system prompt, NOT the narrator's.
+       Handing this the narration persona produced exactly what that persona is
+       built to produce: a paragraph of scene-setting about iron smoke and the
+       light over Glass Fen, and then, eventually, the answer about grappling.
+       The player asked a question and had to read a mood piece to find the
+       reply in it. */
+    var system = 'You are the Dungeon Master of a Dungeons & Dragons 5th Edition ' +
+      'game (2014 rules), answering a player\u2019s question between turns. ' +
+      'You are talking to a person, not narrating a scene.\n\n' +
+      'You can and should answer ANY question about:\n' +
+      '  \u2022 the D&D 5e rules \u2014 how grappling, concentration, saving throws, ' +
+      'spell slots, opportunity attacks, death saves, resting or anything else ' +
+      'actually works;\n' +
+      '  \u2022 this character \u2014 their statistics, what they are carrying, what ' +
+      'they can cast, what they are able to do right now;\n' +
+      '  \u2022 the situation \u2014 where they are, who is present, what they can see;\n' +
+      '  \u2022 this program itself \u2014 the panels along the bottom (Actions, Party, ' +
+      'Sheet, Map) open and close and can be dragged and resized; Save keeps the ' +
+      'game in this browser and Export downloads it as a file; typing anything ' +
+      'shows you what it will cost before it happens; and starting a line with ' +
+      '"OOC:" is how they are talking to you now, which never spends a turn.\n\n' +
+      'Use the FACTS given below for anything about this character or this ' +
+      'scene, and the RULES given below for anything about how the game works, ' +
+      'in preference to your own memory, which is less reliable than the text ' +
+      'you are given.\n\n' +
+      'THREE THINGS YOU MUST NOT DO:\n' +
+      '  1. Do not state a number that is not in the facts. If you are asked ' +
+      'something numerical and the number is written below, read it out exactly ' +
+      'as written; do not recompute it, and do not add it up.\n' +
+      '  2. Do not tell the player an enemy\u2019s hit points, Armour Class, ' +
+      'saving throws or statistics, and do not guess at them. Say that they ' +
+      'would have to find out in play.\n' +
+      '  3. Do not offer them spells, items, gold or abilities that are not ' +
+      'listed in the facts below. If it is not listed, they do not have it.\n\n' +
+      'Answer in two or three plain sentences. No scene-setting, no atmosphere, ' +
+      'no description of the room or the weather, no fiction of any kind. ' +
+      'Begin with the answer itself.\n' +
+      'You must not invent events, advance the story, or reveal anything the ' +
+      'party has not learned.';
+
+    return Backend.chat({
+      profile: 'rules',
+      messages: [{ role: 'system', content: system }, { role: 'user', content: stage }],
+      numPredict: 320,
+      signal: opts.signal,
+      /* Forwarded so the caller's stall deadline can see tokens arriving.
+         Without it a long but perfectly healthy answer reports no progress at
+         all and gets cut off at the stall limit. */
+      onToken: opts.onToken,
+    }).then(function (res) {
+      /* Gated for leaks, but NOT for the in-character rules: this is the DM
+         speaking as themselves, so "you" and rules talk are exactly right
+         here and would be stripped by the narration gates.
+         `redactNames` returns {text, redacted}, not a string — taking it for
+         a string put "[object Object]" on the page where the answer should
+         have been. */
+      var scrubbed = redactNames(String(res.text || '').trim(), built.ctx.mustNotName || []);
+      var text = (scrubbed && scrubbed.text ? scrubbed.text : '').trim();
+      if (!text) return { text: offlineAnswer(question, built.ctx, facts, rules), source: 'offline',
+        report: { issues: ['fallback:empty'] } };
+      return { text: text, source: res.kind, report: { issues: [], redacted: scrubbed.redacted } };
+    }).catch(function (err) {
+      /* Say what actually went wrong. Reporting "there is no model running"
+         when a model IS configured and the request failed sends the player to
+         the setup screen to fix something that is not broken — which is
+         exactly the dead end the "No model available" message created. */
+      var why = (err && err.message) || String(err);
+      return {
+        text: 'The Dungeon Master could not be reached, so this is the engine ' +
+          'answering instead of the model.\n\nReason: ' + why + '\n\n' +
+          offlineAnswer(question, built.ctx, facts, rules),
+        source: 'offline',
+        report: { issues: ['fallback:error'], error: why },
+      };
+    });
+  }
+
+  /**
+   * The numbers a player might ask about, straight from the engine.
+   *
+   * Supplied so the Dungeon Master never has to guess at its own game. Asked
+   * "what is my Armour Class?" without these, a model invents a plausible
+   * number, which is worse than refusing to answer.
+   */
+  function tableFacts(state, actorId) {
+    var id = actorId || state.activeActorId ||
+      ((state.seats || [])[0] || {}).actorId;
+    var a = id && state.actors ? state.actors[id] : null;
+    if (!a) return null;
+    var d = a.derivedCache || {};
+    var rt = a.runtime || {};
+    var L = [];
+
+    L.push(a.name + ' \u2014 ' +
+      [(a.base && (a.base.subraceId || a.base.raceId)),
+        ((a.base && a.base.classes) || []).map(function (c) {
+          return c.classId + ' ' + c.levels;
+        }).join('/')].filter(Boolean).join(' ') +
+      (d.level ? ', level ' + d.level : ''));
+    L.push('  Hit points ' + rt.hp + '/' + d.hpMax +
+      ' \u00b7 Armour Class ' + d.ac +
+      ' \u00b7 Speed ' + d.speed + ' ft' +
+      ' \u00b7 Proficiency +' + d.proficiencyBonus +
+      (rt.inspiration ? ' \u00b7 has Inspiration' : ''));
+    if (d.abilityMods && d.abilities) {
+      L.push('  Abilities: ' + Object.keys(d.abilityMods).map(function (k) {
+        return k.toUpperCase() + ' ' + d.abilities[k] +
+          ' (' + (d.abilityMods[k] >= 0 ? '+' : '') + d.abilityMods[k] + ')';
+      }).join(', '));
+    }
+    if (d.saves && d.abilityMods) {
+      /* `saves` is a flat map of final modifiers with no proficiency flag on
+         it, so proficiency is inferred by comparing against the bare ability
+         modifier. Printing a "* = proficient" legend and then never marking
+         anything, which is what happened first, is worse than not saying. */
+      L.push('  Saving throws: ' + Object.keys(d.saves).map(function (k) {
+        var n = d.saves[k];
+        var prof = n !== d.abilityMods[k];
+        return k.toUpperCase() + ' ' + (n >= 0 ? '+' : '') + n + (prof ? '*' : '');
+      }).join(', ') + '   (* = proficient in that save)');
+    }
+    if (d.skills) {
+      var profSkills = Object.keys(d.skills).filter(function (k) {
+        return d.skills[k].proficient || d.skills[k].expertise;
+      });
+      if (profSkills.length) {
+        L.push('  Proficient skills: ' + profSkills.map(function (k) {
+          var sk = d.skills[k];
+          return k + ' ' + (sk.mod >= 0 ? '+' : '') + sk.mod +
+            (sk.expertise ? ' (expertise)' : '');
+        }).join(', '));
+      }
+      if (d.passives && d.passives.perception != null) {
+        L.push('  Passive Perception ' + d.passives.perception);
+      }
+    }
+    var conds = Object.keys(rt.conditions || {}).filter(function (k) { return rt.conditions[k]; });
+    if (conds.length) L.push('  Currently: ' + conds.join(', '));
+    if (d.exhaustion) L.push('  Exhaustion level ' + d.exhaustion);
+    if (rt.concentratingOn) {
+      L.push('  Concentrating on ' + (rt.concentratingOn.name || rt.concentratingOn.spellId ||
+        rt.concentratingOn) + ' \u2014 taking damage forces a Constitution save.');
+    }
+
+    var sc = d.spellcasting;
+    if (sc && sc.ability) {
+      L.push('  Spellcasting: ' + sc.ability.toUpperCase() +
+        ', save DC ' + sc.dc + ', spell attack +' + sc.attackBonus +
+        ', ' + (sc.prepares === 'prepared' ? 'prepares spells daily' : 'knows a fixed list'));
+      /* `slotsRemaining` and `pactSlots.remaining` are computed by derive();
+         recomputing them here from `slotsSpent` would be a second source of
+         truth able to drift from the sheet the player is looking at. */
+      var slots = Object.keys(sc.slotsRemaining || {}).map(function (lv) {
+        return 'level ' + lv + ': ' + sc.slotsRemaining[lv] + ' of ' + sc.slotsMax[lv];
+      });
+      if (sc.pactSlots) {
+        slots.push('Pact Magic: ' + sc.pactSlots.remaining + ' of ' + sc.pactSlots.max +
+          ' at spell level ' + sc.pactSlots.level);
+      }
+      L.push('  Spell slots left: ' + (slots.length ? slots.join(', ') : 'none'));
+      if ((sc.cantripsKnown || []).length) {
+        L.push('  Cantrips: ' + sc.cantripsKnown.join(', '));
+      }
+      var castable = (sc.prepared || []).concat(sc.known || []);
+      if (castable.length) L.push('  Can cast: ' + castable.slice(0, 18).join(', '));
+      if ((sc.ritual || []).length) {
+        L.push('  Can cast as a ritual, without spending a slot: ' + sc.ritual.join(', '));
+      }
+    }
+
+    if (d.featureResources && Object.keys(d.featureResources).length) {
+      L.push('  Class features with uses: ' + Object.keys(d.featureResources).map(function (k) {
+        var pool = d.featureResources[k];
+        var used = (rt.featuresSpent || {})[k] || 0;
+        return (pool.label || k) + ' ' + Math.max(0, pool.max - used) + ' of ' + pool.max +
+          ' (returns on a ' + pool.per + ' rest)';
+      }).join(', '));
+    }
+    if ((d.narrativeFeatures || []).length) {
+      L.push('  Features the engine does not simulate, which YOU adjudicate ' +
+        'by ruling on them: ' + d.narrativeFeatures.slice(0, 10).join(', '));
+    }
+    if ((d.resistances || []).length) L.push('  Resistant to: ' + d.resistances.join(', '));
+    if ((d.immunities || []).length) L.push('  Immune to: ' + d.immunities.join(', '));
+
+    var inv = (rt.inventory || []).slice(0, 16).map(function (i) { return i.name || i.id; });
+    L.push('  Carrying: ' + (inv.length ? inv.join(', ') : 'nothing of note') +
+      ' \u00b7 ' + (rt.gold || 0) + ' gp');
+
+    /* What the rules will actually let them do this instant. "What can I do?"
+       is the commonest question at any table, and the engine already knows the
+       answer exactly — there is no reason for the model to guess at it. */
+    var D = dispatch();
+    if (D && D.legalMoves) {
+      var moves = [];
+      try { moves = D.legalMoves(state, id, {}) || []; } catch (e) { moves = []; }
+      if (moves.length) {
+        L.push('  Able to do right now: ' + moves.slice(0, 26).map(function (m) {
+          return m.what + (m.cost ? ' [' + m.cost + ']' : '');
+        }).join('; '));
+      }
+    }
+
+    if (state.combat && state.combat.active) {
+      var t = rt.turn;
+      L.push('  In combat, round ' + state.combat.round +
+        (t ? ' \u2014 action ' + (t.action ? 'available' : 'spent') +
+          ', bonus action ' + (t.bonus ? 'available' : 'spent') +
+          ', reaction ' + (t.reaction ? 'available' : 'spent') +
+          ', ' + t.movementRemaining + ' ft of movement left' : ''));
+    } else {
+      L.push('  Not in combat.');
+    }
+
+    /* Who else is here. Without this the model answered "what can I do?" with
+       a list of attacks on the ogre and then said "no one else is present" in
+       the same breath, because it had the legal moves but not the cast. */
+    var others = Object.keys(state.actors || {}).filter(function (k) {
+      return k !== id && !(state.actors[k].runtime || {}).dead;
+    }).map(function (k) {
+      var o = state.actors[k];
+      var side = o.side === 'party' ? 'ally' : (o.side === 'enemy' ? 'hostile' : 'neutral');
+      var down = (o.runtime || {}).hp <= 0 ? ', unconscious' : '';
+      return o.name + ' (' + side + down + ')';
+    });
+    L.push('  Also here: ' + (others.length ? others.join(', ') : 'nobody else'));
+
+    return L.join('\n');
+  }
+
+  /**
+   * The answer with no model at all.
+   *
+   * Worth more than an apology: the rulebook lookup and the character sheet
+   * are both local, so a question like "how does grappling work?" can be
+   * answered completely and correctly with nothing running. Only questions
+   * about the fiction actually need the model.
+   */
+  function offlineAnswer(question, ctx, facts, rules) {
+    var where = (ctx && ctx.locationName) || 'where you are';
+    if (rules) {
+      return 'The Dungeon Master model is not running, so this is the rulebook ' +
+        'itself rather than the Dungeon Master in their own words:\n\n' + rules +
+        (facts ? '\n\nAnd where you stand right now:\n' + facts : '');
+    }
+    return 'There is no Dungeon Master model running, so I cannot answer that in ' +
+      'words \u2014 pick one in the setup screen and I can. That question needs ' +
+      'the Dungeon Master; rules questions I can answer without one. What I can ' +
+      'tell you from the engine is that you are at ' + where + '.' +
+      (facts ? '\n\n' + facts : '');
+  }
+
   var api = {
     GATES: GATES,
     BREAKS_CHARACTER: BREAKS_CHARACTER,
@@ -615,6 +933,7 @@
     narrate: narrate,
     speak: speak,
     opening: opening,
+    answer: answer,
   };
 
   global.DND = global.DND || {};

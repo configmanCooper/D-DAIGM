@@ -473,6 +473,69 @@
     DND.Game.applyCommand(session, res.command, { ctx: ctx() }).then(humanActed);
   }
 
+  /* ------------------------------------------------ asking the DM a thing --
+   *
+   * Between turns, a player at a table asks two kinds of question: "can I see
+   * the far bank from here?" and "how does grappling actually work?". Neither
+   * is a move, and putting either through the referee turned it into one —
+   * "how does grappling work" was parsed as an attempt to grapple somebody.
+   *
+   * Prefixing with OOC: says plainly that you are stepping outside the
+   * fiction. Nothing is rolled, no action is spent, and there is nothing to
+   * confirm because nothing is being committed.
+   */
+  var OOC_PREFIX = /^\s*(?:ooc|oc)\s*[:,-]\s*/i;
+
+  /* The question, or null if this was not one. */
+  function oocQuestion(text) {
+    if (!OOC_PREFIX.test(text)) return null;
+    return text.replace(OOC_PREFIX, '').trim();
+  }
+
+  function askTheDm(question) {
+    if (!question) { setHint('Ask the Dungeon Master something after the OOC:'); return; }
+    var input = $('say');
+    if (DND.Log) DND.Log.ooc(viewerName() || 'You', question);
+    if (input) input.value = '';
+    lockComposer(true);
+    setHint('Asking the Dungeon Master\u2026');
+
+    var N = DND.Narrator;
+    if (!N || !N.answer) {
+      lockComposer(false);
+      setHint('');
+      if (DND.Log) DND.Log.oocAnswer('The Dungeon Master is not available to ask.');
+      return;
+    }
+
+    /* Through Game.askDm rather than Narrator.answer directly, so the question
+       gets the same stall deadline narration has. The viewer's own character
+       is named explicitly: "what is my Armour Class?" is a question about the
+       person whose eyes we are seeing through, not about whoever the
+       initiative happens to be on. */
+    var ask = (DND.Game && DND.Game.askDm)
+      ? DND.Game.askDm(session, question, {
+        locationName: locationName(),
+        actorId: S.viewerId || session.state.activeActorId,
+      })
+      : Promise.resolve(N.answer(session.state, session.store, session.campaign, question, {
+        locationName: locationName(),
+        actorId: S.viewerId || session.state.activeActorId,
+      }));
+
+    Promise.resolve(ask).then(function (res) {
+      lockComposer(false);
+      setHint('');
+      if (DND.Log) DND.Log.oocAnswer((res && res.text) || 'No answer came back.');
+      focusSay();
+    }).catch(function (e) {
+      lockComposer(false);
+      setHint('');
+      if (DND.Log) DND.Log.oocAnswer('That question could not be asked: ' + ((e && e.message) || e));
+      focusSay();
+    });
+  }
+
   /**
    * Put a resumed game's story back on the page.
    *
@@ -1328,6 +1391,13 @@
       if (!text || !session) return;
       var actorId = actingId();
       if (!actorId) { setHint('It is not a human seat\u2019s turn.'); return; }
+
+      /* "OOC: how does grappling work?" — a question to the Dungeon Master,
+         not a move. It spends no action, rolls nothing and does not need
+         confirming, because nothing is being committed. */
+      var ooc = oocQuestion(text);
+      if (ooc !== null) { askTheDm(ooc); return; }
+
       askToConfirm(actorId, text);
     };
 
@@ -1531,6 +1601,9 @@
     get session() { return session; },
     // identity / viewing
     viewerId: viewerId, viewerName: viewerName, setViewer: setViewer,
+    /* Exposed so the OOC prefix rule can be tested directly rather than
+       inferred from what the log happens to show. */
+    oocQuestion: oocQuestion,
     partyIds: partyIds, seats: seats,
     actorName: actorName, roleLine: roleLine,
     // data doors (all through Game, never the raw actor table)

@@ -18,9 +18,77 @@
 
   function logEl() { return document.getElementById('log'); }
 
-  function scroll() {
+  /**
+   * Follow the text, but only if the reader is already at the bottom.
+   *
+   * The log used to be yanked to the bottom on every token the Dungeon Master
+   * produced. Scroll up to re-read what happened two turns ago and the next
+   * token snatched the page away again — you could not read the story while
+   * the story was being written, which is most of the time.
+   *
+   * So it follows when you are at the bottom (the ordinary case: you are
+   * watching it arrive) and leaves you alone the moment you scroll away. The
+   * threshold is generous because a half-line of overshoot should still count
+   * as "at the bottom".
+   */
+  var STICK_PX = 64;
+
+  function atBottom(l) {
+    if (!l) return true;
+    return (l.scrollHeight - l.scrollTop - l.clientHeight) <= STICK_PX;
+  }
+
+  /**
+   * Do something that adds text, then follow it only if the reader was at the
+   * bottom BEFORE it was added.
+   *
+   * Sampling afterwards is the obvious mistake and it is wrong every time:
+   * appending grows `scrollHeight`, so a reader who was pinned to the bottom
+   * is suddenly "away from the bottom" by exactly the height of what just
+   * arrived, and the log never follows anything.
+   */
+  function follow(fn, opts) {
     var l = logEl();
-    if (l) l.scrollTop = l.scrollHeight;
+    var was = !l || atBottom(l);
+    var out = fn();
+    if (!l) return out;
+    if ((opts && opts.force) || was) {
+      l.scrollTop = l.scrollHeight;
+      markUnread(l, false);
+    } else {
+      markUnread(l, true);
+    }
+    return out;
+  }
+
+  function scroll(opts) {
+    var l = logEl();
+    if (!l) return;
+    if ((opts && opts.force) || atBottom(l)) {
+      l.scrollTop = l.scrollHeight;
+      markUnread(l, false);
+    } else {
+      markUnread(l, true);
+    }
+  }
+
+  /* A quiet marker when there is new text below the fold, so nobody wonders
+     whether the Dungeon Master has stopped writing. */
+  function markUnread(l, on) {
+    var host = l.parentNode;
+    if (!host) return;
+    var pip = document.getElementById('log-more');
+    if (!on) { if (pip) pip.hidden = true; return; }
+    if (!pip) {
+      pip = document.createElement('button');
+      pip.id = 'log-more';
+      pip.type = 'button';
+      pip.className = 'log-more';
+      pip.textContent = 'New text below \u2193';
+      pip.onclick = function () { scroll({ force: true }); };
+      host.appendChild(pip);
+    }
+    pip.hidden = false;
   }
 
   function reset() {
@@ -34,10 +102,10 @@
     return App ? App.esc(s) : String(s == null ? '' : s);
   }
 
-  function append(el) {
+  function append(el, opts) {
     var l = logEl();
-    if (l) { l.appendChild(el); scroll(); }
-    return el;
+    if (!l) return el;
+    return follow(function () { l.appendChild(el); return el; }, opts);
   }
 
   function system(text) {
@@ -51,11 +119,30 @@
     var e = document.createElement('div');
     e.className = 'entry player';
     e.innerHTML = '<div class="speaker">' + esc(name) + '</div><div class="body">' + esc(text) + '</div>';
-    return append(e);
+    /* Your own turn is worth jumping to, wherever you had scrolled to. */
+    return append(e, { force: true });
   }
 
-  function speech(actorId, name, text) {
+  /* ------------------------------------------------------------- out of
+     character. A question to the Dungeon Master and their reply, set apart
+     from the story so nobody mistakes either for something that happened. */
+  function ooc(name, text) {
     var e = document.createElement('div');
+    e.className = 'entry ooc ooc-ask';
+    e.innerHTML = '<div class="speaker">' + esc(name) + ' \u2014 out of character</div>' +
+      '<div class="body">' + esc(text) + '</div>';
+    return append(e, { force: true });
+  }
+
+  function oocAnswer(text) {
+    var e = document.createElement('div');
+    e.className = 'entry ooc ooc-reply';
+    e.innerHTML = '<div class="speaker">The Dungeon Master</div>' +
+      '<div class="body">' + esc(text) + '</div>';
+    return append(e, { force: true });
+  }
+
+  function speech(actorId, name, text) {    var e = document.createElement('div');
     e.className = 'entry speech';
     var App = global.DND && global.DND.App;
     var c = document.createElement('canvas');
@@ -191,8 +278,11 @@
        being written and announce the finished text once, below. */
     var log = document.getElementById('log');
     if (log && log.getAttribute('aria-busy') !== 'true') log.setAttribute('aria-busy', 'true');
-    active._narr.textContent = payload.soFar != null ? payload.soFar : (active._narr.textContent + (payload.piece || ''));
-    scroll();
+    follow(function () {
+      active._narr.textContent = payload.soFar != null
+        ? payload.soFar
+        : (active._narr.textContent + (payload.piece || ''));
+    });
   }
 
   function narration(payload) {
@@ -233,6 +323,8 @@
     reset: reset,
     system: system,
     player: player,
+    ooc: ooc,
+    oocAnswer: oocAnswer,
     speech: speech,
     committed: committed,
     narrationToken: narrationToken,

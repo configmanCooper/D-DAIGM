@@ -101,7 +101,14 @@
     }
 
     return Backend.chat({
-      profile: 'summary',
+      /* PROSE, not compression. This used the `summary` profile, which is the
+         one place `think: true` is set — it earns its cost when squeezing a
+         long transcript down, and is exactly wrong here. A thinking model
+         spends the token budget reasoning and returns empty content, so the
+         call "succeeded" with no text and the generator fell back to a canned
+         seed every single time, reporting "the Dungeon Master could not be
+         reached" when it had been reached perfectly well. */
+      profile: 'narrator',
       messages: [
         { role: 'system', content: SYSTEM },
         { role: 'user', content: describeSheet(spec, opts.derived) },

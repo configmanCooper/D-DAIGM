@@ -357,7 +357,17 @@
     var ctx = optionsFor(session, actorId);
     var actor = session.state.actors[actorId];
 
-    return Referee.parse(text, ctx.observation, ctx.options, {
+    /* A deadline here too. The referee runs before anything is committed and
+       the composer is locked while it thinks, so a model that stops answering
+       leaves a player unable to type OR act — the worst of the two failures.
+       Falling back to "I could not read that" at least hands control back. */
+    var controller = null;
+    if (!opts.signal && typeof AbortController !== 'undefined') {
+      try { controller = new AbortController(); } catch (e) { controller = null; }
+    }
+    var signal = opts.signal || (controller && controller.signal) || null;
+
+    var work = Referee.parse(text, ctx.observation, ctx.options, {
       actorId: actorId,
       actorName: actor && actor.name,
       sessionId: session.state.sessionId,
@@ -365,7 +375,7 @@
       turnEpoch: session.state.turnEpoch,
       source: opts.source || 'human',
       inCombat: !!(session.state.combat && session.state.combat.active),
-      signal: opts.signal,
+      signal: signal,
     }).then(function (parsed) {
       var preview = null;
       if (Preview && Preview.forCommand) {
@@ -383,6 +393,20 @@
       };
     }).catch(function (e) {
       return { ok: false, reason: String((e && e.message) || e), utterance: text };
+    });
+
+    return withDeadline(work, {
+      stallMs: opts.stallMs || 45000,
+      totalMs: opts.totalMs || 60000,
+      onProgress: function () { /* the referee does not stream */ },
+      abort: function () { if (controller) controller.abort(); },
+      onGiveUp: function (why) {
+        return {
+          ok: false, utterance: text,
+          reason: 'the Dungeon Master did not answer (' + why + ') \u2014 ' +
+            'try again, or pick an action from the list',
+        };
+      },
     });
   }
 
@@ -591,6 +615,65 @@
   /**
    * Produce prose for a committed batch. Never rejects.
    */
+  /**
+   * How long the table waits for prose before carrying on without it.
+   *
+   * A stalled model used to hang the whole game. `narrateBatch` awaits the
+   * narration, `applyCommand` awaits `narrateBatch`, and the browser passes
+   * the turn only after that resolves — so a local model that stopped
+   * producing tokens left the initiative frozen, the composer waiting and no
+   * way forward but reloading the page. Reported as "the GM is taking forever
+   * to write", which is exactly what it looked like.
+   *
+   * Two limits, because they catch different failures. STALL is the useful
+   * one: a narration that is streaming steadily is healthy however long it
+   * runs, and one that has produced nothing for half a minute is not. TOTAL is
+   * the backstop for a model that dribbles a token every few seconds forever.
+   */
+  var NARRATION_STALL_MS = 30000;
+  var NARRATION_TOTAL_MS = 120000;
+
+  /**
+   * Give a promise a deadline that resets whenever progress is reported.
+   *
+   * Resolves with `onGiveUp()` rather than rejecting, because prose failing
+   * must never look like the turn failing — the mechanical result was settled
+   * before any of this started.
+   */
+  function withDeadline(promise, opts) {
+    var stallMs = opts.stallMs || NARRATION_STALL_MS;
+    var totalMs = opts.totalMs || NARRATION_TOTAL_MS;
+    var settled = false;
+    var stallTimer = null;
+    var totalTimer = null;
+
+    return new Promise(function (resolve) {
+      var finish = function (value) {
+        if (settled) return;
+        settled = true;
+        if (stallTimer) clearTimeout(stallTimer);
+        if (totalTimer) clearTimeout(totalTimer);
+        resolve(value);
+      };
+      var giveUp = function (why) {
+        if (settled) return;
+        try { if (opts.abort) opts.abort(); } catch (e) { /* already gone */ }
+        finish(opts.onGiveUp ? opts.onGiveUp(why) : null);
+      };
+
+      opts.onProgress(function () {
+        if (settled) return;
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = setTimeout(function () { giveUp('stalled'); }, stallMs);
+      });
+
+      stallTimer = setTimeout(function () { giveUp('stalled'); }, stallMs);
+      totalTimer = setTimeout(function () { giveUp('too slow'); }, totalMs);
+
+      promise.then(finish, function () { finish(null); });
+    });
+  }
+
   function narrateBatch(session, command, batch, opts) {
     opts = opts || {};
     if (opts.skipNarration) return Promise.resolve(null);
@@ -598,8 +681,17 @@
     var epoch = session.state.turnEpoch;
     emit(session, 'thinking', { actorId: command.actorId, stage: 'narrating' });
 
+    /* Somewhere to hang up from, if the model stops answering. */
+    var controller = null;
+    if (!opts.signal && typeof AbortController !== 'undefined') {
+      try { controller = new AbortController(); } catch (e) { controller = null; }
+    }
+    var signal = opts.signal || (controller && controller.signal) || null;
+
+    var noteProgress = function () { /* replaced by withDeadline */ };
     var streamed = '';
-    return Narrator.narrate(session.state, session.store, session.campaign, batch, {
+
+    var work = Narrator.narrate(session.state, session.store, session.campaign, batch, {
       locationName: opts.locationName || session.locationName,
       timeOfDay: opts.timeOfDay || session.timeOfDay,
       weather: opts.weather || session.weather,
@@ -612,10 +704,11 @@
       history: opts.history || [],
       partyId: opts.partyId || 'party',
       turnEpoch: epoch,
-      signal: opts.signal,
+      signal: signal,
       seed: opts.seed,
       onToken: function (piece) {
         streamed += piece;
+        noteProgress();
         emit(session, 'narrationToken', { actorId: command.actorId, piece: piece, soFar: streamed });
       },
     }).then(function (res) {
@@ -634,12 +727,83 @@
         report: res.report,
       });
       return res;
-    }).catch(function (e) {
+    }).catch(function () {
       /* Prose failing must never look like the turn failing. */
       var text = Offline.narrate(session.state, batch, {});
       Dispatch.narrate(session.state, command.commandId, text);
       emit(session, 'narration', { actorId: command.actorId, text: text, source: 'offline', report: { issues: ['error'] } });
       return { text: text, source: 'offline' };
+    });
+
+    return withDeadline(work, {
+      stallMs: opts.stallMs,
+      totalMs: opts.totalMs,
+      onProgress: function (fn) { noteProgress = fn; },
+      abort: function () { if (controller) controller.abort(); },
+      onGiveUp: function (why) {
+        /* Whatever the model managed before it stopped is better than nothing,
+           and the engine's own summary is better than a blank turn. */
+        var text = (streamed && streamed.trim().length > 40)
+          ? streamed.trim()
+          : Offline.narrate(session.state, batch, {});
+        Dispatch.narrate(session.state, command.commandId, text);
+        emit(session, 'narration', {
+          actorId: command.actorId, text: text, source: 'offline',
+          report: { issues: ['fallback:' + why] },
+        });
+        return { text: text, source: 'offline', gaveUp: why };
+      },
+    });
+  }
+
+  /**
+   * Answer a question asked out of character, without spending a turn.
+   *
+   * This is deliberately NOT a command. Nothing is dispatched, no events are
+   * committed, the revision does not move and the initiative does not pass —
+   * the player has simply stopped play to ask the referee something, the way
+   * anyone does at a real table. A question about the rules must never cost
+   * the asker their action.
+   *
+   * It gets the same deadline as narration for the same reason: a stalled
+   * model must not leave the composer locked with no way out but a reload.
+   */
+  function askDm(session, question, opts) {
+    opts = opts || {};
+    var controller = null;
+    if (!opts.signal && typeof AbortController !== 'undefined') {
+      try { controller = new AbortController(); } catch (e) { controller = null; }
+    }
+    var signal = opts.signal || (controller && controller.signal) || null;
+    var noteProgress = function () { /* replaced by withDeadline */ };
+    var streamed = '';
+
+    var work = Promise.resolve(Narrator.answer(
+      session.state, session.store, session.campaign, question, {
+        locationName: opts.locationName || session.locationName,
+        timeOfDay: opts.timeOfDay || session.timeOfDay,
+        actorId: opts.actorId || session.state.activeActorId,
+        signal: signal,
+        onToken: function (piece) { streamed += piece; noteProgress(); },
+      }
+    ));
+
+    return withDeadline(work, {
+      stallMs: opts.stallMs,
+      totalMs: opts.totalMs,
+      onProgress: function (fn) { noteProgress = fn; },
+      abort: function () { if (controller) controller.abort(); },
+      onGiveUp: function (why) {
+        return {
+          text: (streamed && streamed.trim().length > 30)
+            ? streamed.trim()
+            : 'The Dungeon Master did not answer in time \u2014 the model stopped ' +
+              'responding. Your turn is untouched; ask again, or check the ' +
+              'model in setup.',
+          source: 'offline',
+          gaveUp: why,
+        };
+      },
     });
   }
 
@@ -1485,6 +1649,7 @@
     settle: settle,
     submitText: submitText,
     interpret: interpret,
+    askDm: askDm,
     applyCommand: applyCommand,
     narrateBatch: narrateBatch,
     partySummary: partySummary,

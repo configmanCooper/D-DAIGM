@@ -78,6 +78,7 @@
   if (global.DND && global.DND.Data) setData(global.DND.Data);
 
   function cls(id) { return table('CLASSES')[id] || null; }
+  function background(id) { return table('BACKGROUNDS')[id] || null; }
   /**
    * Item lookup.
    *
@@ -123,6 +124,7 @@
           CLASSES: require('../data/srd_classes.js').CLASSES,
           ITEMS: require('../data/srd_items.js').ITEMS,
           SPELLS: require('../data/srd_spells.js').SPELLS,
+          BACKGROUNDS: require('../data/srd_rules.js').BACKGROUNDS,
         };
       } catch (e) { ambientCache = (g && g.DND && g.DND.Data) || null; }
     } else {
@@ -1021,6 +1023,35 @@
     if ((!base.proficiencies.saves || !base.proficiencies.saves.length) && classSaves) {
       base.proficiencies.saves = classSaves.slice();
     }
+
+    /* The same bug again, one field along, and it survived the first fix.
+       The builder chooses skills and puts them on `spec.skills` — a wizard
+       gets arcana and investigation — and `buildFromSpec` read only
+       `spec.proficiencies.skills`, which the builder never sets. So
+       `proficiencies.skills` came out EMPTY for every character the game
+       generated, and since `derive()` reads that array to decide who is
+       proficient, every generated character rolled every skill check in the
+       game at the bare ability modifier. A rogue's Stealth was the same as a
+       barbarian's.
+
+       The background is folded in for the same reason: backgrounds carry
+       `skillProfs` (Sage grants arcana and history) and nothing anywhere read
+       them, so the two skills a background is largely *for* did nothing. */
+    var skills = (base.proficiencies.skills || []).slice();
+    if (!skills.length && spec.skills && spec.skills.length) skills = spec.skills.slice();
+
+    var bg = background(base.backgroundId);
+    var tools = (base.proficiencies.tools || []).slice();
+    if (bg) {
+      (bg.skillProfs || []).forEach(function (s) {
+        if (skills.indexOf(s) < 0) skills.push(s);
+      });
+      (bg.toolProfs || []).forEach(function (tl) {
+        if (tools.indexOf(tl) < 0) tools.push(tl);
+      });
+    }
+    base.proficiencies.skills = skills;
+    base.proficiencies.tools = tools;
 
     /* Materialise the per-level HP in the order the classes were taken; the very
        first character level takes the maximum hit die, the rest use the supplied
