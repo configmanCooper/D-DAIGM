@@ -202,4 +202,51 @@ t.section('no module aliases something that loads after it');
     'every module-scope DND alias is provided by a script that loads earlier');
 }
 
+t.section('every script the page loads is actually in the repository');
+/*
+ * `.gitignore` carried an unanchored `ai/`, meant for the gigabytes of model
+ * weights. Unanchored, it matches a directory of that name at ANY depth, so it
+ * silently swallowed js/ai/ — the DM narrator, the referee, the prompt builder,
+ * the offline DM, the backstory generator, the model backend, the schema and
+ * the player agent. Eight source files, the entire AI layer, never committed.
+ *
+ * A clone of the repository could not run the game, and nothing said so:
+ * ignored files are not reported as untracked, so `git status` was clean all
+ * the way through. The only way to see it is to ask git, file by file, whether
+ * it has what the page asks for.
+ */
+{
+  const { execFileSync } = require('child_process');
+
+  const scripts = [];
+  const re = /<script[^>]+src="([^"?]+)/g;
+  let m;
+  while ((m = re.exec(html))) scripts.push(m[1]);
+  t.ok(scripts.length > 10, 'index.html loads a plausible number of scripts',
+    '(' + scripts.length + ')');
+
+  const onDisk = scripts.filter(f => fs.existsSync(path.join(ROOT, f)));
+  t.deep(scripts.filter(f => !fs.existsSync(path.join(ROOT, f))), [],
+    'and every one of them exists on disk');
+
+  let tracked = null;
+  try {
+    tracked = new Set(execFileSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' })
+      .split('\n').map(s => s.trim()).filter(Boolean));
+  } catch (e) { /* not a git checkout; nothing to assert */ }
+
+  if (!tracked) {
+    t.ok(true, 'not a git checkout, so there is nothing to compare against');
+  } else {
+    const untracked = onDisk.filter(f => !tracked.has(f));
+    t.deep(untracked, [],
+      'and git has every one of them, so a fresh clone can actually run the game');
+
+    /* The weights themselves must still be excluded — that is what the rule is
+       for, and loosening it to fix the above would be the opposite mistake. */
+    const weights = [...tracked].filter(f => /\.(gguf|bin|safetensors)$/.test(f));
+    t.deep(weights, [], 'while no model weights have crept in');
+  }
+}
+
 t.done();

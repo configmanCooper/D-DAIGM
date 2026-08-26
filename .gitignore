@@ -3,7 +3,15 @@ node_modules/
 
 # The local AI runtime and its models. Gigabytes of weights do not belong in
 # git — `scripts/install-ai.ps1` fetches them on a machine that needs them.
-ai/
+#
+# ANCHORED to the repository root. Unanchored, `ai/` matches a directory of
+# that name at ANY depth, which silently swallowed js/ai/ — the DM narrator,
+# the referee, the prompt builder, the offline DM, the backstory generator, the
+# model backend, the schema and the player agent. Eight source files, the whole
+# AI layer, never committed: a clone of this repository could not run the game
+# at all, and nothing said so because ignored files are not reported as
+# untracked.
+/ai/
 *.gguf
 *.bin
 *.safetensors

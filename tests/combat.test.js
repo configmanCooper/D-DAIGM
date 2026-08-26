@@ -656,7 +656,7 @@ t.section('every movement the bar offers has somewhere to go');
       primary: Command.makeStep(Object.assign({}, m.step)),
     });
     const b = Combat.resolveMovement(probe, cmd, {});
-    if (b && b.refusal) refused.push(m.what + ' → ' + b.refusal.detail);
+    if (b && b.refused) refused.push(m.what + ' → ' + b.refused.detail);
   });
   t.eq(refused.length, 0, 'and every one of them actually resolves when chosen',
     refused.length ? '(' + refused.join(' | ') + ')' : '');
