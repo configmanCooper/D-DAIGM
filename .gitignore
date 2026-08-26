@@ -34,3 +34,8 @@ __pycache__/
 # UI screenshots written by tests/shots.js, regenerated on demand
 shots/
 shots[0-9]/
+
+# Documents from other work that share this folder. They are not part of the
+# game, and one of them being locked by Word has already broken a restore.
+*.docx
+*.doc

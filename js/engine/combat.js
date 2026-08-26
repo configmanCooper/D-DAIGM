@@ -1798,8 +1798,11 @@
     if (!prone && state.combat && state.combat.active) {
       var reachable = closeableTargets(state, actorId, left);
       reachable.forEach(function (t) {
-        moves.push(move('move', 'Close on ' + t.name + ' (' + t.cost + ' ft)', 'movement',
-          { path: t.path, targetIds: [t.id] }));
+        moves.push(move('move',
+          (t.arrived ? 'Close on ' : 'Advance on ') + t.name + ' (' + t.cost + ' ft)',
+          'movement',
+          { path: t.path, targetIds: [t.id] },
+          t.arrived ? null : 'gets you nearer, but not yet within reach'));
       });
     }
 
@@ -2021,26 +2024,43 @@
       var path = [{ x: a.runtime.pos.x, y: a.runtime.pos.y }];
       var at = path[0];
       var spent = 0;
+      var arrived = false;
       for (var step = 0; step < 40; step++) {
-        if (chebyshevFt(at, t.runtime.pos) <= want) break;
+        if (chebyshevFt(at, t.runtime.pos) <= want) { arrived = true; break; }
         var next = {
           x: at.x + Math.sign(t.runtime.pos.x - at.x),
           y: at.y + Math.sign(t.runtime.pos.y - at.y),
         };
-        /* Do not walk onto somebody. */
+        /* Do not walk onto somebody; try either axis on its own instead. */
         if (occupied(state, next, actorId)) {
-          next = { x: at.x + Math.sign(t.runtime.pos.x - at.x), y: at.y };
-          if (occupied(state, next, actorId) || (next.x === at.x && next.y === at.y)) break;
+          var byX = { x: at.x + Math.sign(t.runtime.pos.x - at.x), y: at.y };
+          var byY = { x: at.x, y: at.y + Math.sign(t.runtime.pos.y - at.y) };
+          next = null;
+          if ((byX.x !== at.x) && !occupied(state, byX, actorId)) next = byX;
+          else if ((byY.y !== at.y) && !occupied(state, byY, actorId)) next = byY;
+          if (!next) break;
         }
+        /* Out of movement: stop here rather than abandoning the move
+           entirely. Getting HALF way to the enemy is a real turn, and
+           refusing to offer it left a character who could neither reach nor
+           close with nothing to do but Dodge — which reads as the game being
+           broken rather than the enemy being far away. */
+        if (spent + CELL > budget) break;
         spent += CELL;
-        if (spent > budget) return;                 // cannot get there this turn
         path.push(next);
         at = next;
       }
-      if (path.length > 1) out.push({ id: id, name: t.name || id, path: path, cost: spent });
+      if (path.length > 1) {
+        out.push({
+          id: id, name: t.name || id, path: path, cost: spent, arrived: arrived,
+        });
+      }
     });
-    /* Nearest first. */
-    out.sort(function (x, y) { return x.cost - y.cost; });
+    /* Whoever we can actually reach first, then whoever we get closest to. */
+    out.sort(function (x, y) {
+      if (x.arrived !== y.arrived) return x.arrived ? -1 : 1;
+      return x.cost - y.cost;
+    });
     return out.slice(0, 4);
   }
 

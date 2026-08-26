@@ -142,11 +142,32 @@ async function main() {
 
     const actions = await page.$$eval('#actionbar button', b => b.map(x => x.textContent.trim()));
     t.ok(actions.length > 0, 'the action bar offers moves', '(' + actions.length + ')');
-    /* Weapon reach is enforced, so an opening where the enemies are across the
-       room offers a way to CLOSE rather than a swing. Either is a fight. */
-    t.ok(actions.some(a => /attack|close on/i.test(a)),
-      'including a way to get at the enemy, since a fight is on',
-      '(' + actions.slice(0, 4).join(' / ') + ')');
+
+    /* Ask the ENGINE, not the top-level buttons. The bar groups moves by verb —
+       "Close on the Ghoul (10 ft)" is one of the Move button's targets, not a
+       button of its own — so scanning the visible labels reported "no way to
+       engage" whenever the enemies happened to start out of reach and closing
+       was the answer. */
+    const engage = await page.evaluate(() => {
+      const s = window.DND.App.session;
+      const st = s.state;
+      const who = st.activeActorId;
+      const moves = window.DND.Dispatch.legalMoves(st, who, window.DND.Game.sceneCtx(s)) || [];
+      const attacks = moves.filter(m => m.step && /^(attack|multiattack|unarmed_strike)$/.test(m.step.verb));
+      const closes = moves.filter(m => m.step && m.step.verb === 'move' && (m.step.path || []).length > 1);
+      const me = st.actors[who];
+      return {
+        can: attacks.length > 0 || closes.length > 0,
+        attacks: attacks.length,
+        closes: closes.map(m => m.what),
+        myPos: me && me.runtime.pos,
+        speed: me && me.runtime.turn ? me.runtime.turn.movementRemaining : null,
+      };
+    });
+    t.ok(engage.can, 'including a way to get at the enemy, since a fight is on',
+      engage.can
+        ? '(' + engage.attacks + ' attacks, ' + engage.closes.length + ' ways to close)'
+        : JSON.stringify(engage));
 
     /* The action bar must be built from the engine's legal moves, not a
        hand-written list, or the buttons and the rules drift apart. */
@@ -177,7 +198,7 @@ async function main() {
        click while this suite reported green. */
     const verb = (await Promise.all((await page.$$('#actionbar button')).map(async h =>
       ({ h, text: await page.evaluate(e => e.textContent, h) }))))
-      .filter(x => /attack|close on/i.test(x.text))[0];
+      .filter(x => /attack|close on|advance on|move/i.test(x.text))[0];
     t.ok(!!verb, 'the action bar offers a way to get at the enemy',
       verb ? '(' + verb.text.trim() + ')' : '');
     if (verb) await verb.h.click();
