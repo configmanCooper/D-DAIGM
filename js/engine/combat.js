@@ -967,6 +967,22 @@
       return b;
     }
 
+    /* Appendix A: any hit on a paralyzed or unconscious creature is a critical
+       if the attacker is within five feet of it. The condition was applied
+       faithfully, advantage was granted, and this half of the rule was simply
+       absent — probed against a paralyzed ogre, every hit came back with
+       `critDice: null`. It is a large part of why a held enemy is in real
+       trouble rather than merely easier to hit. */
+    if (!roll.isCrit && Effects && Effects.conditionFlag &&
+        Effects.conditionFlag(target.runtime.conditions, 'critWithin5')) {
+      var apart = distanceFt(attacker, target);
+      if (apart == null || apart <= CELL) {
+        roll.isCrit = true;
+        var why = Effects.conditionsWith(target.runtime.conditions, 'critWithin5')[0];
+        b.beats.push(target.name + ' is ' + why + ' and cannot dodge the blow \u2014 it lands true.');
+      }
+    }
+
     var dmg = Dice.damage(profile.damage, { rng: state.rng, crit: roll.isCrit, type: profile.damageType });
     var total = dmg.total;
 

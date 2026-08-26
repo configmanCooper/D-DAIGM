@@ -1334,4 +1334,140 @@ t.section('an area spell hits what is in the area, friend or foe');
   }
 }
 
+t.section('Appendix A conditions actually do something');
+/*
+ * The conditions were tracked from the beginning and almost none of them bit.
+ * Probed before writing this: a PARALYZED creature kept a speed of 30 and was
+ * still offered movement in the action bar; a petrified one failed a DC 10
+ * Dexterity save six times in twenty instead of twenty; poisoned and
+ * frightened imposed no disadvantage on ability checks at all, because the
+ * roll assembly looked at exhaustion and nothing else; and every hit on a
+ * paralyzed ogre came back with `critDice: null`.
+ *
+ * The cause was structural rather than a series of oversights: conditions live
+ * on `runtime`, and `rules.js` builds every roll from `derived`, which never
+ * carried them. So they are on the sheet now, and Appendix A lives in one
+ * table in effects.js that movement, saves, checks and attacks all read.
+ */
+{
+  const Effects = require('../js/engine/effects.js');
+  const Rules = require('../js/engine/rules.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+
+  const mk = (id, name, side, pos) => ({
+    id, name, side, kind: side === 'party' ? 'pc' : 'monster',
+    base: { name, abilities: { str: 14, dex: 14, con: 14, int: 10, wis: 10, cha: 10 } },
+    progression: { xp: 0, levels: [] },
+    runtime: { hp: 200, hpMax: 200, tempHp: 0, conditions: {}, exhaustion: 0,
+      concentratingOn: null, attuned: [], equipped: {}, inventory: [], deathSaves: {},
+      gold: 0, pos, resources: {}, speed: 30, ac: 12, reach: 5 },
+  });
+
+  function scene(cond, on, foePos) {
+    const s = State.create({ seed: 'cond-' + cond + (on || '') });
+    State.addActor(s, mk('hero', 'Hero', 'party', { x: 0, y: 0 }));
+    State.addActor(s, mk('foe', 'Ogre', 'enemy', foePos || { x: 1, y: 0 }));
+    State.refreshAllDerived(s);
+    if (cond) s.actors[on || 'hero'].runtime.conditions[cond] = true;
+    State.refreshAllDerived(s);
+    s.combat = { active: true, order: ['hero', 'foe'], turnIndex: 0, round: 1 };
+    s.activeActorId = 'hero';
+    Events.commit(s, Combat.startTurn(s, 'hero'));
+    return s;
+  }
+
+  /* --- speed 0 --- */
+  ['grappled', 'restrained', 'paralyzed', 'petrified', 'stunned', 'unconscious'].forEach(c => {
+    const s = scene(c);
+    t.eq(s.actors.hero.derivedCache.speed, 0, c + ' reduces speed to nothing');
+    const walk = (Combat.resolveMovement.legalMoves(s, 'hero', {}) || [])
+      .filter(m => ['move', 'climb', 'swim', 'jump'].indexOf(m.step.verb) >= 0);
+    t.eq(walk.length, 0, 'and ' + c + ' offers no way to walk off');
+  });
+  t.ok(scene(null).actors.hero.derivedCache.speed > 0,
+    'while an unaffected character still moves normally');
+
+  /* --- automatically failed Strength and Dexterity saves --- */
+  ['paralyzed', 'petrified', 'stunned', 'unconscious'].forEach(c => {
+    const s = scene(c);
+    const d = s.actors.hero.derivedCache;
+    let fails = 0;
+    for (let i = 0; i < 20; i++) {
+      if (!Rules.savingThrow(d, 'dex', { rng: s.rng, dc: 10 }).success) fails++;
+    }
+    t.eq(fails, 20, c + ' fails every Dexterity save, not merely most of them');
+    const one = Rules.savingThrow(d, 'dex', { rng: s.rng, dc: 5 });
+    t.eq(one.autoFailed, c, 'and the roll records why', '(' + one.autoFailed + ')');
+  });
+  {
+    /* Wisdom is untouched: being held does not make you gullible. */
+    const s = scene('paralyzed');
+    let fails = 0;
+    for (let i = 0; i < 20; i++) {
+      if (!Rules.savingThrow(s.actors.hero.derivedCache, 'wis', { rng: s.rng, dc: 5 }).success) fails++;
+    }
+    t.ok(fails < 20, 'but a Wisdom save is still rolled normally', '(' + fails + '/20 failed)');
+  }
+
+  /* --- disadvantage on ability checks --- */
+  ['poisoned', 'frightened'].forEach(c => {
+    const s = scene(c);
+    const r = Rules.abilityCheck(s.actors.hero.derivedCache, 'str', { rng: s.rng, dc: 10 });
+    t.ok((r.check.sources.disadvantage || []).indexOf(c) >= 0,
+      c + ' imposes disadvantage on ability checks',
+      '(' + (r.check.sources.disadvantage || []).join(', ') + ')');
+  });
+  {
+    const s = scene('restrained');
+    const r = Rules.savingThrow(s.actors.hero.derivedCache, 'dex', { rng: s.rng, dc: 10 });
+    t.ok((r.check.sources.disadvantage || []).indexOf('restrained') >= 0,
+      'restrained imposes disadvantage on Dexterity saves',
+      '(' + (r.check.sources.disadvantage || []).join(', ') + ')');
+  }
+
+  /* --- automatic criticals within five feet --- */
+  const swings = (cond, foePos) => {
+    const s = scene(cond, 'foe', foePos);
+    let hits = 0, crits = 0;
+    for (let i = 0; i < 30; i++) {
+      const b = Combat.resolveCombat(s, {
+        v: 1, family: 'combat', commandId: 'c' + i, actorId: 'hero',
+        stateRevision: s.revision, turnEpoch: s.turnEpoch,
+        primary: { verb: 'attack', targetIds: ['foe'] },
+      }, {});
+      (b.events || []).forEach(e => {
+        if (e.kind === 'roll' && e.of === 'attack' && e.result.hit !== false) {
+          hits++; if (e.result.isCrit) crits++;
+        }
+      });
+      s.actors.hero.runtime.turn.action = true;
+    }
+    return { hits, crits };
+  };
+  ['paralyzed', 'unconscious'].forEach(c => {
+    const r = swings(c);
+    t.ok(r.hits > 0, 'attacks land on a ' + c + ' target', '(' + r.hits + ')');
+    t.eq(r.crits, r.hits,
+      'and every one of them is a critical, because it is helpless within five feet',
+      '(' + r.crits + '/' + r.hits + ')');
+  });
+  {
+    const plain = swings(null);
+    t.ok(plain.crits < plain.hits,
+      'while an ordinary target is not critically hit every single time',
+      '(' + plain.crits + '/' + plain.hits + ')');
+  }
+
+  /* The table is the single source, so a condition nobody has wired up yet
+     still reports its flags rather than silently doing nothing. */
+  t.eq(Effects.speedIsZero({ grappled: true }), true, 'the table answers for speed');
+  t.eq(Effects.speedIsZero({ poisoned: true }), false, 'and only for what it should');
+  t.eq(Effects.autoFailsSave({ stunned: true }, 'dex'), 'stunned', 'and for saves');
+  t.eq(Effects.autoFailsSave({ stunned: true }, 'wis'), null, 'for the right abilities only');
+  t.eq(Object.keys(Effects.CONDITIONS).length, 15,
+    'and all fifteen of Appendix A are in it',
+    '(' + Object.keys(Effects.CONDITIONS).length + ')');
+}
+
 t.done();

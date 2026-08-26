@@ -138,6 +138,17 @@
     return (amb && amb[kind]) || DATA[kind] || {};
   }
 
+  /* Effects owns the Appendix A table. Looked up lazily rather than aliased at
+     module scope: character.js loads before effects.js in index.html, so an
+     alias taken at IIFE time would be undefined for the whole session. */
+  function effectsModule() {
+    if (global.DND && global.DND.Effects) return global.DND.Effects;
+    if (typeof require !== 'undefined') {
+      try { return require('./effects.js'); } catch (e) { return null; }
+    }
+    return null;
+  }
+
   /**
    * Resolve an equipment slot, preferring what the character is actually
    * carrying. A campaign item with its own history and its own AC block (a
@@ -569,6 +580,12 @@
       acBreakdown: ac.breakdown,
       initiative: abilityMods.dex + (runtime.initiativeBonus || 0),
       speed: speed,
+      /* The conditions themselves, carried onto the sheet so that everything
+         which takes `derived` — every saving throw, ability check and skill
+         check in rules.js — can see them. They were only ever on `runtime`,
+         which the roll assembly never receives, and that is the whole reason
+         Appendix A had almost no mechanical effect. */
+      conditions: Object.assign({}, runtime.conditions || {}),
       saves: saves,
       skills: skills,
       passives: passives,
@@ -618,6 +635,13 @@
     if (runtime.activeForm && runtime.activeForm.speed != null) return runtime.activeForm.speed;
     var r = (function () { var T = table('RACES'); return T[base.subraceId] || T[base.raceId]; })();
     var speed = (r && r.speed) || base.speed || 30;
+    /* Grappled, restrained, paralyzed, petrified, stunned and unconscious all
+       reduce speed to nothing. None of them did: probed before this was
+       written, a paralyzed creature kept a speed of 30 and was still offered
+       movement in the action bar. Checked before exhaustion because zero is
+       zero however you arrive at it. */
+    var E = effectsModule();
+    if (E && E.speedIsZero && E.speedIsZero(runtime.conditions)) return 0;
     if (exhaustion >= 5) return 0;                 // exhaustion 5: speed 0
     if (exhaustion >= 2) speed = Math.floor(speed / 2); // exhaustion 2: speed halved
     return speed;

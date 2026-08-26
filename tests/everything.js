@@ -344,6 +344,23 @@ function chooseInPeace(moves, turn, st) {
     if (rest) return rest;
   }
 
+  /* Rest on a schedule as well as on need.
+     Resting used to happen only when somebody happened to be below 70% out of
+     combat, which across a whole 250-turn run occurred exactly ONCE in 207
+     opportunities — so `verb:long_rest`, a required outcome, was being reached
+     by luck. Any change that shifted the balance of a fight by a hair tipped it
+     to zero and this harness reported a broken long rest that was working
+     perfectly. A party that adventures for thirty turns without sleeping is the
+     unrealistic case; make it deliberate. */
+  if (turn % 30 === 0) {
+    const scheduled = pick(moves, 'long_rest');
+    if (scheduled) return scheduled;
+  }
+  if (turn % 45 === 0) {
+    const breather = pick(moves, 'short_rest');
+    if (breather) return breather;
+  }
+
   /* Then whatever this place affords that has not been used yet. */
   const scenery = [
     'pick_up', 'unlock', 'disarm_trap', 'interact', 'read', 'track', 'forage',

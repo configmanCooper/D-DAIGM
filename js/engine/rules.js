@@ -58,6 +58,24 @@
     if (opts.disadvantage) dis = dis.concat(Array.isArray(opts.disadvantage) ? opts.disadvantage : [opts.disadvantage]);
     var ex = derived.exhaustion || 0;
     if (Effects && Effects.exhaustionDisadvantage(ex, rollType)) dis.push('exhaustion');
+
+    /* Conditions, from the same table Appendix A lives in. This used to read
+       exhaustion and nothing else, so a poisoned character rolled ability
+       checks exactly as well as a healthy one and a frightened one was
+       frightened in name only. Named individually rather than as "conditions"
+       so the log says which. */
+    var conds = derived.conditions || (opts.conditions || null);
+    if (Effects && conds) {
+      if (rollType === 'ability_check' || rollType === 'skill') {
+        Effects.conditionsWith(conds, 'checkDisadvantage').forEach(function (c) { dis.push(c); });
+      }
+      if (rollType === 'attack') {
+        Effects.conditionsWith(conds, 'attackDisadvantage').forEach(function (c) { dis.push(c); });
+      }
+      if (rollType === 'save' && opts.ability === 'dex') {
+        Effects.conditionsWith(conds, 'dexSaveDisadvantage').forEach(function (c) { dis.push(c); });
+      }
+    }
     return { advantage: adv, disadvantage: dis };
   }
 
@@ -107,9 +125,32 @@
    */
   function savingThrow(derived, ability, opts) {
     opts = opts || {};
+    /* Paralyzed, petrified, stunned and unconscious automatically fail
+       Strength and Dexterity saves. Probed at DC 10: a petrified creature was
+       failing six times in twenty instead of twenty, because nothing anywhere
+       consulted the condition. This is the rule that makes being held
+       dangerous rather than merely inconvenient — every area spell that calls
+       for a Dexterity save lands in full on a held target.
+
+       Still returned as a roll so the log and every caller keep their shape;
+       it simply cannot succeed. */
+    var conds = derived.conditions || opts.conditions || null;
+    var autoFail = Effects && conds ? Effects.autoFailsSave(conds, ability) : null;
+    if (autoFail) {
+      var failed = rollD20(derived.saves[ability] + (opts.bonus || 0),
+        { advantage: [], disadvantage: [autoFail] }, opts);
+      failed.success = false;
+      failed.autoFailed = autoFail;
+      failed.check = {
+        kind: 'save', ability: ability, flat: derived.saves[ability],
+        sources: { advantage: [], disadvantage: [autoFail] }, autoFailed: autoFail,
+      };
+      return failed;
+    }
+
     var flat = derived.saves[ability] + (opts.bonus || 0);
     if (opts.cover && ability === 'dex') flat += coverBonus(opts.cover).dexSave;
-    var ad = advDis(derived, 'save', opts);
+    var ad = advDis(derived, 'save', Object.assign({ ability: ability }, opts));
     var r = rollD20(flat, ad, opts);
     r.check = { kind: 'save', ability: ability, flat: flat, sources: ad };
     return r;

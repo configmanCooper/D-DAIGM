@@ -107,6 +107,115 @@
     return ['all'];
   }
 
+  /* --------------------------------------------------------- conditions ----- */
+
+  /**
+   * Appendix A, in one table.
+   *
+   * The conditions were tracked from the beginning and almost none of them
+   * actually bit. Probed before this was written: a PARALYZED creature kept a
+   * speed of 30 and was offered movement; a petrified one failed a DC 10
+   * Dexterity save six times in twenty instead of twenty; poisoned and
+   * frightened imposed no disadvantage on ability checks at all, because
+   * `advDis` looked at exhaustion and nothing else.
+   *
+   * Everything that needs to know what a condition does asks here, so the rules
+   * live in one place and cannot drift between the character sheet, the combat
+   * loop and the movement resolver — which is exactly how they drifted before.
+   *
+   * Only the mechanical consequences are modelled. "Can see", "can speak" and
+   * "drops what it is holding" are narrative for this engine and are left to
+   * the Dungeon Master rather than faked.
+   */
+  var CONDITIONS = {
+    blinded: { attackDisadvantage: true, attackedWithAdvantage: true, autoFailSight: true },
+    charmed: { cannotTargetCharmer: true, charmerSocialAdvantage: true },
+    deafened: { autoFailHearing: true },
+    /* The fifteenth. Exhaustion is a six-rung ladder rather than an on/off
+       condition, so its mechanics live in `exhaustionEffects` below and it
+       carries no flags here — but it belongs in the table, because a reader
+       checking whether Appendix A is complete should find it rather than
+       conclude it was forgotten. `conditionList` skips it for that reason: on
+       the runtime it is a number, not a boolean. */
+    exhaustion: { ladder: 'exhaustionEffects' },
+    frightened: {
+      attackDisadvantage: true, checkDisadvantage: true, cannotApproachSource: true,
+    },
+    grappled: { speedZero: true },
+    incapacitated: { noAction: true, noBonus: true, noReaction: true },
+    invisible: { attackAdvantage: true, attackedWithDisadvantage: true },
+    paralyzed: {
+      noAction: true, noBonus: true, noReaction: true, speedZero: true,
+      autoFailStrDexSaves: true, attackedWithAdvantage: true, critWithin5: true,
+    },
+    petrified: {
+      noAction: true, noBonus: true, noReaction: true, speedZero: true,
+      autoFailStrDexSaves: true, attackedWithAdvantage: true,
+      resistsAllDamage: true, poisonImmune: true,
+    },
+    poisoned: { attackDisadvantage: true, checkDisadvantage: true },
+    prone: { attackDisadvantage: true },
+    restrained: {
+      speedZero: true, attackDisadvantage: true, attackedWithAdvantage: true,
+      dexSaveDisadvantage: true,
+    },
+    stunned: {
+      noAction: true, noBonus: true, noReaction: true, speedZero: true,
+      autoFailStrDexSaves: true, attackedWithAdvantage: true,
+    },
+    unconscious: {
+      noAction: true, noBonus: true, noReaction: true, speedZero: true,
+      autoFailStrDexSaves: true, attackedWithAdvantage: true, critWithin5: true,
+      prone: true,
+    },
+  };
+
+  /* The conditions currently on a creature, as a plain list of names. Accepts
+     either the runtime map ({prone: true}) or an array. */
+  function conditionList(conditions) {
+    if (!conditions) return [];
+    if (Array.isArray(conditions)) return conditions.filter(Boolean).map(String);
+    return Object.keys(conditions).filter(function (k) {
+      return conditions[k] && k !== 'exhaustion';
+    });
+  }
+
+  /* Does any condition on this creature set the given flag? */
+  function conditionFlag(conditions, flag) {
+    return conditionList(conditions).some(function (name) {
+      var c = CONDITIONS[name];
+      return !!(c && c[flag]);
+    });
+  }
+
+  /* Which conditions set it — for the log, which should say WHY a roll went
+     the way it did rather than only that it did. */
+  function conditionsWith(conditions, flag) {
+    return conditionList(conditions).filter(function (name) {
+      var c = CONDITIONS[name];
+      return !!(c && c[flag]);
+    });
+  }
+
+  /**
+   * Is this saving throw automatically failed?
+   *
+   * Paralyzed, petrified, stunned and unconscious all auto-fail Strength and
+   * Dexterity saves — which is the rule that makes being held genuinely
+   * dangerous rather than merely inconvenient.
+   */
+  function autoFailsSave(conditions, ability) {
+    if (ability !== 'str' && ability !== 'dex') return null;
+    var by = conditionsWith(conditions, 'autoFailStrDexSaves');
+    return by.length ? by[0] : null;
+  }
+
+  /* Speed drops to nothing while grappled, restrained, or held by any of the
+     four conditions that include incapacitation. */
+  function speedIsZero(conditions) {
+    return conditionFlag(conditions, 'speedZero');
+  }
+
   /* --------------------------------------------------------- exhaustion ----- */
 
   /* The 2014 six-level ladder, cumulative. Each level below is exactly one rung
@@ -398,6 +507,10 @@
     newEffectId: newEffectId,
     rollMatches: rollMatches,
     exhaustionEffects: exhaustionEffects, exhaustionDisadvantage: exhaustionDisadvantage,
+    CONDITIONS: CONDITIONS,
+    conditionList: conditionList, conditionFlag: conditionFlag,
+    conditionsWith: conditionsWith,
+    autoFailsSave: autoFailsSave, speedIsZero: speedIsZero,
     advantageState: advantageState, modifiersFor: modifiersFor,
     coverDexBonus: coverDexBonus,
     mergeTempHp: mergeTempHp, applyDamageWithTemp: applyDamageWithTemp,
