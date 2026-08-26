@@ -358,4 +358,49 @@ t.section('with everyone truly dead the loop stops instead of spinning');
     'the initiative is cleared rather than handed to the surviving monster');
 }
 
+t.section('somebody holds the initiative out of combat, from the first moment');
+/*
+ * A peaceful opening left `activeActorId` null, and null is not neutral here:
+ * the browser reads it as "no one is up". Clicking End turn out of combat
+ * committed its event and then stopped dead — `humanActed` returned early, the
+ * turn never passed, the epoch never moved, and companions never got a go. A
+ * whole peaceful scene could not be played at all.
+ *
+ * What hid it for so long is that every harness worked around it. Six of them
+ * carried `state.activeActorId || seats[0]` or `|| 'shen'`, quietly supplying
+ * the holder the game had failed to seat, so the engine tests all passed while
+ * the real game sat still. The fallbacks are the tell; this asserts the thing
+ * they were compensating for.
+ */
+{
+  const Game = require('../js/game.js');
+  const st = scene('standard', { solo: true, heroHp: 20 });
+  st.combat = { active: false, order: [], turnIndex: 0, round: 1 };
+  st.activeActorId = null;
+  const session = { state: st, campaign: { id: 'test' }, listeners: {}, history: [], future: [] };
+
+  Game.settle(session);
+  t.eq(st.activeActorId, 'hero',
+    'settling a peaceful scene seats the initiative rather than leaving it empty',
+    '(' + st.activeActorId + ')');
+
+  const cur = Game.currentController(session);
+  t.ok(!!cur && !!cur.actorId, 'so the game can say whose turn it is',
+    '(' + (cur && cur.actorId) + ')');
+
+  /* And the turn must actually pass out of combat, which is what the epoch is
+     for — a stuck epoch is exactly how this presented. */
+  const before = st.turnEpoch || 0;
+  Game.advanceTurn(session, {});
+  t.ok((st.turnEpoch || 0) > before, 'and ending a turn out of combat advances the epoch',
+    '(' + before + ' -> ' + st.turnEpoch + ')');
+
+  /* Combat owns the order while it is running; settling mid-fight must not
+     reach in and move the initiative. */
+  st.combat = { active: true, order: ['foe', 'hero'], turnIndex: 0, round: 1 };
+  st.activeActorId = 'foe';
+  Game.settle(session);
+  t.eq(st.activeActorId, 'foe', 'but settling during a fight leaves the order alone');
+}
+
 t.done();

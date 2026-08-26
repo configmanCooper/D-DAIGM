@@ -79,6 +79,27 @@
          — they were simply standing in it from the first turn. */
       checkStanding(session);
     }
+    seatTheInitiative(session);
+    return session;
+  }
+
+  /**
+   * Somebody has to be up, even when nobody has rolled initiative.
+   *
+   * Out of combat a fresh session left `activeActorId` null, and null is not a
+   * neutral value here — it is read as "no one is up", so the browser's
+   * `humanActed` bailed before passing the turn and `currentController`
+   * returned nothing. Ending your turn in a peaceful scene did nothing at all:
+   * the epoch never moved, companions never spoke, and the table sat still
+   * until a fight happened to start. Combat owns the initiative while it is
+   * running, so this only fills a vacancy and never overrules an order.
+   */
+  function seatTheInitiative(session) {
+    if (!session || !session.state) return session;
+    var state = session.state;
+    if (state.combat && state.combat.active) return session;
+    if (state.activeActorId && state.actors[state.activeActorId]) return session;
+    state.activeActorId = outOfCombatHolder(session) || null;
     return session;
   }
 
@@ -1413,6 +1434,7 @@
        engine resolves them with. Two copies of this drifted apart once. */
     sceneCtx: sceneCtx,
     ensureScene: ensureScene,
+    seatTheInitiative: seatTheInitiative,
     settle: settle,
     submitText: submitText,
     applyCommand: applyCommand,

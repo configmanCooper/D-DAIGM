@@ -1786,7 +1786,6 @@
     }
 
     if (left <= 0) return moves;
-    if (!prone) moves.push(move('move', 'Move (' + left + ' ft left)', 'movement'));
 
     /* Somewhere worth moving TO.
        Enforcing weapon reach made this necessary: before it, everyone could
@@ -1794,16 +1793,39 @@
        reach real, a fight where the sides start apart cannot begin unless
        somebody closes — and a bare "Move" button with no destination gave
        neither a player nor a policy any way to do it. A boss fight ran until
-       the step limit with both sides standing still. */
+       the step limit with both sides standing still.
+
+       There used to be a destinationless `move` offered here as well, before
+       these. It could never resolve — the resolver refuses a move with no path
+       — so it was a button that answered every click with "no destination to
+       move to", and because it was pushed first it took the group's label and
+       sat at the head of the target list, which is exactly where a player
+       clicks. Every destination offered now carries a path. */
     if (!prone && state.combat && state.combat.active) {
       var reachable = closeableTargets(state, actorId, left);
       reachable.forEach(function (t) {
         moves.push(move('move',
           (t.arrived ? 'Close on ' : 'Advance on ') + t.name + ' (' + t.cost + ' ft)',
           'movement',
-          { path: t.path, targetIds: [t.id] },
-          t.arrived ? null : 'gets you nearer, but not yet within reach'));
+          {
+            path: t.path, targetIds: [t.id],
+            /* This warning used to be passed as a fifth argument. `move` takes
+               four, so it was dropped on the floor and the player was never
+               told the advance falls short. */
+            warn: t.arrived ? null : 'gets you nearer, but not yet within reach',
+          }));
       });
+
+      var away = retreatPath(state, actorId, left);
+      if (away) {
+        moves.push(move('move',
+          'Back away from ' + away.name + ' (' + away.cost + ' ft)',
+          'movement',
+          {
+            path: away.path,
+            warn: 'leaving their reach provokes an opportunity attack unless you Disengage first',
+          }));
+      }
     }
 
     /* Terrain the scene says is there. */
@@ -2071,6 +2093,61 @@
       return o && o.runtime && !o.runtime.dead && o.runtime.pos &&
         o.runtime.pos.x === p.x && o.runtime.pos.y === p.y;
     });
+  }
+
+  /**
+   * Getting out, which is the other half of getting in.
+   *
+   * `closeableTargets` gave the bar a way to reach an enemy once weapon reach
+   * became real, but nothing ever offered the reverse. A wounded character
+   * standing toe to toe with something had no way to break off except by
+   * typing it, so the only retreat in the whole action bar was Disengage —
+   * which forgoes opportunity attacks without actually taking you anywhere.
+   *
+   * Only offered when somebody is genuinely on top of you; backing away from
+   * an enemy already across the room is not a turn worth spending. The path
+   * runs through the ordinary movement resolver, so leaving a reach provokes
+   * exactly as it should unless the character disengaged first.
+   */
+  function retreatPath(state, actorId, budget) {
+    var a = actor(state, actorId);
+    if (!a || !a.runtime.pos || budget < CELL) return null;
+
+    var threats = perceivedEnemies(state, actorId).map(function (id) {
+      return actor(state, id);
+    }).filter(function (t) {
+      return t && t.runtime.pos && !t.runtime.dead &&
+        chebyshevFt(a.runtime.pos, t.runtime.pos) <= CELL;
+    });
+    if (!threats.length) return null;
+
+    /* Away from the middle of whoever is crowding us, so backing out of two
+       enemies does not walk straight into a third. */
+    var cx = 0, cy = 0;
+    threats.forEach(function (t) { cx += t.runtime.pos.x; cy += t.runtime.pos.y; });
+    cx /= threats.length; cy /= threats.length;
+
+    var path = [{ x: a.runtime.pos.x, y: a.runtime.pos.y }];
+    var at = path[0];
+    var spent = 0;
+    var dx = Math.sign(at.x - cx) || 1;
+    var dy = Math.sign(at.y - cy);
+    while (spent + CELL <= budget && path.length <= 8) {
+      var next = { x: at.x + dx, y: at.y + dy };
+      if (occupied(state, next, actorId)) {
+        var byX = { x: at.x + dx, y: at.y };
+        var byY = { x: at.x, y: at.y + dy };
+        next = null;
+        if (dx && !occupied(state, byX, actorId)) next = byX;
+        else if (dy && !occupied(state, byY, actorId)) next = byY;
+        if (!next) break;
+      }
+      spent += CELL;
+      path.push(next);
+      at = next;
+    }
+    if (path.length < 2) return null;
+    return { path: path, cost: spent, name: threats[0].name || 'them', threats: threats.length };
   }
 
   function attackAction(state, command, ctx, opts) {

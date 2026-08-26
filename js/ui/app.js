@@ -643,8 +643,11 @@
     if (session && DND.Game.ensureEncounter(session)) afterTurn();
     if (!session) return;
     var actorId = session.state.activeActorId;
-    if (!actorId) return;
-    if (!DND.Game.turnIsSpent(session, actorId, 0)) return;
+    /* Out of combat nobody may hold the initiative yet. Treating that as "no
+       one is up, so do nothing" froze the table: End turn committed its event
+       and then the turn never passed. Falling through hands it to endHumanTurn,
+       which copes with an empty seat and fills it. */
+    if (actorId && !DND.Game.turnIsSpent(session, actorId, 0)) return;
     DND.Game.endHumanTurn(session, {}).then(function () {
       afterTurn();
       /* The loop stops at a human, at the end of a fight, or when it runs

@@ -184,6 +184,7 @@ async function main() {
     /* ------------------------------------------------------ take a turn -- */
     t.section('taking a turn by clicking a button');
     const before = await page.evaluate(() => window.DND.App.session.state.revision);
+    const batchesBefore = await page.evaluate(() => window.DND.App.session.state.log.length);
 
     /* The action bar is deliberately two-step: pick a verb, then pick who it
        lands on. A single flat list meant every verb was repeated once per
@@ -212,15 +213,21 @@ async function main() {
       '(' + targetHandles.length + ' targets)');
     await wait(2500);
 
-    const afterClick = await page.evaluate(() => {
+    const afterClick = await page.evaluate((from) => {
       const s = window.DND.App.session;
+      const fresh = s.state.log.slice(from);
       return {
         revision: s.state.revision,
         batches: s.state.log.length,
         lastBeats: s.state.log.length ? s.state.log[s.state.log.length - 1].beats : [],
+        /* Every beat committed since the click, not just the last batch's. The
+           table keeps living while you act — a rumour or a companion's aside
+           can land after your swing — so "the last batch" is not the same
+           question as "what did my click do". */
+        freshBeats: fresh.reduce((all, b) => all.concat(b.beats || []), []),
         transcript: s.state.transcript.length,
       };
-    });
+    }, batchesBefore);
     t.ok(afterClick.revision > before, 'clicking an action advances the game state',
       '(' + before + ' -> ' + afterClick.revision + ')');
     t.ok(afterClick.batches > 0, 'and commits an event batch');
@@ -229,8 +236,21 @@ async function main() {
 
     const logText = await page.$eval('#log', e => e.textContent);
     t.ok(logText.length > 40, 'the narrative log has text in it');
-    t.ok(/hit|miss|swing|attack|moves|closes|ft/i.test(logText),
-      'and it describes what happened');
+    /* This used to match a list of words — hit, miss, swing, moves, ft — which
+       is a guess at vocabulary rather than a check, and it failed whenever the
+       bar offered a verb whose beats happened to read differently. Ask the
+       honest question instead: is what the engine just committed actually shown
+       to the player? A beat that never reaches the log is a turn the player
+       cannot see. */
+    const norm = s => String(s).replace(/\s+/g, ' ').trim();
+    const flatLog = norm(logText);
+    const shownBeat = afterClick.freshBeats
+      .map(norm).filter(Boolean)
+      .filter(b => flatLog.indexOf(b.slice(0, 40)) >= 0)[0];
+    t.ok(!!shownBeat, 'and it describes what happened',
+      shownBeat ? '(' + shownBeat.slice(0, 60) + ')'
+        : '(none of ' + afterClick.freshBeats.length + ' new beats reached the log: '
+          + afterClick.freshBeats.map(norm).map(b => b.slice(0, 40)).join(' | ') + ')');
 
     /* The initiative must MOVE. Until the engine grew a turn loop the browser
        had none at all: a player could attack all day, the same character kept
@@ -252,10 +272,11 @@ async function main() {
     });
     t.ok(true, 'the opening scene is ' + (inFight ? 'a fight' : 'peaceful'));
 
-    await page.evaluate(() => {
-      const end = Array.from(document.querySelectorAll('#actionbar button'))
-        .filter(b => /end turn/i.test(b.textContent))[0];
+    const clicked = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('#actionbar button'));
+      const end = btns.filter(b => /end turn/i.test(b.textContent))[0];
       if (end) end.click();
+      return { found: !!end, labels: btns.map(b => b.textContent.trim()) };
     });
     /* Wait for the turn to actually pass rather than sleeping a fixed time.
        Under full-suite load the DM and the monsters' turns take longer than
@@ -283,7 +304,9 @@ async function main() {
       };
     });
     t.ok(turnState.epoch > 0, 'the turn epoch advances in the real game, not just in tests',
-      '(' + turnState.epoch + ')');
+      '(' + turnState.epoch + '; end-turn button ' + (clicked.found ? 'clicked' : 'ABSENT')
+      + '; bar: ' + (clicked.labels.join(' / ') || 'empty')
+      + '; active ' + turnState.active + ')');
     if (inFight) {
       t.ok(turnState.enemyActed || turnState.enemyDamage,
         'the monsters take their own turns after the player takes theirs');

@@ -612,4 +612,99 @@ t.section('what a creature is made of changes what hurts it');
   t.eq(Combat.applyDamageType(s, 'skel', 10, 'piercing').total, 10, 'and an ordinary type is unchanged');
 }
 
+/* ================================================ offered moves resolve == */
+t.section('every movement the bar offers has somewhere to go');
+/*
+ * A destinationless `move` was pushed into the list unconditionally. The
+ * resolver refuses a move with no path — "no destination to move to" — so this
+ * was a button that answered every click with a refusal. Worse, it was pushed
+ * FIRST, so the UI took the group's label from it and put it at the head of the
+ * target list, which is precisely where a player clicks.
+ *
+ * The general rule the project already holds is "never offer a move that always
+ * refuses", so this checks the rule rather than that one button: resolve every
+ * movement the bar offers and assert none of them refuse for want of a path.
+ */
+{
+  const hero = mkActor('hero', 'Hero', 'party', { pos: { x: 0, y: 0 }, speed: 30 });
+  const foe = mkActor('foe', 'Ogre', 'enemy', { pos: { x: 6, y: 0 } });
+  const near = mkActor('near', 'Rat', 'enemy', { pos: { x: 1, y: 0 } });
+  const s = freshCombat([], [hero, foe, near]);
+  State.refreshAllDerived(s);
+  s.combat = { active: true, order: ['hero', 'foe', 'near'], turnIndex: 0, round: 1 };
+  s.activeActorId = 'hero';
+
+  const moves = (Combat.resolveMovement.legalMoves(s, 'hero', {}) || [])
+    .filter(m => m.step.verb === 'move');
+  t.ok(moves.length > 0, 'the bar offers somewhere to move', '(' + moves.length + ')');
+
+  const pathless = moves.filter(m => {
+    const p = m.step.path || (m.step.point ? [1, 2] : null);
+    return !p || p.length < 2;
+  });
+  t.eq(pathless.length, 0, 'and not one of them is offered without a destination',
+    pathless.length ? '(' + pathless.map(m => m.what).join(', ') + ')' : '');
+
+  /* Resolve each for real: a path that exists but goes nowhere legal would
+     still refuse, and only running it can say so. */
+  const refused = [];
+  moves.forEach(m => {
+    const probe = State.snapshot ? JSON.parse(JSON.stringify(s)) : s;
+    probe.rng = scriptRng([10, 10, 10, 10]);
+    const cmd = Command.create({
+      actorId: 'hero', family: 'movement',
+      primary: Command.makeStep(Object.assign({}, m.step)),
+    });
+    const b = Combat.resolveMovement(probe, cmd, {});
+    if (b && b.refusal) refused.push(m.what + ' → ' + b.refusal.detail);
+  });
+  t.eq(refused.length, 0, 'and every one of them actually resolves when chosen',
+    refused.length ? '(' + refused.join(' | ') + ')' : '');
+}
+
+t.section('a character who is engaged can get out again');
+/*
+ * `closeableTargets` gave the bar a way IN once weapon reach became real;
+ * nothing offered the way out. The only retreat in the action bar was
+ * Disengage, which forgoes opportunity attacks without taking you anywhere.
+ */
+{
+  const hero = mkActor('hero', 'Hero', 'party', { pos: { x: 0, y: 0 }, speed: 30 });
+  const foe = mkActor('foe', 'Ogre', 'enemy', { pos: { x: 1, y: 0 } });
+  const s = freshCombat([], [hero, foe]);
+  State.refreshAllDerived(s);
+  s.combat = { active: true, order: ['hero', 'foe'], turnIndex: 0, round: 1 };
+  s.activeActorId = 'hero';
+
+  const away = (Combat.resolveMovement.legalMoves(s, 'hero', {}) || [])
+    .filter(m => /back away/i.test(m.what))[0];
+  t.ok(!!away, 'standing toe to toe, the bar offers a way to break off',
+    away ? '(' + away.what + ')' : '');
+
+  if (away) {
+    t.ok((away.step.path || []).length > 1, 'and it carries a real path');
+    t.ok(/opportunity attack/i.test(away.warn || ''),
+      'and warns that leaving a reach provokes', '(' + (away.warn || 'no warning') + ')');
+
+    const end = away.step.path[away.step.path.length - 1];
+    const startGap = Math.max(Math.abs(0 - 1), Math.abs(0 - 0));
+    const endGap = Math.max(Math.abs(end.x - 1), Math.abs(end.y - 0));
+    t.ok(endGap > startGap, 'and it actually opens the distance',
+      '(' + startGap + ' -> ' + endGap + ' cells)');
+  }
+
+  /* With nobody in reach there is nothing to back away from, and offering it
+     would be another button with no purpose. */
+  const far = freshCombat([], [
+    mkActor('hero', 'Hero', 'party', { pos: { x: 0, y: 0 }, speed: 30 }),
+    mkActor('foe', 'Ogre', 'enemy', { pos: { x: 9, y: 0 } }),
+  ]);
+  State.refreshAllDerived(far);
+  far.combat = { active: true, order: ['hero', 'foe'], turnIndex: 0, round: 1 };
+  far.activeActorId = 'hero';
+  const none = (Combat.resolveMovement.legalMoves(far, 'hero', {}) || [])
+    .filter(m => /back away/i.test(m.what));
+  t.eq(none.length, 0, 'but it is not offered when nothing is on top of you');
+}
+
 t.done();
