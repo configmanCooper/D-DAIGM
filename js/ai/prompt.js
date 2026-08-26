@@ -93,6 +93,12 @@
     lines.push('HOW YOU WRITE:');
     lines.push(c.voice || [
       'Close third person, present tense, plain and concrete.',
+      /* The narrator slid into second person constantly — "snapping shut on
+         your ribs", "you feel no shock" — which breaks the point of view AND
+         steals the player's chair by deciding what their character feels. */
+      'Refer to every character in the third person, by name. Never write "you" or "your" about anyone.',
+      'Never state what a player character feels, notices, decides, knows or is certain of. ' +
+        'Describe only what is done to them and what happens around them \u2014 what it feels like is theirs to say.',
       'Lead with what a person would actually notice: sound, weight, temperature, smell.',
       'One image at most per paragraph, then something solid.',
       'Let people speak in their own register. Nobody is eloquent by default.',
@@ -197,6 +203,34 @@
     lines.push('Describe ONLY the events listed above. Do not add further blows, wounds,');
     lines.push('deaths, discoveries, arrivals or outcomes. If the list has one hit, exactly');
     lines.push('one blow lands. If the list says a search failed, nothing is found.');
+    /* The hole a 4B model drove straight through. Handed "Shen distracts a
+       Gate-Born; Sir Aldren has the opening", it wrote Aldren burying his
+       blade in the creature's chest and the creature falling silent — a
+       death the engine never rolled, on an enemy still standing. A setup
+       beat is not a hit. */
+    lines.push('An opening, a distraction, an advantage, a Help or a "has the opening"');
+    lines.push('is NOT a hit. Nobody is wounded or killed by it. If a beat only sets');
+    lines.push('someone up, describe the setup and STOP \u2014 do not narrate the attack it');
+    lines.push('enables, its damage, or its result. Only a beat that says "hits",');
+    lines.push('"takes N damage", "dies", "is down" or "drops" may show a wound or a death.');
+    /* And the mirror of it: a miss that drew blood. */
+    lines.push('A miss, a spell that goes wide, or a save the target passes draws NO');
+    lines.push('blood, leaves NO wound and staggers nobody. Show steel meeting air,');
+    lines.push('armour or shield, and nothing more.');
+    /* Observed everywhere: "five points of damage settle into its flesh",
+       "seven hit points return". That is a character sheet read aloud. */
+    lines.push('The numbers in the beats are there so you can gauge how hard a blow');
+    lines.push('lands \u2014 a graze, a solid hit, a savage wound. NEVER state a number.');
+    lines.push('Do not write "points", "hit points", "damage", or any figure at all.');
+    lines.push('Turn the number into force.');
+    /* Use the means the engine named. An unarmed strike was narrated as a
+       sword thrust. */
+    lines.push('Use the weapon or method the beat names. An unarmed strike is a fist,');
+    lines.push('an elbow, a shove or a headbutt \u2014 never a blade. A bow is not a sword.');
+    /* Three companions "acting" on a turn where one goblin swung. */
+    lines.push('Only the people named in the beats did anything this turn. Everyone else');
+    lines.push('is still \u2014 watching, braced, silent. You may show them react in a word,');
+    lines.push('but they take no action, speak no line and move nowhere unless a beat says so.');
     lines.push('');
 
     if (ctx.playerAction) {
@@ -209,6 +243,12 @@
     lines.push('intensity: ' + describeIntensity(ctx.intensity) +
       ' (' + (ctx.intensity == null ? 0.5 : ctx.intensity).toFixed(2) + ')');
     lines.push('Match that level exactly. Do NOT escalate past it.');
+    /* The intensity signal was computed and then never used for anything a
+       reader would feel. A good DM shortens as the stakes rise; this one gave
+       a near-death the same fog-and-fussing treatment as an opening move. */
+    lines.push('The higher the intensity, the SHORTER you write \u2014 clipped sentences,');
+    lines.push('fewer people in frame, one hard image. When someone is badly hurt, put');
+    lines.push('the camera on them rather than spreading attention across the party.');
     if (ctx.focusOn) lines.push('give the moment to: ' + ctx.focusOn);
     lines.push('');
     /* Length last, because small models weight the most recent instruction

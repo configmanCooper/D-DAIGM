@@ -1266,7 +1266,8 @@ t.section('an area spell hits what is in the area, friend or foe');
     State.addActor(st, mk('ally1', 'Fighter', 'party', { x: 11, y: 0 }));   // beside the blast
     State.addActor(st, mk('foe1', 'Goblin A', 'enemy', { x: 10, y: 0 }));   // the mark, 50 ft out
     State.addActor(st, mk('foe2', 'Goblin B', 'enemy', { x: 11, y: 1 }));   // beside it
-    State.addActor(st, mk('faraway', 'Goblin Z', 'enemy', { x: 40, y: 40 })); // 200 ft away
+    State.addActor(st, mk('faraway', 'Goblin Z', 'enemy', { x: 25, y: 0 })); // 125 ft: clear of allies, inside Fireball's 150 ft
+    State.addActor(st, mk('beyond', 'Goblin Y', 'enemy', { x: 40, y: 40 })); // 200 ft: out of range entirely
     State.refreshAllDerived(st);
     const sc = st.actors.pc1.derivedCache.spellcasting;
     sc.prepared = (sc.prepared || []).concat(['fireball']);
@@ -1295,7 +1296,8 @@ t.section('an area spell hits what is in the area, friend or foe');
     'and so is the fighter standing five feet away, because fire does not pick sides',
     '(' + hurt('ally1') + ')');
   t.eq(hurt('faraway'), 0,
-    'the goblin two hundred feet away is untouched, which was the other half of the bug');
+    'the goblin a hundred and twenty-five feet away is untouched, which was the other half of the bug');
+  t.eq(hurt('beyond'), 0, 'and so is the one beyond the spell\u2019s range entirely');
   t.eq(hurt('pc1'), 0, 'and the caster, fifty feet back, is outside their own blast');
 
   /* A cone or cube emanating from you starts at your square: you are not in
@@ -1325,6 +1327,12 @@ t.section('an area spell hits what is in the area, friend or foe');
     const atA = offers.filter(m => /Goblin A/.test(m.what))[0];
     const atZ = offers.filter(m => /Goblin Z/.test(m.what))[0];
     t.ok(!!atA && !!atZ, 'an area spell is offered against each enemy, so it has somewhere to land');
+    /* And NOT against one it could never reach. Fireball has a range of 150
+       feet; Goblin Y stands at two hundred. Offering that shot is the same
+       trap as offering a purchase you cannot afford. */
+    const atY = offers.filter(m => /Goblin Y/.test(m.what))[0];
+    t.eq(atY, undefined,
+      'but not against the goblin beyond the spell\u2019s range');
     if (atA && atZ) {
       t.ok(atA.friendlyFire > 0, 'aiming at the goblin next to the fighter is flagged',
         '(' + (atA.warn || '') + ')');

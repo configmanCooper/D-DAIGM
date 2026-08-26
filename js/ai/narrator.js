@@ -40,14 +40,62 @@
   var BREAKS_CHARACTER = /\b(?:as an ai|as a language model|i'?m an ai|i cannot (?:fulfil|fulfill|comply)|i'?m sorry,? but i|as a large language model|i don'?t have (?:personal|the ability))\b/i;
 
   /* Scaffolding that means it answered a question instead of telling a story. */
-  var META_TALK = /\b(?:in this scenario|the (?:player|user) (?:can|could|should|might)|as the dungeon master,? i|let me know (?:if|what)|would you like me to|feel free to)\b/i;
+  var META_TALK = /\b(?:in this scenario|the (?:player|user) (?:can|could|should|might)|as the dungeon master,? i|let me know (?:if|what)|would you like me to|feel free to|settled fact|solid fact|already resolved|has the opening)\b/i;
+
+  /* ------------------------------------------------------------ fidelity --
+     Three failure modes a small model commits no matter how firmly the prompt
+     forbids them, all observed in live play. Each is asked for in the prompt
+     AND checked here, because asking alone works about four times in five and
+     one failure in five is a player told an enemy is dead when it is not. */
+
+  /* Prose that shows somebody wounded or killed. */
+  var SHOWS_HARM = new RegExp(
+    '\\b(?:dies|died|dead|kills?|killed|slain|falls? (?:silent|still|limp|dead)|' +
+    'goes limp|slumps|crumples|collapses|blood|bleed\\w*|wound\\w*|gash|' +
+    'severs?|impales?|run through|drives? (?:it|the blade|his blade|her blade)|' +
+    'sinks? (?:in|into)|tears? into|bites? deep)\\b', 'i');
+
+  /* Prose that draws blood specifically — the miss case. */
+  var DRAWS_BLOOD = /\b(?:blood|bleed\w*|wound\w*|gash|red streak|tears? into|sinks? in|bites? deep|crimson)\b/i;
+
+  /* Second person about anybody. The narration is third-person by design. */
+  var SECOND_PERSON = /\b(?:you|your|yours|yourself)\b/i;
+
+  /** Does any beat this turn report a blow that actually landed? */
+  function beatsShowHarm(beats) {
+    return (beats || []).some(function (b) {
+      return /\b(?:hits? for|takes? \d+|damage|dies|is down|drops|critically hits?|recovers?)\b/i.test(String(b));
+    });
+  }
+
+  /** Was every offensive beat this turn a miss? */
+  function beatsAreAllMisses(beats) {
+    var list = (beats || []).map(String);
+    var misses = list.filter(function (b) { return /\b(?:misses|goes wide|blow misses)\b/i.test(b); });
+    if (!misses.length) return false;
+    return !beatsShowHarm(list);
+  }
+
+  /* Prose that recites the arithmetic. "five points of damage settle into its
+     flesh", "seven hit points return" — a character sheet read in a funny
+     voice. The number is in the prompt so the model can judge how hard the
+     blow landed, not so it can read it out. */
+  var READS_NUMBERS = new RegExp(
+    '\\b(?:\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|' +
+    'thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\\b' +
+    '\\s+(?:more\\s+)?(?:points?|hit\\s*points?)\\b' +
+    '|\\b\\d+\\s+(?:damage|hit\\s*points?)\\b' +
+    '|\\bhit\\s*points?\\b', 'i');
 
   var GATES = {
     /* Any one of these makes the whole reply unusable, so it is regenerated
        once and then replaced with deterministic prose. */
-    fatal: ['breaks_character', 'meta_talk', 'empty'],
+    fatal: ['breaks_character', 'meta_talk', 'empty',
+      /* Prose that contradicts the settled mechanics is the worst thing this
+         layer can produce: the player reads it and acts on it. */
+      'phantom_outcome', 'phantom_wound', 'second_person'],
     /* These are repaired in place. */
-    repairable: ['player_voice', 'forbidden_name', 'too_long', 'repeated_opening'],
+    repairable: ['player_voice', 'forbidden_name', 'too_long', 'repeated_opening', 'reads_numbers'],
   };
 
   /* ---------------------------------------------------------------- gates -- */
@@ -209,8 +257,54 @@
       report.usable = false;
     }
 
-    var voice = findPlayerVoice(text, opts.playerCharacters);
-    if (voice.length) {
+    /* A death or a wound that the engine never rolled.
+       The prompt forbids it and a 4B model does it anyway: handed "Shen
+       distracts a Gate-Born; Sir Aldren has the opening" it wrote Aldren
+       burying his blade in the creature's chest and the creature falling
+       silent. Nothing had been rolled and the enemy was still standing.
+       So it is checked rather than merely asked for: if no beat this turn
+       reports a landed blow, prose that shows one is unusable. */
+    if (opts.beats && opts.beats.length && !beatsShowHarm(opts.beats) && SHOWS_HARM.test(text)) {
+      report.issues.push('phantom_outcome');
+      report.regenerate = true;
+      report.usable = false;
+    }
+
+    /* And its mirror: blood drawn by a miss. */
+    if (opts.beats && opts.beats.length && beatsAreAllMisses(opts.beats) && DRAWS_BLOOD.test(text)) {
+      report.issues.push('phantom_wound');
+      report.regenerate = true;
+      report.usable = false;
+    }
+
+    /* The character sheet, read aloud. Dropped by the sentence rather than
+       repaired word by word: cutting "five points of damage" out of the middle
+       of a clause left "as settle into its flesh", which is worse than the
+       problem. If nothing survives, regenerate.
+
+       Not applied to the offline summary. That prose is the ENGINE speaking
+       plainly — "Shen Cooper takes 5 damage" — and stating the number is the
+       whole of its job; it makes no claim to be dramatic. Running this gate
+       over it deleted every sentence and left the last-resort fallback empty,
+       which is the one thing a fallback may never be. */
+    if (!opts.plainSummary && READS_NUMBERS.test(text)) {
+      report.issues.push('reads_numbers');
+      text = text.split(/(?<=[.!?])\s+/).filter(function (sentence) {
+        return !READS_NUMBERS.test(sentence);
+      }).join(' ').trim();
+      if (text.length < 12) { report.regenerate = true; report.usable = false; }
+    }
+
+    /* Second person. The narration is third-person by design, and "you feel
+       no shock" additionally decides what the player's character feels, which
+       is the player's to decide and nobody else's. */
+    if (SECOND_PERSON.test(text)) {
+      report.issues.push('second_person');
+      report.regenerate = true;
+      report.usable = false;
+    }
+
+    var voice = findPlayerVoice(text, opts.playerCharacters);    if (voice.length) {
       report.issues.push('player_voice');
       report.playerVoice = voice;
       /* Drop the offending sentences rather than the whole reply — usually
@@ -293,6 +387,10 @@
       mustNotName: built.ctx.mustNotName,
       recent: opts.recent || [],
       maxWords: built.ctx.maxWords,
+      /* The settled beats, so the fidelity gates can check the prose against
+         what actually happened rather than against a prompt instruction the
+         model may simply have ignored. */
+      beats: beats,
     };
 
     function offlineFallback(why) {
@@ -417,6 +515,23 @@
     }
     if (report.issues.indexOf('empty') >= 0) {
       notes.push('You wrote nothing usable. Describe the moment plainly in two short paragraphs.');
+    }
+    if (report.issues.indexOf('phantom_outcome') >= 0) {
+      notes.push('You showed somebody wounded or killed, and nothing in the beats says a ' +
+        'blow landed. An opening, a distraction or a Help is NOT a hit. Describe the ' +
+        'setup and stop \u2014 no wound, no blood, no death.');
+    }
+    if (report.issues.indexOf('phantom_wound') >= 0) {
+      notes.push('Every attack this turn MISSED. Nobody bled and nobody was hurt. ' +
+        'Show steel meeting air, armour or shield.');
+    }
+    if (report.issues.indexOf('second_person') >= 0) {
+      notes.push('You wrote "you" or "your". Use the third person and characters\u2019 names ' +
+        'throughout, and never say what a player character feels or notices.');
+    }
+    if (report.issues.indexOf('reads_numbers') >= 0) {
+      notes.push('You stated damage numbers. Never write a figure, "points" or "damage" \u2014 ' +
+        'turn the number into how hard the blow looked.');
     }
     notes.push('Rewrite it. Narration only.');
     return notes.join(' ');
@@ -704,6 +819,16 @@
       'Answer in two or three plain sentences. No scene-setting, no atmosphere, ' +
       'no description of the room or the weather, no fiction of any kind. ' +
       'Begin with the answer itself.\n' +
+      /* The "never invent facts" doctrine, applied to RULES. A live review
+         found three confidently-wrong rulings: a grapple needing an attack
+         roll first, advantage invented for standing within 5 feet, and a made
+         up general rule about the charmed condition. A wrong rule stated
+         confidently is worse than the invented lore the narrator is already
+         guarded against, because the player ACTS on it. */
+      'If the rule you need is quoted below, follow it exactly. If it is not, and ' +
+      'you are not certain of the 2014 rule, SAY SO plainly and give a fair ruling ' +
+      'for now \u2014 "I am not certain; for tonight let us say..." A rule you are ' +
+      'guessing at must never be stated as fact.\n' +
       'You must not invent events, advance the story, or reveal anything the ' +
       'party has not learned.';
 

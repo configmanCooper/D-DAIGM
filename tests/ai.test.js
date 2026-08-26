@@ -722,10 +722,24 @@ function runOfflineTests() {
   t.ok(/Aldren/.test(desc), 'and who is with you');
 
   t.section('offline prose passes its own gates');
-  const gated = Narrator.applyGates(Offline.narrate(g3, batch, { rng: new RNG('g') }),
-    { playerCharacters: ['Shen Cooper'], mustNotName: ['Hollow King'], recent: [] });
+  /* `plainSummary` because the offline narrator is the ENGINE speaking, not
+     the model dramatising: "Shen Cooper takes 5 damage" is exactly what it is
+     for. The gate that keeps arithmetic out of narration would otherwise
+     delete every sentence of it and leave the last-resort fallback empty,
+     which is the one thing a fallback may never be. Every other gate — and in
+     particular every fatal one — still applies to it. */
+  const offlineText = Offline.narrate(g3, batch, { rng: new RNG('g') });
+  const gated = Narrator.applyGates(offlineText,
+    { playerCharacters: ['Shen Cooper'], mustNotName: ['Hollow King'], recent: [], plainSummary: true });
   t.eq(gated.report.usable, true, 'offline prose is always usable');
   t.deep(gated.report.issues, [], 'and trips no gates');
+
+  /* And it must never trip a FATAL gate even without that exemption, or the
+     fallback could be rejected at the moment everything else has failed. */
+  const strict = Narrator.applyGates(offlineText,
+    { playerCharacters: ['Shen Cooper'], mustNotName: ['Hollow King'], recent: [] });
+  const fatalHit = strict.report.issues.filter(i => Narrator.GATES.fatal.indexOf(i) >= 0);
+  t.deep(fatalHit, [], 'and trips no fatal gate under any circumstances');
   return Promise.resolve();
 }
 

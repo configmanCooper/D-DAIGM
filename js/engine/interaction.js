@@ -1807,13 +1807,42 @@
     var targets = spellTargets(state, command, spell, effects);
     var upcastBy = Math.max(0, level - (spell ? spell.level : level));
 
+    /* Range, enforced at the point of commitment as well as in the move list.
+       Filtering only what is OFFERED is not enough: a typed action, an AI seat
+       and a campaign trigger all build commands directly, so range has to be
+       checked where the spell actually resolves. Before this, Cure Wounds —
+       range Touch — healed a target a hundred feet away. */
+    var outOfRange = targets.filter(function (tid) {
+      return tid !== command.actorId && !withinSpellRange(state, command.actorId, tid, spell);
+    });
+    if (outOfRange.length && outOfRange.length === targets.length) {
+      return Events.refuse(b, 'out-of-range',
+        name + ' reaches ' + String((spell && spell.range) || 'no distance at all').toLowerCase() +
+        ', and ' + nameOf(state, outOfRange[0]) + ' is further off than that');
+    }
+    if (outOfRange.length) {
+      targets = targets.filter(function (tid) { return outOfRange.indexOf(tid) < 0; });
+    }
+
     effects.forEach(function (e) {
       if (e.kind === 'heal') {
         targets.forEach(function (tid) {
           var t = actor(state, tid);
           if (!t) return;
           var roll = Dice.roll(scaleDice(e.dice || '1d8', spell, upcastBy), { rng: state.rng });
-          var mod = (d && d.spellcasting && d.spellcasting.mod) || 0;
+          /* The caster's spellcasting modifier, which Cure Wounds and Healing
+             Word both add. `spellcasting` has never had a `mod` property —
+             it exposes `ability`, and the number lives in `abilityMods` — so
+             this read `undefined`, fell to 0, and every healing spell in the
+             game healed the bare die. A level-5 cleric's Cure Wounds restored
+             1d8 instead of 1d8+3, for the whole campaign.
+             Per-class first, so a multiclassed caster heals off the ability
+             of the class the spell came from. */
+          var sc = (d && d.spellcasting) || {};
+          var ability = (castingNumbers(d, spell) || {}).ability || sc.ability;
+          var mod = (ability && d && d.abilityMods && typeof d.abilityMods[ability] === 'number')
+            ? d.abilityMods[ability]
+            : 0;
           var total = roll.total + (e.mod === 'spell' ? mod : (e.flat || 0));
           Events.push(b, 'roll', { rollKind: 'heal', actorId: command.actorId, total: total, explain: Dice.explain(roll) }, '');
           Events.push(b, 'hp', { targetId: tid, delta: total },
@@ -2043,6 +2072,42 @@
     return false;
   }
 
+  /**
+   * How far a spell reaches, in feet, or null when distance does not apply.
+   *
+   * Range was never consulted anywhere: a Touch spell was offered against a
+   * target a hundred feet away and healed them, and a 30-foot spell reached
+   * across the whole map. Self and area-anchored spells return null, meaning
+   * "do not filter targets by distance".
+   */
+  function spellRangeFt(spell) {
+    var raw = String((spell && spell.range) || '').trim();
+    if (!raw) return null;
+    var low = raw.toLowerCase();
+    if (low === 'touch') return 5;
+    if (low === 'self' || low === 'sight' || low === 'unlimited' || low === 'special') return null;
+    var m = low.match(/^([\d,]+)\s*(feet|foot|ft)\b/);
+    if (m) return parseInt(m[1].replace(/,/g, ''), 10);
+    /* Miles and anything else exotic are effectively unlimited on a battle
+       map; do not filter on them. */
+    return null;
+  }
+
+  /** Is `targetId` within the spell's range of the caster? */
+  function withinSpellRange(state, casterId, targetId, spell) {
+    var reach = spellRangeFt(spell);
+    if (reach == null) return true;
+    if (casterId === targetId) return true;
+    var a = actor(state, casterId), t = actor(state, targetId);
+    if (!a || !t) return true;
+    var pa = a.runtime && a.runtime.pos, pt = t.runtime && t.runtime.pos;
+    /* No positions means no grid to measure on — a scene played entirely in
+       prose. Refusing everything there would be worse than allowing it. */
+    if (!pa || !pt) return true;
+    var dx = Math.abs(pa.x - pt.x), dy = Math.abs(pa.y - pt.y);
+    return Math.max(dx, dy) * 5 <= reach;
+  }
+
   resolveSpell.legalMoves = function (state, actorId, ctx) {
     var a = actor(state, actorId);
     if (!a || downed(a)) return [];
@@ -2091,6 +2156,7 @@
       if (isHealing(spell)) {
         allies.forEach(function (id) {
           var target = state.actors[id];
+          if (!withinSpellRange(state, actorId, id, spell)) return;
           var hurt = target.runtime.hpMax && target.runtime.hp < target.runtime.hpMax;
           if (!hurt && allies.length > 1) return;    // no point healing the unhurt
           var dying = target.runtime.hp <= 0;
@@ -2110,6 +2176,7 @@
            it, the bar has to say who — a player choosing between two goblins
            should be told that one of them is next to their own fighter. */
         foes.forEach(function (foeId) {
+          if (!withinSpellRange(state, actorId, foeId, spell)) return;
           var caught = alliesCaughtBy(state, actorId, spell, foeId);
           var m = mv('cast', 'Cast ' + name + ' at ' + nameOf(state, foeId), castCost,
             { spellId: spellId, targetIds: [foeId] },

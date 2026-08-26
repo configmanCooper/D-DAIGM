@@ -63,10 +63,10 @@
         'it must be within your reach. Using at least one free hand, you try to seize ' +
         'the target by making a grapple check instead of an attack roll: a Strength ' +
         '(Athletics) check contested by the target\u2019s Strength (Athletics) or ' +
-        'Dexterity (Acrobatics) check (the target chooses which). You succeed ' +
-        'automatically if the target is incapacitated. If you succeed, the target is ' +
-        'subjected to the GRAPPLED condition. The condition specifies the things that ' +
-        'end it, and you can release the target whenever you like (no action required).\n' +
+        'Dexterity (Acrobatics) check (the target chooses which). If you win the ' +
+        'contest, the target is subjected to the GRAPPLED condition. The condition ' +
+        'specifies the things that end it, and you can release the target whenever you ' +
+        'like (no action required).\n' +
         'ESCAPING A GRAPPLE: A grappled creature can use its action to escape. To do ' +
         'so, it must succeed on a Strength (Athletics) or Dexterity (Acrobatics) check ' +
         'contested by your Strength (Athletics) check.\n' +
@@ -87,9 +87,8 @@
         'them.\nThe target must be no more than one size larger than you and must be ' +
         'within your reach. Instead of making an attack roll, you make a Strength ' +
         '(Athletics) check contested by the target\u2019s Strength (Athletics) or ' +
-        'Dexterity (Acrobatics) check (the target chooses). You succeed automatically ' +
-        'if the target is incapacitated. If you succeed, you either knock the target ' +
-        'prone or push it 5 feet away from you.',
+        'Dexterity (Acrobatics) check (the target chooses). If you win the contest, ' +
+        'you either knock the target prone or push it 5 feet away from you.',
     },
     {
       id: 'actions',
@@ -101,7 +100,8 @@
         'On your turn you can MOVE up to your speed and take ONE action. You may also ' +
         'take one BONUS ACTION, but only if some feature, spell or ability says you ' +
         'can \u2014 you never simply "have" a bonus action to spend. You also get one ' +
-        'REACTION per round, which you can take on anyone\u2019s turn, and one free ' +
+        'REACTION, which you can take on anyone\u2019s turn; once spent it does not ' +
+        'come back until the START OF YOUR NEXT TURN. And one free ' +
         'object interaction (drawing a weapon, opening a door).\n' +
         'The actions available to everyone are:\n' +
         '\u2022 ATTACK \u2014 one melee or ranged attack (more if you have Extra Attack).\n' +
@@ -169,8 +169,11 @@
         'attacks against you have advantage; any attack that hits you from within 5 ' +
         'feet is a critical hit.\n' +
         'DEATH SAVING THROWS: at the start of each of your turns while at 0 hit ' +
-        'points, you make a death saving throw \u2014 roll a d20, with no modifier of ' +
-        'any kind. On a 10 or higher you succeed, otherwise you fail. On your THIRD ' +
+        'points, you make a death saving throw \u2014 roll a d20. There is no ability ' +
+        'modifier and no proficiency bonus on it, though effects that add to saving ' +
+        'throws generally (Bless, a paladin\u2019s Aura of Protection, a magic item\u2019s ' +
+        'bonus) do still apply. On a 10 or higher you succeed, otherwise you fail. ' +
+        'On your THIRD ' +
         'success you become stable. On your THIRD failure you DIE. The successes and ' +
         'failures need not be consecutive, and both reset to zero once you are stable ' +
         'or regain any hit points.\n' +
@@ -279,7 +282,8 @@
         'so it cannot be used for two-weapon fighting.\n' +
         'IMPROVISED WEAPONS: an object not designed as a weapon deals 1d4 damage; if it ' +
         'resembles a real weapon, the GM may let it use that weapon\u2019s damage die ' +
-        'and properties. You are not proficient unless a feature says so.',
+        'and properties \u2014 and if you are proficient with the weapon it resembles, ' +
+        'you may use your proficiency bonus with it. Otherwise you are not proficient.',
     },
     {
       id: 'crits',
@@ -388,7 +392,8 @@
         'automatically if the item is more than 100 feet away for 24 hours, if you die, ' +
         'or if another creature attunes to it.\n' +
         'CARRYING CAPACITY: your Strength score \u00d7 15 pounds. You can push, drag or ' +
-        'lift up to twice that, but moving more than your capacity halves your speed.\n' +
+        'lift up to TWICE that, but while you push or drag beyond your carrying ' +
+        'capacity your speed drops to 5 feet.\n' +
         'POTIONS: drinking one is an ACTION; administering one to another creature is ' +
         'also an action.',
     },
