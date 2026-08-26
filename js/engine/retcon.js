@@ -89,6 +89,14 @@
     return slugIndex;
   }
 
+  /* Words that carry no identity of their own, ignored when matching an item
+     by its words rather than its exact name. */
+  var STOPWORDS = {
+    of: 1, the: 1, a: 1, an: 1, and: 1, s: 1,
+    small: 1, large: 1, common: 1, ordinary: 1, simple: 1, basic: 1, standard: 1,
+    new: 1, old: 1, plain: 1, one: 1,
+  };
+
   function itemDef(idOrName) {
     var ITEMS = data().ITEMS || {};
     if (!idOrName) return null;
@@ -122,6 +130,28 @@
         return k.indexOf(shorter + '-') === 0;
       })[0];
       if (headName) return idx.byName[headName];
+    }
+
+    /* Word order last of all.
+       Live runs produced "healing-potion-small" for a Potion of Healing:
+       the right words, the wrong order, and every prefix rule above misses
+       it. A candidate matches only if EVERY meaningful word of its own name
+       appears in what was asked for — which is the safe direction. Asking for
+       "potion" cannot match "Potion of Healing", because "healing" is not in
+       the request; and "sword-of-infinite-plot-armour" cannot match the Sword
+       of Life Stealing, because "life" and "stealing" are not in the request
+       either. Where several fit, the most specific wins. */
+    var asked = {};
+    key.split('-').forEach(function (w) { if (w && !STOPWORDS[w]) asked[w] = true; });
+    if (Object.keys(asked).length >= 2) {
+      var best = null, bestScore = 0;
+      Object.keys(idx.byName).forEach(function (candidate) {
+        var words = candidate.split('-').filter(function (w) { return w && !STOPWORDS[w]; });
+        if (words.length < 2) return;
+        for (var i = 0; i < words.length; i++) if (!asked[words[i]]) return;
+        if (words.length > bestScore) { bestScore = words.length; best = idx.byName[candidate]; }
+      });
+      if (best) return best;
     }
     return null;
   }

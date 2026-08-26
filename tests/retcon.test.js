@@ -394,6 +394,13 @@ async function main() {
       'a made-up name resolves to nothing at all');
     t.eq(Retcon.itemDef('blade-of-ultimate-destiny'), null,
       'and so does another');
+    /* A bare category word must not resolve either, or "potion" would find
+       whichever potion happened to be indexed first. Matching is one-way: a
+       candidate must have all ITS words in the request, not the reverse. */
+    t.eq(Retcon.itemDef('potion'), null, 'a bare "potion" matches no particular potion');
+    t.eq(Retcon.itemDef('sword'), null, 'and a bare "sword" matches no particular sword');
+    t.eq(Retcon.itemDef('armour-of-invincibility'), null,
+      'and an invented magic item finds nothing to be mistaken for');
 
     const ok = [
       ['waterskin-full', /waterskin/i],
@@ -407,6 +414,10 @@ async function main() {
       ["healer's-kit", /healer/i],
       ["Healer's Kit", /healer/i],
       ['healers kit', /healer/i],
+      /* Also from a live run: the model wrote the right words in the wrong
+         order for a Potion of Healing. */
+      ['healing-potion-small', /potion of healing/i],
+      ['hooded-lantern', /lantern/i],
     ];
     ok.forEach(([slug, want]) => {
       const d = Retcon.itemDef(slug);
