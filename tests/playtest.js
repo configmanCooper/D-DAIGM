@@ -436,7 +436,12 @@ async function expertAmends(session, actorId) {
 async function resolveAmendment(session, actorId, request, out) {
   if (out.kind === 'refused') {
     EXPERT.amendsRefused++;
-    log('  [DM ] refused: ' + String(out.text).slice(0, 300));
+    /* In full. Truncating this to 300 characters hid the actual reason during
+       a live run: the Dungeon Master had ALLOWED a healer's kit and the
+       engine refused it over an apostrophe, and the log showed only the
+       ruling saying yes, which read as the classifier misfiring. */
+    log('  [DM ] refused:\n        ' + String(out.text).replace(/\n/g, '\n        '));
+    EXPERT.notes.push('amendment refused: ' + String(out.text).replace(/\n/g, ' ').slice(0, 200));
     return;
   }
   if (out.kind !== 'amend') {

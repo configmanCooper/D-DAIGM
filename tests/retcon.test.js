@@ -400,6 +400,13 @@ async function main() {
       ['rope-coil', /rope/i],
       ['rations-dried', /rations/i],
       ['potion-of-healing-greater', /potion of healing/i],
+      /* Found in a live run: Opus 5 asked for a healer's kit, the Dungeon
+         Master allowed it, and the engine refused an ordinary five-gold item
+         because the model wrote "healer's-kit" and the data says
+         "healers-kit". One apostrophe lost the whole amendment. */
+      ["healer's-kit", /healer/i],
+      ["Healer's Kit", /healer/i],
+      ['healers kit', /healer/i],
     ];
     ok.forEach(([slug, want]) => {
       const d = Retcon.itemDef(slug);

@@ -63,17 +63,42 @@
 
   function actorOf(state, id) { return (state.actors || {})[id] || null; }
 
+  /* Punctuation-insensitive slug. The model writes "healer's-kit" and the
+     data has "healers-kit"; matching on the raw string refused an ordinary
+     five-gold item during a live run because of a single apostrophe. */
+  function slug(s) {
+    return String(s || '').toLowerCase()
+      .replace(/[\u2018\u2019']/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  /* Built once per item table: two flat maps from normalised slug to item,
+     so a lookup is not a linear scan of four hundred entries per change. */
+  var slugIndex = null;
+  function indexed() {
+    var ITEMS = data().ITEMS || {};
+    if (slugIndex && slugIndex.forTable === ITEMS) return slugIndex;
+    slugIndex = { forTable: ITEMS, byId: {}, byName: {} };
+    Object.keys(ITEMS).forEach(function (k) {
+      var sid = slug(k);
+      if (sid && !slugIndex.byId[sid]) slugIndex.byId[sid] = ITEMS[k];
+      var sn = slug(ITEMS[k].name);
+      if (sn && !slugIndex.byName[sn]) slugIndex.byName[sn] = ITEMS[k];
+    });
+    return slugIndex;
+  }
+
   function itemDef(idOrName) {
     var ITEMS = data().ITEMS || {};
     if (!idOrName) return null;
-    var key = String(idOrName).toLowerCase().replace(/\s+/g, '-');
-    if (ITEMS[key]) return ITEMS[key];
+    if (ITEMS[idOrName]) return ITEMS[idOrName];
 
-    var wanted = String(idOrName).toLowerCase().trim();
-    var byName = Object.keys(ITEMS).filter(function (k) {
-      return String(ITEMS[k].name || '').toLowerCase() === wanted;
-    })[0];
-    if (byName) return ITEMS[byName];
+    var idx = indexed();
+    var key = slug(idOrName);
+    if (!key) return null;
+    if (idx.byId[key]) return idx.byId[key];
+    if (idx.byName[key]) return idx.byName[key];
 
     /* The model invents plausible-looking slugs — "waterskin-full" for a
        waterskin, "rope-coil" for rope, "rations-dried" for rations — and
@@ -87,14 +112,16 @@
     if (parts.length > 1) {
       parts.pop();
       var shorter = parts.join('-');
-      if (ITEMS[shorter]) return ITEMS[shorter];
-      var spaced = shorter.replace(/-/g, ' ');
-      var head = Object.keys(ITEMS).filter(function (k) {
-        var n = String(ITEMS[k].name || '').toLowerCase();
-        return k.indexOf(shorter + '-') === 0 || n === spaced ||
-          n.indexOf(spaced + ',') === 0 || n.indexOf(spaced + ' (') === 0;
+      if (idx.byId[shorter]) return idx.byId[shorter];
+      if (idx.byName[shorter]) return idx.byName[shorter];
+      var head = Object.keys(idx.byId).filter(function (k) {
+        return k.indexOf(shorter + '-') === 0;
       })[0];
-      if (head) return ITEMS[head];
+      if (head) return idx.byId[head];
+      var headName = Object.keys(idx.byName).filter(function (k) {
+        return k.indexOf(shorter + '-') === 0;
+      })[0];
+      if (headName) return idx.byName[headName];
     }
     return null;
   }
