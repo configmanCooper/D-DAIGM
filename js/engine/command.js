@@ -46,7 +46,13 @@
     exploration: ['search', 'investigate', 'perceive', 'unlock', 'disarm_trap', 'travel',
       'short_rest', 'long_rest', 'interact', 'track', 'forage', 'read'],
     improvised: ['improvise'],
-    meta: ['end_turn', 'pass', 'clarify', 'undo', 'note'],
+    meta: ['end_turn', 'pass', 'clarify', 'undo', 'note',
+      /* Amending the record. Registered here as well as in the resolver
+         because VERBS is the referee's enum: a verb missing from it can be
+         performed from the interface and yet never chosen by the Dungeon
+         Master, which is how `stabilise` came to work from the action bar and
+         nowhere else. */
+      'retcon'],
   };
 
   var ALL_VERBS = Object.keys(VERBS).reduce(function (acc, f) { return acc.concat(VERBS[f]); }, []);

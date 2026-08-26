@@ -257,6 +257,12 @@ function main() {
     pass: 'the Do nothing button',
     note: 'a journal note, not a turn',
     multiattack: 'monsters only',
+    /* A retcon is not something you do on your turn — it is the table
+       agreeing that something was already so. It reaches the log through
+       Game.applyRetcon after the player approves it, never through
+       legalMoves, and it costs no action. The verb exists so the amendment
+       is a well-formed command in the log like everything else. */
+    retcon: 'amending the record, through OOC: rather than the action bar',
   };
 
   const missing = verbs.filter(v => !seen[v.verb] && !byNature[v.verb]);

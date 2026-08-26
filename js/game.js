@@ -26,6 +26,7 @@
   var Schema = (global.DND && global.DND.Schema) || req('./ai/schema.js');
   var Referee = (global.DND && global.DND.Referee) || req('./ai/referee.js');
   var Narrator = (global.DND && global.DND.Narrator) || req('./ai/narrator.js');
+  var Retcon = (global.DND && global.DND.Retcon) || req('./engine/retcon.js');
   var Offline = (global.DND && global.DND.Offline) || req('./ai/offline.js');
   var PlayerAgent = (global.DND && global.DND.PlayerAgent) || req('./ai/player_agent.js');
   var Character = (global.DND && global.DND.Character) || req('./engine/character.js');
@@ -804,6 +805,126 @@
           gaveUp: why,
         };
       },
+    });
+  }
+
+  /**
+   * Amend the record, if the Dungeon Master allows it.
+   *
+   * Committed FORWARD as an ordinary batch rather than by rewinding, so
+   * everything that has happened since survives and the amendment itself is
+   * part of the log — replayable, undoable, and visible in an export. That is
+   * also what a real table does: the change is spoken aloud and play resumes,
+   * not quietly rewritten.
+   *
+   * The model's verdict is advisory. `Retcon.validate` decides what actually
+   * happens, so a model talked into granting a legendary sword still produces
+   * nothing but a refusal the player can read.
+   */
+  function applyRetcon(session, proposal, meta) {
+    if (!Retcon) return { ok: false, reason: 'retcon is unavailable' };
+    meta = meta || {};
+    var state = session.state;
+    var prepared = Retcon.prepare(state, proposal, {
+      actorId: meta.actorId || state.activeActorId,
+      request: meta.request || '',
+      at: state.clock ? state.clock.minutes : null,
+    });
+
+    if (!prepared.verdict.ok) {
+      return { ok: false, reason: 'nothing in that could be applied', prepared: prepared };
+    }
+
+    var command = Command.create({
+      sessionId: state.sessionId,
+      stateRevision: state.revision,
+      turnEpoch: state.turnEpoch,
+      actorId: meta.actorId || state.activeActorId,
+      source: 'retcon',
+      family: 'meta',
+      primary: Command.makeStep({ verb: 'retcon' }),
+      goal: proposal.summary || 'amend the record',
+      utterance: meta.request || '',
+    });
+
+    var batch = Events.makeBatch({ commandId: command.commandId, actorId: command.actorId });
+    prepared.events.forEach(function (e) {
+      var kind = e.kind;
+      var payload = Object.assign({}, e);
+      delete payload.kind;
+      Events.push(batch, kind, payload);
+    });
+
+    State.checkpoint(session.history, state, command.commandId);
+    var res = Events.commit(state, batch);
+    if (!res || res.ok === false) {
+      return { ok: false, reason: (res && res.reason) || 'the amendment was rejected', prepared: prepared };
+    }
+    State.refreshAllDerived(state);
+
+    emit(session, 'retcon', {
+      actorId: command.actorId,
+      summary: proposal.summary || '',
+      describe: prepared.describe,
+      accepted: prepared.verdict.accepted.length,
+      refused: prepared.verdict.refused,
+    });
+
+    return { ok: true, prepared: prepared, commandId: command.commandId, describe: prepared.describe };
+  }
+
+  /**
+   * The whole out-of-character exchange: work out what they meant, then
+   * either answer or propose an amendment.
+   *
+   * Nothing is applied here. A retcon is shown to the player first and
+   * applied only on their say-so, because an amendment that happens silently
+   * is indistinguishable from a bug — the same reason a real Dungeon Master
+   * says it out loud before play continues.
+   */
+  function askOrAmend(session, message, opts) {
+    opts = opts || {};
+    var actorId = opts.actorId || session.state.activeActorId;
+
+    return withDeadline(
+      Promise.resolve(Narrator.adjudicate(
+        session.state, session.store, session.campaign, message,
+        { actorId: actorId, signal: opts.signal }
+      )),
+      {
+        stallMs: opts.stallMs, totalMs: opts.totalMs,
+        onProgress: function () { /* the classifier does not stream */ },
+        onGiveUp: function () { return { intent: 'ask' }; },
+      }
+    ).then(function (verdict) {
+      if (!verdict || verdict.intent !== 'amend') {
+        return askDm(session, message, opts).then(function (a) {
+          return { kind: 'answer', text: a.text, source: a.source };
+        });
+      }
+      if (!verdict.allowed) {
+        return {
+          kind: 'refused',
+          text: verdict.reason ||
+            'That is not something we can change now \u2014 it would rewrite a ' +
+            'scene you have already played.',
+          source: verdict.source,
+        };
+      }
+      /* Allowed by the Dungeon Master; now find out what the rules permit. */
+      var prepared = Retcon.prepare(session.state, verdict, {
+        actorId: actorId, request: message,
+      });
+      if (!prepared.verdict.ok) {
+        return { kind: 'refused', text: prepared.describe || 'Nothing in that could be applied.' };
+      }
+      return {
+        kind: 'amend',
+        proposal: verdict,
+        describe: prepared.describe,
+        refused: prepared.verdict.refused,
+        source: verdict.source,
+      };
     });
   }
 
@@ -1650,6 +1771,8 @@
     submitText: submitText,
     interpret: interpret,
     askDm: askDm,
+    askOrAmend: askOrAmend,
+    applyRetcon: applyRetcon,
     applyCommand: applyCommand,
     narrateBatch: narrateBatch,
     partySummary: partySummary,

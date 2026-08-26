@@ -508,25 +508,37 @@
       return;
     }
 
-    /* Through Game.askDm rather than Narrator.answer directly, so the question
-       gets the same stall deadline narration has. The viewer's own character
-       is named explicitly: "what is my Armour Class?" is a question about the
-       person whose eyes we are seeing through, not about whoever the
-       initiative happens to be on. */
-    var ask = (DND.Game && DND.Game.askDm)
-      ? DND.Game.askDm(session, question, {
-        locationName: locationName(),
-        actorId: S.viewerId || session.state.activeActorId,
-      })
-      : Promise.resolve(N.answer(session.state, session.store, session.campaign, question, {
-        locationName: locationName(),
-        actorId: S.viewerId || session.state.activeActorId,
-      }));
+    var who = S.viewerId || session.state.activeActorId;
 
-    Promise.resolve(ask).then(function (res) {
+    /* Through Game rather than Narrator directly, so the exchange gets the
+       same stall deadline narration has. The viewer's own character is named
+       explicitly: "what is my Armour Class?" is a question about the person
+       whose eyes we are seeing through, not about whoever the initiative
+       happens to be on.
+       `askOrAmend` also covers the other thing people say out of character —
+       asking to change what has already happened. */
+    var work = (DND.Game && DND.Game.askOrAmend)
+      ? DND.Game.askOrAmend(session, question, {
+        locationName: locationName(), actorId: who,
+      })
+      : (DND.Game && DND.Game.askDm)
+        ? DND.Game.askDm(session, question, { locationName: locationName(), actorId: who })
+          .then(function (a) { return { kind: 'answer', text: a.text }; })
+        : Promise.resolve(N.answer(session.state, session.store, session.campaign, question, {
+          locationName: locationName(), actorId: who,
+        })).then(function (a) { return { kind: 'answer', text: a.text }; });
+
+    Promise.resolve(work).then(function (res) {
       lockComposer(false);
       setHint('');
-      if (DND.Log) DND.Log.oocAnswer((res && res.text) || 'No answer came back.');
+      if (!res) { if (DND.Log) DND.Log.oocAnswer('No answer came back.'); focusSay(); return; }
+
+      if (res.kind === 'amend') return offerAmendment(res, question, who);
+
+      if (DND.Log) {
+        DND.Log.oocAnswer(res.text ||
+          (res.kind === 'refused' ? 'The Dungeon Master says no.' : 'No answer came back.'));
+      }
       focusSay();
     }).catch(function (e) {
       lockComposer(false);
@@ -534,6 +546,75 @@
       if (DND.Log) DND.Log.oocAnswer('That question could not be asked: ' + ((e && e.message) || e));
       focusSay();
     });
+  }
+
+  /**
+   * Show a proposed amendment and apply it only if the player agrees.
+   *
+   * Never applied straight from the model's verdict. A change to what has
+   * already happened is exactly the kind of thing that must be seen before it
+   * takes effect, or it is indistinguishable from the game losing track of
+   * itself.
+   */
+  function offerAmendment(res, question, actorId) {
+    var host = $('modal-confirm');
+    var apply = function () {
+      var out = DND.Game.applyRetcon(session, res.proposal, {
+        actorId: actorId, request: question,
+      });
+      if (DND.Log) {
+        DND.Log.oocAnswer(out.ok
+          ? 'Agreed \u2014 that is how it was.\n\n' + (out.describe || res.describe)
+          : 'That could not be applied: ' + (out.reason || 'unknown reason'));
+      }
+      if (out.ok) { renderAll(); afterTurn(); }
+      focusSay();
+    };
+
+    /* With no modal to hand, say what was proposed rather than applying it
+       unseen. Silence is the one outcome that must not happen here. */
+    if (!host) {
+      if (DND.Log) {
+        DND.Log.oocAnswer('The Dungeon Master would allow this:\n\n' + res.describe +
+          '\n\nSay "OOC: yes, apply that" to make it so.');
+      }
+      S.pendingAmendment = { res: res, question: question, actorId: actorId };
+      focusSay();
+      return;
+    }
+
+    var lines = String(res.describe || '').split('\n').filter(Boolean);
+    host.innerHTML =
+      '<div class="box confirm-box" role="document">' +
+      '<h2 id="confirm-title">Amend the record?</h2>' +
+      '<p class="confirm-said">You said: <em>' + esc(question) + '</em></p>' +
+      '<ul class="confirm-notes">' +
+      lines.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') +
+      '</ul>' +
+      '<p class="confirm-cost"><span class="k">Note</span> this does not rewind ' +
+      'anything \u2014 everything since still happened.</p>' +
+      '<div class="confirm-btns">' +
+      '<button type="button" class="ghost" id="confirm-edit">Leave it as it was</button>' +
+      '<button type="button" id="confirm-go">Yes, that\u2019s how it was <kbd>\u21b5</kbd></button>' +
+      '</div></div>';
+    host.setAttribute('aria-labelledby', 'confirm-title');
+
+    openModal(host, null);
+    $('confirm-go').onclick = function () { closeModal(host); apply(); };
+    $('confirm-edit').onclick = function () {
+      closeModal(host);
+      if (DND.Log) DND.Log.oocAnswer('Left as it was.');
+      focusSay();
+    };
+    host.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' && document.activeElement !== $('confirm-edit')) {
+        ev.preventDefault();
+        closeModal(host);
+        apply();
+      }
+    });
+    var go = $('confirm-go');
+    if (go && go.focus) go.focus();
   }
 
   /**

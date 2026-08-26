@@ -222,6 +222,9 @@
     <!-- Watches every committed batch for anything that advances a quest. -->
     <script src="js/engine/quests.js"></script>
 <script src="js/engine/effects.js"></script>
+    <!-- Amending the record: what a retcon may and may not do. Loads after
+         events.js, whose KINDS whitelist it emits into. -->
+    <script src="js/engine/retcon.js"></script>
 <script src="js/engine/knowledge.js"></script>
     <!-- What a class feature actually does: the registry keyed by mech.type.
          Loads before character.js, which reads it during derivation. -->
@@ -259,8 +262,7 @@
 <script src="js/ai/schema.js"></script>
 <script src="js/ai/prompt.js"></script>
 <script src="js/ai/offline.js"></script>
-<script src="js/ai/rulebook.js"></script>
-<script src="js/ai/referee.js"></script>
+<script src="js/ai/rulebook.js"></script><script src="js/ai/referee.js"></script>
 <script src="js/ai/narrator.js"></script>
 <script src="js/ai/backstory.js"></script>
 <script src="js/ai/player_agent.js"></script>

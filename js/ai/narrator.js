@@ -25,6 +25,8 @@
     (typeof require !== 'undefined' ? require('./offline.js') : null);
   var Rulebook = (global.DND && global.DND.Rulebook) ||
     (typeof require !== 'undefined' ? require('./rulebook.js') : null);
+  var Retcon = (global.DND && global.DND.Retcon) ||
+    (typeof require !== 'undefined' ? require('../engine/retcon.js') : null);
   /* Resolved lazily inside tableFacts, not here: dispatch.js pulls in every
      resolver, and those require knowledge.js, which requires this file. Taking
      the reference at load time closes that circle and one of the two modules
@@ -743,6 +745,116 @@
   }
 
   /**
+   * Decide whether an out-of-character message is a question or a request to
+   * amend the record, and if the latter, rule on it.
+   *
+   * Kept as one call rather than two so that a stalled model costs one wait
+   * rather than two, and so the Dungeon Master answers in one voice. The
+   * classification is done by the model because the phrasings are endless
+   * ("can we say...", "I'd have bought...", "wait, didn't I already...",
+   * "hang on, you said the door was locked") and a regular expression over
+   * that space is a guessing game. But the model only ever CLASSIFIES and
+   * PROPOSES: what a retcon may actually do is decided in retcon.js, in code.
+   */
+  function adjudicate(state, store, campaign, message, opts) {
+    opts = opts || {};
+    var actorId = opts.actorId || state.activeActorId;
+    var facts = tableFacts(state, actorId);
+    var who = (state.actors || {})[actorId];
+    var limits = Retcon ? Retcon.LIMITS : { gold: 250, items: 3, itemGoldValue: 150, hp: 20 };
+
+    var system = 'You are the Dungeon Master of a D&D 5th Edition game (2014 ' +
+      'rules). A player has said something to you out of character. Decide ' +
+      'which of two things it is.\n\n' +
+      'ASK \u2014 they want to know something: a rule, their own statistics, ' +
+      'what they can do, how this program works.\n\n' +
+      'AMEND \u2014 they want to change or add to what has already happened. ' +
+      '"Can we say I bought rope in town?", "I\u2019d have filled my waterskin", ' +
+      '"wait, you said that door was unlocked", "shouldn\u2019t that have been ' +
+      'at advantage?". This is a retcon: establishing that something was ' +
+      'already true, or correcting a mistake.\n\n' +
+      'If it is an AMEND, rule on it the way a fair Dungeon Master would. ' +
+      'Say yes to anything ordinary that the character plausibly had the time, ' +
+      'money and opportunity to do, and to genuine corrections. Say no to ' +
+      'anything that would rewrite a scene the party has already played ' +
+      'through, undo a consequence they did not like, or hand them something ' +
+      'they could not have got.\n\n' +
+      'What a retcon may do at most: ' + limits.gold + ' gp, ' + limits.items +
+      ' ordinary items worth up to ' + limits.itemGoldValue + ' gp each, and ' +
+      limits.hp + ' hit points of correction. It can never grant levels, ' +
+      'raise ability scores, or bring back the dead.\n\n' +
+      'Reply with JSON only.';
+
+    var schema = {
+      type: 'object',
+      properties: {
+        intent: { type: 'string', enum: ['ask', 'amend'] },
+        allowed: { type: 'boolean' },
+        summary: { type: 'string' },
+        reason: { type: 'string' },
+        changes: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', enum: ['item', 'gold', 'hp', 'fact', 'note', 'flag', 'condition'] },
+              actorId: { type: 'string' },
+              itemId: { type: 'string' },
+              qty: { type: 'integer' },
+              delta: { type: 'integer' },
+              text: { type: 'string' },
+              op: { type: 'string' },
+            },
+            required: ['type'],
+          },
+        },
+      },
+      required: ['intent'],
+    };
+
+    var prompt =
+      'The player said:\n\n  "' + String(message).slice(0, 400) + '"\n\n' +
+      'They are playing ' + ((who && who.name) || 'the party') +
+      ' (id "' + actorId + '"), and any change should name that id as actorId ' +
+      'unless they clearly mean someone else.\n\n' +
+      (facts ? 'Where things stand:\n' + facts + '\n\n' : '') +
+      'If this is a question, answer with {"intent":"ask"} and nothing else.\n' +
+      'If it is an amendment, give intent "amend", whether you allow it, a ' +
+      'one-sentence summary written as settled fact ("You bought a fifty-foot ' +
+      'rope in Ashford before you left"), your reason, and the mechanical ' +
+      'changes. Use itemId slugs like "rope-hempen-50-feet" or plain item ' +
+      'names. A purchase should include the gold spent as a negative delta.';
+
+    if (!Backend.available()) {
+      return Promise.resolve({ intent: 'ask', source: 'offline' });
+    }
+
+    return Backend.chat({
+      profile: 'referee',
+      messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }],
+      format: schema,
+      numPredict: 400,
+      signal: opts.signal,
+    }).then(function (res) {
+      var parsed = null;
+      try { parsed = JSON.parse(String(res.text || '').trim()); } catch (e) { parsed = null; }
+      if (!parsed || parsed.intent !== 'amend') return { intent: 'ask', source: res.kind };
+      return {
+        intent: 'amend',
+        allowed: parsed.allowed !== false,
+        summary: parsed.summary || '',
+        reason: parsed.reason || '',
+        changes: Array.isArray(parsed.changes) ? parsed.changes : [],
+        source: res.kind,
+      };
+    }).catch(function () {
+      /* A failed classification must fall back to answering, never to
+         silently amending the world. */
+      return { intent: 'ask', source: 'offline' };
+    });
+  }
+
+  /**
    * The numbers a player might ask about, straight from the engine.
    *
    * Supplied so the Dungeon Master never has to guess at its own game. Asked
@@ -934,6 +1046,7 @@
     speak: speak,
     opening: opening,
     answer: answer,
+    adjudicate: adjudicate,
   };
 
   global.DND = global.DND || {};

@@ -122,6 +122,16 @@
     if (ctx.sceneNote) lines.push('note: ' + ctx.sceneNote);
     lines.push('');
 
+    /* Amendments the table has agreed, treated as settled. Placed high in the
+       stage direction because a retcon that the model reads and then ignores
+       is worse than one it was never told about: the player watched it be
+       approved. */
+    if (ctx.established && ctx.established.length) {
+      lines.push('[ALREADY TRUE \u2014 agreed at the table, treat as settled fact]');
+      ctx.established.forEach(function (e) { lines.push('- ' + e); });
+      lines.push('');
+    }
+
     if (ctx.party && ctx.party.length) {
       lines.push('[WHO IS HERE]');
       ctx.party.forEach(function (p) {
@@ -392,6 +402,16 @@
       mustNotName: observation.mustNotName || [],
       playerCharacters: playerCharacters,
       avoidOpenings: opts.avoidOpenings || [],
+      /* Amendments the table has agreed. These are settled truth: the party
+         DID buy the rope, Bram and Mara HAVE known each other for a season.
+         Without them in the prompt the Dungeon Master keeps narrating the
+         world it was told about at the start, and a retcon the player was
+         shown and approved quietly stops being true a turn later. */
+      established: (state.retcons || []).slice(-8).reduce(function (acc, r) {
+        if (r.summary) acc.push(r.summary);
+        (r.establishes || []).forEach(function (x) { if (x) acc.push(x); });
+        return acc;
+      }, []),
     };
 
     return {

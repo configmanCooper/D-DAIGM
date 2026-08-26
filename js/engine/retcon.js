@@ -68,11 +68,35 @@
     if (!idOrName) return null;
     var key = String(idOrName).toLowerCase().replace(/\s+/g, '-');
     if (ITEMS[key]) return ITEMS[key];
-    var wanted = String(idOrName).toLowerCase();
-    var hit = Object.keys(ITEMS).filter(function (k) {
+
+    var wanted = String(idOrName).toLowerCase().trim();
+    var byName = Object.keys(ITEMS).filter(function (k) {
       return String(ITEMS[k].name || '').toLowerCase() === wanted;
     })[0];
-    return hit ? ITEMS[hit] : null;
+    if (byName) return ITEMS[byName];
+
+    /* The model invents plausible-looking slugs — "waterskin-full" for a
+       waterskin, "rope-coil" for rope, "rations-dried" for rations — and
+       refusing those loses a reasonable amendment on a spelling.
+       ONE trailing qualifier may be dropped, and no more. Every real case
+       observed needs exactly one; allowing more let
+       "sword-of-infinite-plot-armour" trim all the way down to "sword" and
+       resolve to the Sword of Life Stealing, which is a made-up name
+       silently becoming a real magic weapon. */
+    var parts = key.split('-').filter(Boolean);
+    if (parts.length > 1) {
+      parts.pop();
+      var shorter = parts.join('-');
+      if (ITEMS[shorter]) return ITEMS[shorter];
+      var spaced = shorter.replace(/-/g, ' ');
+      var head = Object.keys(ITEMS).filter(function (k) {
+        var n = String(ITEMS[k].name || '').toLowerCase();
+        return k.indexOf(shorter + '-') === 0 || n === spaced ||
+          n.indexOf(spaced + ',') === 0 || n.indexOf(spaced + ' (') === 0;
+      })[0];
+      if (head) return ITEMS[head];
+    }
+    return null;
   }
 
   function goldValueOf(def) {
@@ -103,8 +127,9 @@
    * three of five requested changes is how a player ends up believing they
    * have a rope they do not have.
    */
-  function validate(state, proposal) {
+  function validate(state, proposal, meta) {
     proposal = proposal || {};
+    meta = meta || {};
     var changes = Array.isArray(proposal.changes) ? proposal.changes : [];
     var accepted = [];
     var refused = [];
@@ -114,16 +139,41 @@
 
     function refuse(c, why) { refused.push({ change: c, reason: why }); }
 
-    changes.forEach(function (c) {
+    changes.forEach(function (rawChange) {
+      var c = rawChange;
       if (!c || !c.type) return refuse(c, 'malformed change');
+
+      /* Fill in what the model reliably leaves out.
+         Observed against the live model on every single well-formed request:
+         it writes a perfect summary and ruling and then omits `actorId` from
+         the changes, so a legitimate "can we say I bought rope in Ashford"
+         was accepted by the Dungeon Master and then refused by the engine
+         with "that change has to name whose it is" — the rope never reached
+         the pack. The asking character is the obvious subject, and a fact
+         with no text of its own is the summary. Defaulting here is far more
+         reliable than asking the model again more firmly. */
+      c = Object.assign({}, c);
+      if (!c.actorId && meta.actorId) c.actorId = meta.actorId;
+      if ((c.type === 'fact' || c.type === 'note') && !c.text) {
+        c.text = proposal.summary || '';
+      }
+
       if (accepted.length >= LIMITS.changes) {
         return refuse(c, 'a single retcon may make at most ' + LIMITS.changes + ' changes');
       }
       if (FORBIDDEN[c.type]) return refuse(c, FORBIDDEN[c.type]);
 
+      /* Only the changes that actually act ON somebody need a character. A
+         fact, a note, a flag or a quest belongs to the world, and a
+         relationship names its two sides itself. Demanding an actorId for all
+         of them refused every purely narrative amendment with "no such
+         character: undefined", which is the commonest kind there is. */
+      var NEEDS_ACTOR = { item: 1, gold: 1, hp: 1, condition: 1 };
       var who = c.actorId ? actorOf(state, c.actorId) : null;
-      if (c.type !== 'flag' && c.type !== 'note' && !who) {
-        return refuse(c, 'no such character: ' + c.actorId);
+      if (NEEDS_ACTOR[c.type] && !who) {
+        return refuse(c, c.actorId
+          ? 'no such character: ' + c.actorId
+          : 'that change has to name whose it is');
       }
 
       switch (c.type) {
@@ -171,11 +221,20 @@
           return;
         }
         case 'fact':
-          if (!c.text && !c.factId) return refuse(c, 'a fact needs something to say');
+          if (!c.text) return refuse(c, 'a fact needs something to say');
           accepted.push(c);
           return;
         case 'relationship':
+          if (!c.fromId || !c.toId) return refuse(c, 'a relationship needs both sides');
+          if (!actorOf(state, c.fromId) || !actorOf(state, c.toId)) {
+            return refuse(c, 'no such character in that relationship');
+          }
+          accepted.push(c);
+          return;
         case 'flag':
+          if (!c.flag) return refuse(c, 'a flag needs a name');
+          accepted.push(c);
+          return;
         case 'quest':
         case 'condition':
         case 'note':
@@ -187,13 +246,20 @@
     });
 
     return {
-      ok: accepted.length > 0 || !!proposal.summary,
+      /* A proposal whose every change was refused is a REFUSAL, not a
+         narrative amendment. Treating those as "narrative only" meant the
+         greedy case came back allowed: the sword and the fortune were both
+         thrown out, nothing was left, and the summary "Bram has a legendary
+         holy avenger and fifty thousand gold" was recorded as settled truth
+         and fed to the Dungeon Master as fact from then on. */
+      ok: accepted.length > 0 || (!!proposal.summary && refused.length === 0),
       accepted: accepted,
       refused: refused,
       /* Purely narrative retcons are legal and common — "we'd have made camp
          by the river" changes nothing mechanically and is still worth
-         recording, so an empty change list is not a failure. */
-      narrativeOnly: accepted.length === 0,
+         recording. But it has to be a proposal that never asked for anything
+         mechanical, not one that asked and was told no. */
+      narrativeOnly: accepted.length === 0 && refused.length === 0,
     };
   }
 
@@ -215,6 +281,12 @@
       summary: proposal.summary || '',
       request: meta.request || '',
       ruling: proposal.reason || '',
+      /* The established truths travel here, where the narrator's prompt can
+         read them back as things that are simply so. */
+      establishes: verdict.accepted
+        .filter(function (c) { return c.type === 'fact' || c.type === 'note'; })
+        .map(function (c) { return c.text; })
+        .filter(Boolean),
       accepted: verdict.accepted.length,
       refused: verdict.refused.map(function (r) { return r.reason; }),
       at: meta.at || null,
@@ -251,23 +323,26 @@
           out.push({ kind: 'hp', targetId: c.actorId, delta: Number(c.delta) || 0, reason: 'retcon' });
           break;
         case 'fact':
-          out.push({
-            kind: 'knowledge',
-            observerId: c.observerId || c.actorId || meta.actorId,
-            factId: c.factId || ('rc_fact_' + Math.random().toString(36).slice(2, 8)),
-            stage: c.stage || 'full',
-            provenance: 'established by the Dungeon Master',
-            text: c.text || '',
-          });
+          /* Established truths ride on the `retcon` event itself rather than
+             through `knowledge`. That event writes to `state.knowledge`, while
+             the text of a fact lives in the campaign's separate fact store as a
+             `claim`/`partial`/`hint` triple — so a knowledge event naming a
+             factId nothing has ever defined records a stage against text that
+             does not exist, and reads back as nothing at all. */
           break;
         case 'relationship':
           out.push({
-            kind: 'relationship', actorId: c.actorId, targetId: c.targetId,
-            delta: Number(c.delta) || 0, reason: 'retcon',
+            kind: 'relationship',
+            fromId: c.fromId, toId: c.toId,
+            affinity: Number(c.affinity) || 0,
+            trust: Number(c.trust) || 0,
+            fear: Number(c.fear) || 0,
+            respect: Number(c.respect) || 0,
+            because: c.because || 'established by the Dungeon Master',
           });
           break;
         case 'flag':
-          out.push({ kind: 'flag', key: c.key, value: c.value });
+          out.push({ kind: 'flag', flag: c.flag, value: c.value });
           break;
         case 'quest':
           out.push({ kind: 'quest', questId: c.questId, status: c.status, note: c.note || '' });
@@ -292,7 +367,7 @@
    * a retcon that happens silently is indistinguishable from a bug.
    */
   function prepare(state, proposal, meta) {
-    var verdict = validate(state, proposal);
+    var verdict = validate(state, proposal, meta);
     return {
       verdict: verdict,
       events: verdict.ok ? toEvents(state, proposal, verdict, meta) : [],

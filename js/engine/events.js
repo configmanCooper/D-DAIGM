@@ -61,6 +61,10 @@
     'spawn', 'despawn',
     'narration',         // prose attached to this batch, after the fact
     'note',              // engine commentary for the log; no state change
+    /* An amendment to the record. Not an undo: it establishes that something
+       was already true and leaves everything since intact, so it is committed
+       forward like any other change and shows up in the export. */
+    'retcon',
   ];
 
   var KIND_SET = KINDS.reduce(function (a, k) { a[k] = true; return a; }, {});
@@ -562,6 +566,30 @@
     flag: function (state, e) {
       state.flags = state.flags || {};
       state.flags[e.flag] = e.value;
+    },
+
+    /**
+     * The record of an amendment.
+     *
+     * Keeps no mechanical effect of its own — the accepted changes ride
+     * alongside as ordinary events — but it is what makes the amendment
+     * visible afterwards. `establishes` is read back into the Dungeon
+     * Master's prompt as settled truth, which is the whole point: a retcon
+     * nobody remembers is just a bug the player asked for.
+     */
+    retcon: function (state, e) {
+      state.retcons = state.retcons || [];
+      state.retcons.push({
+        at: e.at || null,
+        actorId: e.actorId || null,
+        request: e.request || '',
+        summary: e.summary || '',
+        ruling: e.ruling || '',
+        establishes: (e.establishes || []).slice(),
+      });
+      /* Bounded, like every other unbounded-growth list in the state: a long
+         campaign must not carry a thousand of these into every prompt. */
+      if (state.retcons.length > 60) state.retcons.splice(0, state.retcons.length - 60);
     },
 
     combat_start: function (state, e) {
