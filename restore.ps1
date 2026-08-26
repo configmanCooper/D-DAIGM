@@ -106,6 +106,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# ...except for native commands. This script shells out to git constantly, and
+# under `Stop` ANYTHING git writes to stderr — including ordinary warnings, and
+# complaints about unrelated files another program happens to have locked —
+# becomes a terminating PowerShell error. A restore that had entirely succeeded
+# reported failure because of a stray locked document in this shared folder.
+# Git's exit code is the thing worth believing, and it is checked explicitly.
+$PSNativeCommandUseErrorActionPreference = $false
+
 $Root       = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BackupDir  = 'D:\CLI\backups'
 $Stamp      = Get-Date -Format 'yyyy-MM-dd_HHmmss'
