@@ -1602,4 +1602,171 @@ t.section('class features are mechanics, not decoration');
   }
 }
 
+t.section('a dying friend can be steadied by hand');
+/*
+ * 2014, "Stabilizing a Creature": your action, a DC 10 Wisdom (Medicine)
+ * check — or a healer's kit, which does it without a roll. Nothing offered
+ * this at all, so the only ways out of dying were a healing spell or three
+ * lucky death saves, and a party with no caster could do nothing but watch
+ * somebody bleed out.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+
+  const mk = (id, name, side, pos, inv) => ({
+    id, name, side, kind: side === 'party' ? 'pc' : 'monster',
+    base: { name, abilities: { str: 12, dex: 12, con: 12, int: 10, wis: 14, cha: 10 } },
+    progression: { xp: 0, levels: [] },
+    runtime: { hp: 20, hpMax: 20, tempHp: 0, conditions: {}, exhaustion: 0,
+      concentratingOn: null, attuned: [], equipped: {}, inventory: inv || [],
+      deathSaves: { successes: 0, failures: 0 }, gold: 0, pos, resources: {},
+      speed: 30, ac: 12, reach: 5 },
+  });
+
+  function scene(withKit, downPos, seed) {
+    const s = State.create({ seed: 'steady-' + withKit + '-' + (seed || 0) });
+    State.addActor(s, mk('medic', 'Medic', 'party', { x: 0, y: 0 },
+      withKit ? [{ uid: 'k1', id: 'healers-kit', name: "Healer's kit", uses: 2 }] : []));
+    State.addActor(s, mk('down', 'Friend', 'party', downPos || { x: 1, y: 0 }));
+    State.addActor(s, mk('foe', 'Ogre', 'enemy', { x: 5, y: 5 }));
+    State.refreshAllDerived(s);
+    const b = Events.makeBatch({ commandId: 'hurt' });
+    Events.push(b, 'hp', { targetId: 'down', delta: -100 }, 'down');
+    Events.commit(s, b);
+    s.combat = { active: true, order: ['medic', 'down', 'foe'], turnIndex: 0, round: 1 };
+    s.activeActorId = 'medic';
+    Events.commit(s, Combat.startTurn(s, 'medic'));
+    return s;
+  }
+  const steady = (s, targetId) => Combat.resolveCombat(s, {
+    v: 1, family: 'combat', commandId: 'st' + Math.random(), actorId: 'medic',
+    stateRevision: s.revision, turnEpoch: s.turnEpoch,
+    primary: { verb: 'stabilise', targetIds: [targetId] },
+  }, {});
+
+  /* --- offered, and only when it would mean something --- */
+  {
+    const s = scene(false);
+    const offered = Dispatch.legalMoves(s, 'medic', {}).filter(m => m.step.verb === 'stabilise');
+    t.eq(offered.length, 1, 'the bar offers a way to steady a dying friend');
+    t.ok(/medicine/i.test(offered[0].warn || ''), 'and says what it will cost',
+      '(' + (offered[0].warn || '') + ')');
+  }
+  {
+    /* Not for someone across the room: you have to reach them. */
+    const far = scene(false, { x: 8, y: 0 });
+    const offered = Dispatch.legalMoves(far, 'medic', {}).filter(m => m.step.verb === 'stabilise');
+    t.eq(offered.length, 0, 'but not for somebody forty feet away');
+    const r = steady(far, 'down');
+    t.ok(!!r.refused, 'and it refuses if asked for anyway',
+      '(' + ((r.refused || {}).detail || '') + ')');
+  }
+
+  /* --- the Medicine check --- */
+  {
+    const s = scene(false);
+    const b = steady(s, 'down');
+    t.eq(!!b.refused, false, 'the check is made');
+    const roll = (b.events || []).filter(e => e.kind === 'roll' && e.of === 'check')[0];
+    t.ok(!!roll, 'and it is a real roll, recorded');
+    Events.commit(s, b);
+    /* Asserting "they are stable" assumes the d20 co-operates — Wisdom 14
+       unproficient against DC 10 succeeds about two times in three, so that
+       assertion fails one run in three for no reason at all. Assert the thing
+       that must always hold: the outcome matches the roll. */
+    t.eq(!!s.actors.down.runtime.stable, !!(roll && roll.result.success),
+      'and the friend is stable exactly when the check succeeded',
+      '(rolled ' + (roll && roll.result.total) + ' vs DC 10, ' +
+      (roll && roll.result.success ? 'stable' : 'still dying') + ')');
+    t.eq(s.actors.medic.runtime.turn.action, false,
+      'it costs the action either way, which is what makes it a real choice');
+  }
+
+  /* Over enough attempts it must sometimes work, or "succeeds when the check
+     succeeds" would be vacuously true against a check that never passes. */
+  {
+    let stabilised = 0;
+    for (let i = 0; i < 20; i++) {
+      /* A fresh seed each time. Reusing one meant twenty identical rolls, and
+         a run of twenty identical failures reads exactly like a check that can
+         never pass — which is what it looked like until I noticed the seed. */
+      const s = scene(false, null, i);
+      const b = steady(s, 'down');
+      Events.commit(s, b);
+      if (s.actors.down.runtime.stable) stabilised++;
+    }
+    t.ok(stabilised > 0 && stabilised < 20,
+      'and across twenty attempts it sometimes works and sometimes does not',
+      '(' + stabilised + '/20)');
+  }
+
+  /* --- the healer's kit: no roll, one use --- */
+  {
+    const s = scene(true);
+    const offered = Dispatch.legalMoves(s, 'medic', {}).filter(m => m.step.verb === 'stabilise');
+    t.ok(/kit/i.test(offered[0].warn || ''), 'with a kit in the pack the bar says so',
+      '(' + (offered[0].warn || '') + ')');
+    const b = steady(s, 'down');
+    Events.commit(s, b);
+    t.eq(s.actors.down.runtime.stable, true, 'a healer\u2019s kit stabilises without a roll');
+    t.eq(!(b.events || []).some(e => e.kind === 'roll'), true, 'no check is rolled at all');
+    t.eq(s.actors.medic.runtime.inventory[0].uses, 1, 'and it spends a use');
+  }
+
+  /* --- and refuses where it makes no sense --- */
+  {
+    const s = scene(false);
+    t.ok(!!steady(s, 'foe').refused, 'steadying someone still on their feet is refused',
+      '(' + ((steady(s, 'foe').refused || {}).detail || '') + ')');
+    const s2 = scene(false);
+    Events.commit(s2, steady(s2, 'down'));
+    t.ok(!!steady(s2, 'down').refused, 'and steadying somebody already stable is refused');
+  }
+
+  t.ok(Events.KINDS.indexOf('item_charge') >= 0,
+    'item_charge is a registered event kind, or the kit use would be dropped silently');
+}
+
+t.section('coming back from the dead actually costs something');
+/*
+ * `mortality.raise` has always created a `roll_penalty` effect — Raise Dead's
+ * -4 to attacks, saves and ability checks, wearing off by 1 per long rest.
+ * `Effects.modifiersFor` had no case for that kind, so the penalty was created,
+ * stored, displayed and never applied: the entire cost of resurrection was a
+ * line of prose.
+ *
+ * There was a second bug underneath it. The effect declares
+ * `appliesTo: ['attack','save','check']`, and `rollMatches` knew
+ * 'ability_check' and 'skill' but not 'check' — so even once the case existed,
+ * the check third of the penalty would have gone on doing nothing.
+ */
+{
+  const Effects = require('../js/engine/effects.js');
+  const st = State.create({ seed: 'raise' });
+  State.addActor(st, {
+    id: 'pc1', name: 'Returned', side: 'party', kind: 'pc',
+    base: { name: 'Returned', abilities: { str: 14, dex: 12, con: 12, int: 10, wis: 10, cha: 10 } },
+    progression: { levels: [] },
+    runtime: { hp: 10, hpMax: 10, conditions: {}, inventory: [], deathSaves: {}, resources: {} },
+  });
+  State.refreshAllDerived(st);
+  st.effects = st.effects || [];
+  st.effects.push({
+    id: 'raise-penalty-pc1-1', name: 'Returned from death', targetId: 'pc1',
+    kind: 'roll_penalty', magnitude: -4, appliesTo: ['attack', 'save', 'check'],
+    duration: { type: 'until_rest', value: 4 },
+  });
+
+  ['attack', 'save', 'ability_check', 'skill'].forEach(rt => {
+    t.eq(Effects.modifiersFor(st, 'pc1', rt, {}).flat, -4,
+      'the resurrection penalty applies to ' + rt);
+  });
+
+  /* And it must not leak onto rolls it does not name. */
+  const other = Effects.modifiersFor(st, 'pc1', 'initiative', {});
+  t.eq(other.flat, 0, 'but not to a roll it does not name', '(' + other.flat + ')');
+}
+
 t.done();

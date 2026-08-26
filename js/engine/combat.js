@@ -1375,6 +1375,7 @@
       }
       case 'help': return helpResolve(state, command, ctx);
       case 'hide': return hideResolve(state, command, ctx);
+      case 'stabilise': return stabiliseResolve(state, command, ctx);
       case 'ready': return stanceResolve(state, command, null, 'readies an action.');
       case 'escape_grapple': {
         var eb = Events.makeBatch(command);
@@ -1387,6 +1388,59 @@
       default:
         return Events.refuse(Events.makeBatch(command), 'unknown-verb', 'the combat engine does not know ' + verb);
     }
+  }
+
+  /**
+   * Steadying a dying creature.
+   *
+   * 2014, "Stabilizing a Creature": your action, a DC 10 Wisdom (Medicine)
+   * check — or a healer's kit, which does it without a roll and spends a use.
+   * Nothing offered this, so the only routes out of dying were a healing spell
+   * or three lucky death saves, and a party with no caster could only stand and
+   * watch somebody bleed out.
+   */
+  function stabiliseResolve(state, command, ctx) {
+    var b = Events.makeBatch(command);
+    var a = actor(state, command.actorId);
+    if (!a) return Events.refuse(b, 'no-actor', 'nobody is there');
+    if (!canAct(a)) return Events.refuse(b, 'no-action', a.name + ' has no action left this turn');
+
+    var targetId = (command.primary.targetIds || [])[0];
+    var t = targetId ? actor(state, targetId) : null;
+    if (!t) return Events.refuse(b, 'no-target', 'there is nobody named to steady');
+    var rt = t.runtime || {};
+    if (rt.dead) return Events.refuse(b, 'already-dead', t.name + ' is beyond help');
+    if ((rt.hp || 0) > 0) return Events.refuse(b, 'not-dying', t.name + ' is still on their feet');
+    if (rt.stable) return Events.refuse(b, 'already-stable', t.name + ' is already stable');
+
+    var apart = distanceFt(a, t);
+    if (apart != null && apart > CELL) {
+      return Events.refuse(b, 'out-of-reach',
+        t.name + ' is ' + apart + ' ft away \u2014 you have to reach them');
+    }
+
+    Events.push(b, 'action_economy', { actorId: command.actorId, action: false }, '');
+
+    var kit = healersKit(a);
+    if (kit) {
+      /* A healer's kit is ten uses of certainty. Spending one is the cost. */
+      Events.push(b, 'item_charge', { actorId: command.actorId, uid: kit.uid || kit.id, delta: -1, from: 10 },
+        a.name + ' opens a healer\u2019s kit.');
+      Events.push(b, 'stabilise', { actorId: targetId },
+        a.name + ' binds ' + t.name + '\u2019s wounds. They are stable.');
+      return b;
+    }
+
+    var d = derivedOf(state, command.actorId);
+    var roll = Rules.skillCheck(d, 'medicine', { rng: state.rng, dc: 10 });
+    Events.push(b, 'roll', { of: 'check', actorId: command.actorId, targetId: targetId, result: roll });
+    if (roll.success) {
+      Events.push(b, 'stabilise', { actorId: targetId },
+        a.name + ' steadies ' + t.name + '\u2019s breathing. They are stable.');
+    } else {
+      b.beats.push(a.name + ' cannot find the wound in time. ' + t.name + ' is still slipping away.');
+    }
+    return b;
   }
 
   /* Dispatch.commandFromMove puts `move.step` straight into a command's
@@ -1414,9 +1468,36 @@
    * still attack the space it occupies through improvised actions; you just
    * are not told it is there.
    */
+  /* Friends who are down, not dead, not already stable, and close enough to
+     reach — the only people stabilising helps. */
+  function dyingAllies(state, actorId) {
+    var me = actor(state, actorId);
+    if (!me) return [];
+    return Object.keys(state.actors || {}).filter(function (id) {
+      if (id === actorId) return false;
+      var o = state.actors[id];
+      if (!o || o.side !== me.side) return false;
+      var rt = o.runtime || {};
+      if (rt.dead || rt.stable) return false;
+      if ((rt.hp || 0) > 0) return false;
+      var apart = distanceFt(me, o);
+      return apart == null || apart <= CELL;
+    });
+  }
+
+  /* A healer's kit in the pack, if there is one with uses left. */
+  function healersKit(a) {
+    var inv = (a && a.runtime && a.runtime.inventory) || [];
+    return inv.filter(function (i) {
+      if (!i) return false;
+      var id = String(i.id || i.uid || '');
+      if (!/healer/i.test(id) && !/healer/i.test(String(i.name || ''))) return false;
+      return (i.uses == null) || i.uses > 0;
+    })[0] || null;
+  }
+
   /* Companions on your own side who are up and can be helped. */
-  function allies(state, actorId) {
-    var a = actor(state, actorId);
+  function allies(state, actorId) {    var a = actor(state, actorId);
     if (!a) return [];
     return Object.keys(state.actors || {}).filter(function (id) {
       if (id === actorId) return false;
@@ -1507,6 +1588,24 @@
           { targetIds: [id], warn: 'a contest, not an attack roll' }));
         moves.push(move('shove', 'Shove ' + (state.actors[id].name || id), 'action',
           { targetIds: [id], warn: 'a contest, not an attack roll' }));
+      });
+
+      /* Steadying a dying friend.
+         2014, "Stabilizing a Creature": you may use your action to make a DC 10
+         Wisdom (Medicine) check on a creature at 0 hit points, and a healer's
+         kit does it without a roll. There was no such action anywhere — the
+         only ways out of dying were a heal spell or three lucky death saves,
+         which made a party without a caster helpless to save anybody. Offered
+         only against someone actually down and within reach, because that is
+         when it means something. */
+      dyingAllies(state, actorId).forEach(function (id) {
+        var kit = healersKit(a);
+        moves.push(move('stabilise', 'Steady ' + (state.actors[id].name || id), 'action',
+          {
+            targetIds: [id],
+            warn: kit ? 'a healer\u2019s kit, no roll needed \u2014 one use'
+              : 'a DC 10 Wisdom (Medicine) check',
+          }));
       });
     }
     if (canBonus(a) && (a.runtime.attacks || []).length > 1) {

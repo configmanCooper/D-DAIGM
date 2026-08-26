@@ -97,6 +97,12 @@
     if (types.indexOf('all') >= 0) return true;
     if (types.indexOf(rollType) >= 0) return true;
     if (rollType === 'skill' && types.indexOf('ability_check') >= 0) return true;
+    /* "check" is the obvious short word and the one the data actually uses —
+       Raise Dead's penalty declares `appliesTo: ['attack','save','check']`.
+       Matching only the long spelling meant the check third of that penalty
+       silently did not apply. */
+    if ((rollType === 'ability_check' || rollType === 'skill') &&
+        types.indexOf('check') >= 0) return true;
     return false;
   }
 
@@ -311,6 +317,19 @@
            dropped and every penalty spell became a bonus. */
         case 'penalty_dice': if (e.dice) out.penaltyDice.push(e.dice); break;
         case 'flat': if (typeof e.magnitude === 'number') out.flat += e.magnitude; break;
+        /* A flat penalty that wears off — Raise Dead's -4 to attacks, saves
+           and ability checks, reduced by 1 on each long rest. `mortality.raise`
+           has created this effect from the beginning and `modifiersFor` had no
+           case for it, so a character returned from the dead came back with no
+           penalty at all: the entire cost of resurrection was a line of prose.
+           Written as its own kind rather than folded into `flat` so the log can
+           name it, and the magnitude is used as given (it is already negative)
+           rather than negated again. */
+        case 'roll_penalty':
+          if (typeof e.magnitude === 'number') {
+            out.flat += e.magnitude > 0 ? -e.magnitude : e.magnitude;
+          }
+          break;
         default: break;
       }
     });

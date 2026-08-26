@@ -42,6 +42,7 @@
     'action_economy',    // an action, bonus action, reaction, object interaction or movement was spent this turn
     'move',
     'item_gain', 'item_lose', 'item_equip', 'item_unequip', 'item_attune', 'item_unattune',
+    'item_charge',       // a use spent from a limited-use item: a healer's kit, a wand
     'location_item_remove',   // something taken off the floor of a room
     'scene_clear',            // a lock picked, a trap disarmed or sprung
     'gold',
@@ -376,6 +377,22 @@
       var key = e.resource;
       var cur = typeof pool[key] === 'number' ? pool[key] : (e.from || 0);
       pool[key] = Math.max(0, cur + e.delta);
+    },
+
+    /* A use spent from a limited-use item — a healer's kit, a wand. The item
+       stays in the pack until its uses run out, then goes. Without this a
+       healer's kit was ten uses of certainty that never ran out. */
+    item_charge: function (state, e) {
+      var a = actor(state, e.actorId);
+      if (!a || !e.uid) return;
+      var inv = a.runtime.inventory || [];
+      var it = inv.filter(function (i) { return (i.uid || i.id) === e.uid; })[0];
+      if (!it) return;
+      var have = typeof it.uses === 'number' ? it.uses : (e.from || 10);
+      it.uses = Math.max(0, have + (e.delta || -1));
+      if (it.uses === 0 && e.consumeWhenEmpty !== false) {
+        a.runtime.inventory = inv.filter(function (i) { return (i.uid || i.id) !== e.uid; });
+      }
     },
 
     move: function (state, e) {
