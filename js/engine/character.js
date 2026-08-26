@@ -574,6 +574,13 @@
       passives: passives,
       spellcasting: sc,
       attacks: deriveAttacks(runtime),
+      /* How many attacks one Attack action buys.
+         The class table has carried Extra Attack from the beginning —
+         `mech.type === 'extra_attack'` at fighter 5, 11 and 20, and at 5 for
+         barbarian, paladin, ranger and monk — and nothing ever read it. A
+         level-twenty fighter swung once. That is not a rounding error: it is
+         a quarter of the character. */
+      attacksPerAction: extraAttacks(base),
       senses: deriveSenses(base, runtime),
       resistances: gatherDamageKeys(base, activeEffects, 'resist'),
       immunities: gatherDamageKeys(base, activeEffects, 'immune'),
@@ -582,6 +589,29 @@
       exhaustion: exhaustion,
       dead: exhaustion >= 6 || !!(runtime.dead),
     };
+  }
+
+  /**
+   * How many attacks the Attack action buys.
+   *
+   * The highest Extra Attack granted by any class the character has levels in,
+   * at or below the level they have IN that class — Extra Attack does not
+   * stack across classes in the 2014 rules, you simply use the best one.
+   */
+  function extraAttacks(base) {
+    var best = 1;
+    (base.classes || []).forEach(function (c) {
+      var cd = cls(c.classId);
+      if (!cd || !cd.features) return;
+      for (var lv = 1; lv <= (c.levels || 0); lv++) {
+        var list = cd.features[lv] || cd.features[String(lv)] || [];
+        (Array.isArray(list) ? list : [list]).forEach(function (f) {
+          var m = f && f.mech;
+          if (m && m.type === 'extra_attack' && (m.attacks || 0) > best) best = m.attacks;
+        });
+      }
+    });
+    return best;
   }
 
   function deriveSpeed(base, runtime, exhaustion) {

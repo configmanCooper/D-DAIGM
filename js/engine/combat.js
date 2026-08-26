@@ -892,6 +892,27 @@
     var profile = profileFor(state, attackerId, opts);
     if (!profile) return Events.refuse(b, 'no-weapon', 'nothing to attack with');
 
+    /* Reach and range.
+       Nothing checked distance at all, so a longsword hit a target sixty feet
+       away and a melee fight could be conducted from across the room. This is
+       one of the load-bearing rules of the game — the whole point of closing
+       to melee is that you have to close. */
+    var span = weaponSpan(state, attackerId, profile, opts);
+    var apart = distanceFt(attacker, target);
+    if (apart != null && span) {
+      if (span.melee) {
+        if (apart > span.reach) {
+          return Events.refuse(b, 'out-of-reach',
+            (target.name || targetId) + ' is ' + apart + ' ft away, beyond your ' +
+            span.reach + ' ft reach');
+        }
+      } else if (span.long && apart > span.long) {
+        return Events.refuse(b, 'out-of-range',
+          (target.name || targetId) + ' is ' + apart + ' ft away, beyond the weapon\u2019s ' +
+          span.long + ' ft maximum');
+      }
+    }
+
     var ac = targetAc(state, targetId);
     var cover = (ctx && ctx.cover) || null;
     if (cover) {
@@ -1316,9 +1337,9 @@
     var verb = command.primary.verb;
     switch (verb) {
       case 'multiattack': return monsterMultiattack(state, command, ctx);
-      case 'attack': return attackResolve(state, command, ctx, {});
+      case 'attack': return attackAction(state, command, ctx, {});
       case 'two_weapon_attack': return attackResolve(state, command, ctx, { offHand: true });
-      case 'unarmed_strike': return attackResolve(state, command, ctx, {});
+      case 'unarmed_strike': return attackAction(state, command, ctx, { unarmed: true });
       case 'opportunity_attack': return attackResolve(state, command, ctx, { reaction: true });
       case 'grapple': return contestResolve(state, command, ctx, 'grapple');
       case 'shove': return contestResolve(state, command, ctx, 'shove');
@@ -1409,6 +1430,17 @@
     if (!a || isDown(a)) return [];
     var moves = [];
     var enemies = perceivedEnemies(state, actorId);
+    /* Who is actually within reach of a swing. Offering an attack against
+       something sixty feet away produced a button that refused on click, which
+       teaches a player that Attack does not work rather than that they need to
+       close. Movement is offered separately, which is the answer. */
+    var span = weaponSpan(state, actorId, profileFor(state, actorId, {}), {});
+    var limit = span ? (span.melee ? span.reach : span.long) : null;
+    var inReach = enemies.filter(function (id) {
+      if (limit == null) return true;
+      var apart = distanceFt(a, actor(state, id));
+      return apart == null || apart <= limit;
+    });
     if (canAct(a)) {
       /* A creature whose statblock describes a multiattack should use it —
          that IS its attack action, and offering only single attacks made every
@@ -1421,14 +1453,17 @@
             { targetIds: [id], warn: seq.length + ' attacks' }));
         });
       }
-      enemies.forEach(function (id) {
+      inReach.forEach(function (id) {
         moves.push(move('attack', 'Attack ' + (state.actors[id].name || id), 'action', { targetIds: [id] }));
       });
       /* A creature always has fists: an unarmed strike is a legal choice for
          the Attack action whatever else you are holding, and it is how you
          subdue rather than kill. The two-step bar collapses this to a single
-         button however many enemies there are. */
+         button however many enemies there are. Five feet, always — fists have
+         no reach. */
       enemies.forEach(function (id) {
+        var apart = distanceFt(a, actor(state, id));
+        if (apart != null && apart > CELL) return;
         moves.push(move('unarmed_strike', 'Strike ' + (state.actors[id].name || id) + ' unarmed', 'action',
           { targetIds: [id], warn: '1 + your Strength modifier, bludgeoning' }));
       });
@@ -1753,6 +1788,21 @@
     if (left <= 0) return moves;
     if (!prone) moves.push(move('move', 'Move (' + left + ' ft left)', 'movement'));
 
+    /* Somewhere worth moving TO.
+       Enforcing weapon reach made this necessary: before it, everyone could
+       hit everyone from anywhere, so "move" never had to mean anything. With
+       reach real, a fight where the sides start apart cannot begin unless
+       somebody closes — and a bare "Move" button with no destination gave
+       neither a player nor a policy any way to do it. A boss fight ran until
+       the step limit with both sides standing still. */
+    if (!prone && state.combat && state.combat.active) {
+      var reachable = closeableTargets(state, actorId, left);
+      reachable.forEach(function (t) {
+        moves.push(move('move', 'Close on ' + t.name + ' (' + t.cost + ' ft)', 'movement',
+          { path: t.path, targetIds: [t.id] }));
+      });
+    }
+
     /* Terrain the scene says is there. */
     (ctx.obstacles || []).forEach(function (o) {
       if (o.kind === 'climb') {
@@ -1851,8 +1901,209 @@
    * that is advanced after each swing, while the events are still collected
    * into a single batch the caller commits atomically.
    */
-  function monsterMultiattack(state, command, ctx) {
+  /**
+   * The Attack ACTION, which is not the same thing as one attack.
+   *
+   * Extra Attack means the action buys two swings at fifth level, three at
+   * eleventh and four at twentieth for a fighter, and two at fifth for a
+   * barbarian, paladin, ranger or monk. The class table has said so from the
+   * beginning and nothing read it, so a level-twenty fighter attacked once —
+   * a quarter of the character, quietly missing.
+   *
+   * Each swing sees the result of the last, through the same shadow state the
+   * monsters' multiattack uses: hitting a creature that the first blow already
+   * killed is not a thing that happens at a table.
+   */
+  /**
+   * How far this attack can actually reach.
+   *
+   * A melee weapon reaches five feet, or ten with the `reach` property. A
+   * ranged one has a normal band and a long band: beyond normal you have
+   * disadvantage, beyond long you cannot shoot at all. Monsters carry their
+   * reach on the action itself.
+   *
+   * The SRD item data records weapon PROPERTIES but no distances, so the bands
+   * live here, from the 2014 weapon table.
+   */
+  var RANGES = {
+    'blowgun': [25, 100], 'crossbow-hand': [30, 120], 'crossbow-light': [80, 320],
+    'crossbow-heavy': [100, 400], 'dart': [20, 60], 'shortbow': [80, 320],
+    'sling': [30, 120], 'longbow': [150, 600], 'net': [5, 15],
+    'javelin': [30, 120], 'handaxe': [20, 60], 'light-hammer': [20, 60],
+    'spear': [20, 60], 'trident': [20, 60], 'dagger': [20, 60],
+  };
+
+  function weaponSpan(state, actorId, profile, opts) {
+    /* A monster's action states its own reach, and a ranged one its range. */
+    if (profile && profile.reach && !profile.weaponId) {
+      if (profile.range && profile.range.length) {
+        return { melee: false, normal: profile.range[0], long: profile.range[1] || profile.range[0] };
+      }
+      return { melee: true, reach: profile.reach };
+    }
+
+    var a = actor(state, actorId);
+    var item = equippedWeapon(a, opts);
+    if (!item) return { melee: true, reach: CELL };   // fists
+
+    var props = (item.properties || []).map(function (p) { return String(p).toLowerCase(); });
+    var band = RANGES[item.id];
+    var ranged = item.subcategory === 'martial-ranged' || item.subcategory === 'simple-ranged' ||
+      props.indexOf('ammunition') >= 0;
+    if (ranged && band) return { melee: false, normal: band[0], long: band[1] };
+    if (ranged) return { melee: false, normal: 80, long: 320 };
+
+    return { melee: true, reach: props.indexOf('reach') >= 0 ? CELL * 2 : CELL };
+  }
+
+  /** The weapon this attack is being made with, if any. */
+  function equippedWeapon(a, opts) {
+    if (!a || !a.runtime) return null;
+    var eq = a.runtime.equipped || {};
+    var uid = opts && opts.offHand ? (eq.offHand || eq.mainHand) : (eq.mainHand || eq.weapon);
+    var inv = a.runtime.inventory || [];
+    var held = uid ? inv.filter(function (i) { return (i.uid || i.id) === uid; })[0] : null;
+    if (!held) {
+      /* Nothing declared as held: the first weapon in the pack is what they
+         are using, which is what every other part of the engine assumes. */
+      held = inv.filter(function (i) { return isWeapon(i); })[0] || null;
+    }
+    if (!held) return null;
+    var def = itemDefFor(held.id) || held;
+    return Object.assign({ id: held.id }, def);
+  }
+
+  function isWeapon(i) {
+    var def = itemDefFor(i && i.id);
+    var d = def || i || {};
+    return d.category === 'weapon' ||
+      /weapon/.test(String(d.subcategory || '')) || !!d.damage;
+  }
+
+  function itemDefFor(id) {
+    if (!id) return null;
+    var T = (global.DND && global.DND.Data && global.DND.Data.ITEMS) || null;
+    if (!T && typeof require !== 'undefined') {
+      try { T = require('../data/srd_items.js').ITEMS; } catch (e) { T = null; }
+    }
+    return (T && T[id]) || null;
+  }
+
+  /** How far apart two creatures are, in feet, or null if either is off-map. */
+  function distanceFt(a, b) {
+    var p = a && a.runtime && a.runtime.pos;
+    var q = b && b.runtime && b.runtime.pos;
+    if (!p || !q) return null;
+    return chebyshevFt(p, q);
+  }
+
+  /**
+   * Enemies this creature could get into reach of with the movement it has
+   * left, and the step-by-step path that would do it.
+   *
+   * A straight walk toward them, stopping the moment they are in reach. The
+   * grid is small and open enough that a greedy line is the right amount of
+   * cleverness here; anything more belongs in a pathfinder, and anything less
+   * leaves a fight unable to start.
+   */
+  function closeableTargets(state, actorId, budget) {
+    var a = actor(state, actorId);
+    if (!a || !a.runtime.pos) return [];
+    var span = weaponSpan(state, actorId, profileFor(state, actorId, {}), {});
+    var want = span ? (span.melee ? span.reach : Math.min(span.normal || CELL, span.long || CELL)) : CELL;
+
+    var out = [];
+    perceivedEnemies(state, actorId).forEach(function (id) {
+      var t = actor(state, id);
+      if (!t || !t.runtime.pos) return;
+      if (chebyshevFt(a.runtime.pos, t.runtime.pos) <= want) return;   // already close enough
+
+      var path = [{ x: a.runtime.pos.x, y: a.runtime.pos.y }];
+      var at = path[0];
+      var spent = 0;
+      for (var step = 0; step < 40; step++) {
+        if (chebyshevFt(at, t.runtime.pos) <= want) break;
+        var next = {
+          x: at.x + Math.sign(t.runtime.pos.x - at.x),
+          y: at.y + Math.sign(t.runtime.pos.y - at.y),
+        };
+        /* Do not walk onto somebody. */
+        if (occupied(state, next, actorId)) {
+          next = { x: at.x + Math.sign(t.runtime.pos.x - at.x), y: at.y };
+          if (occupied(state, next, actorId) || (next.x === at.x && next.y === at.y)) break;
+        }
+        spent += CELL;
+        if (spent > budget) return;                 // cannot get there this turn
+        path.push(next);
+        at = next;
+      }
+      if (path.length > 1) out.push({ id: id, name: t.name || id, path: path, cost: spent });
+    });
+    /* Nearest first. */
+    out.sort(function (x, y) { return x.cost - y.cost; });
+    return out.slice(0, 4);
+  }
+
+  function occupied(state, p, exceptId) {
+    return Object.keys(state.actors || {}).some(function (id) {
+      if (id === exceptId) return false;
+      var o = state.actors[id];
+      return o && o.runtime && !o.runtime.dead && o.runtime.pos &&
+        o.runtime.pos.x === p.x && o.runtime.pos.y === p.y;
+    });
+  }
+
+  function attackAction(state, command, ctx, opts) {
     ctx = ctx || {};
+    opts = opts || {};
+    var attackerId = command.actorId;
+    var attacker = actor(state, attackerId);
+    if (!attacker) return Events.refuse(Events.makeBatch(command), 'no-actor', 'nobody is there to attack');
+
+    var swings = (attacker.derivedCache && attacker.derivedCache.attacksPerAction) || 1;
+    if (swings <= 1) return attackResolve(state, command, ctx, opts);
+
+    var b = Events.makeBatch(command);
+    if (!canAct(attacker)) return Events.refuse(b, 'no-action', 'no action left to attack with');
+
+    var targets = command.primary.targetIds || (ctx.targetId ? [ctx.targetId] : []);
+    Events.push(b, 'action_economy', { actorId: attackerId, action: false });
+
+    var shadow = shadowOf(state);
+    var landed = 0;
+    for (var i = 0; i < swings; i++) {
+      /* Fresh targets each swing: the one named, unless it has already fallen,
+         in which case anything else within reach. */
+      var targetId = targets[i] || targets[0];
+      var t = actor(shadow, targetId);
+      if (!t || t.runtime.dead || t.runtime.hp <= 0) {
+        targetId = perceivedEnemies(shadow, attackerId).filter(function (id) {
+          var o = actor(shadow, id);
+          return o && !o.runtime.dead && o.runtime.hp > 0;
+        })[0];
+        if (!targetId) break;                 // nothing left standing
+      }
+      var sub = attackResolve(shadow, {
+        commandId: command.commandId, actorId: attackerId,
+        primary: { verb: opts.unarmed ? 'unarmed_strike' : 'attack', targetIds: [targetId] },
+      }, ctx, Object.assign({}, opts, { free: true }));
+      if (sub.refused) {
+        /* Carry the real reason up. Swallowing it and reporting "nothing in
+           reach" turned "your longsword does not reach that far" into a
+           mystery. */
+        if (!landed) return Events.refuse(b, sub.refused.reason, sub.refused.detail);
+        break;
+      }
+      b.events = b.events.concat(sub.events);
+      b.beats = b.beats.concat(sub.beats);
+      applyToShadow(shadow, sub.events);
+      landed++;
+    }
+    if (!landed) return Events.refuse(b, 'no-target', 'there is nothing in reach to attack');
+    return b;
+  }
+
+  function monsterMultiattack(state, command, ctx) {
     var attackerId = command.actorId;
     var attacker = actor(state, attackerId);
     var b = Events.makeBatch(command);

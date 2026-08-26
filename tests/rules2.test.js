@@ -344,7 +344,11 @@ t.section('a shipped monster fights with its own statblock');
     id: 'pc', name: 'Vess', side: 'party', kind: 'pc',
     base: { name: 'Vess', abilities: { str: 16, dex: 12, con: 14 }, classes: [{ classId: 'fighter', levels: 10 }] },
     progression: { levels: [] },
-    runtime: { hp: 400, hpMax: 400, conditions: {}, inventory: [], deathSaves: {}, pos: { x: 1, y: 1 } },
+    /* Adjacent to the dragon. Weapon reach is enforced now, and the dragon's
+       claws reach only five feet — from two squares away it could bite and
+       lash with its tail and not claw, which is correct, and not what this
+       test is about. */
+    runtime: { hp: 400, hpMax: 400, conditions: {}, inventory: [], deathSaves: {}, pos: { x: 2, y: 1 } },
   });
   State.refreshAllDerived(s);
   s.actors.pc.runtime.hp = 400; s.actors.pc.runtime.hpMax = 400;
@@ -757,6 +761,203 @@ t.section('only a class with Ritual Casting gets rituals');
   t.ok((sc.ritualFrom || []).length >= (sc.spellbook || []).length,
     'a wizard may ritual anything in the spellbook, prepared or not',
     '(' + (sc.ritualFrom || []).length + ' from a book of ' + (sc.spellbook || []).length + ')');
+}
+
+
+/* ---------------------------------------------------------------------- */
+t.section('the Attack action is not the same thing as one attack');
+/*
+ * Extra Attack: two swings at fifth level, three at eleventh and four at
+ * twentieth for a fighter, and two at fifth for a barbarian, paladin, ranger
+ * or monk. The class table has carried `mech.type === "extra_attack"` from the
+ * beginning and nothing ever read it, so a level-twenty fighter attacked once
+ * — a quarter of the character, quietly missing, in the single most-used
+ * action in the game.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+  const Character = require('../js/engine/character.js');
+  const MONSTERS = require('../js/data/srd_monsters.js').MONSTERS;
+
+  const swingsFor = (classId, levels) => {
+    const st = State.create({ seed: 'ea-' + classId + levels });
+    const c = Character.buildFromSpec({
+      name: 'Swinger', raceId: 'human', classId, levels, backgroundId: 'soldier',
+      abilities: { str: 17, dex: 14, con: 15, int: 10, wis: 12, cha: 10 },
+      proficiencies: { skills: [] },
+    });
+    c.runtime.pos = { x: 2, y: 2 };
+    State.addActor(st, {
+      id: 'pc1', name: 'Swinger', side: 'party', kind: 'pc', role: classId,
+      base: c.base, progression: c.progression, runtime: c.runtime,
+    });
+    /* Something big enough that it will not die mid-flurry and cut the count
+       short — a dead target is not a missing swing. */
+    const sb = MONSTERS['adult-red-dragon'] || MONSTERS['adult-black-dragon'];
+    State.addActor(st, {
+      id: 'foe1', name: 'Dragon', side: 'enemy', kind: 'monster', statblock: sb,
+      base: { name: 'Dragon', abilities: sb.abilities || {}, proficiencies: { skills: [], saves: [] }, classes: [] },
+      progression: { xp: 0, levels: [] },
+      runtime: {
+        hp: 500, hpMax: 500, tempHp: 0, conditions: {}, exhaustion: 0,
+        concentratingOn: null, attuned: [], equipped: {}, inventory: [],
+        deathSaves: { successes: 0, failures: 0 }, resources: {}, gold: 0,
+        pos: { x: 3, y: 2 },
+      },
+    });
+    State.addSeat(st, { id: 'p1', name: 'P', actorId: 'pc1', control: 'human' });
+    State.refreshAllDerived(st);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: [{ id: 'pc1' }, { id: 'foe1' }] };
+    st.activeActorId = 'pc1';
+    st.actors.pc1.runtime.turn = {
+      action: true, bonus: true, reaction: true, objectInteraction: true,
+      movementRemaining: 30, surprised: false, mountedThisMove: false,
+    };
+    const attack = (Dispatch.legalMoves(st, 'pc1', {}) || [])
+      .filter(m => m.step && m.step.verb === 'attack')[0];
+    if (!attack) return { rolls: 0, derived: st.actors.pc1.derivedCache.attacksPerAction };
+    const r = Dispatch.dispatch(st, { past: [], future: [] },
+      Dispatch.commandFromMove(st, 'pc1', attack), {});
+    return {
+      rolls: ((r.batch || {}).events || [])
+        .filter(e => e.kind === 'roll' && e.of === 'attack').length,
+      derived: st.actors.pc1.derivedCache.attacksPerAction,
+      actionLeft: st.actors.pc1.runtime.turn.action,
+    };
+  };
+
+  const f1 = swingsFor('fighter', 1);
+  t.eq(f1.derived, 1, 'a first-level fighter has one attack');
+  t.eq(f1.rolls, 1, 'and makes one attack roll');
+
+  const f5 = swingsFor('fighter', 5);
+  t.eq(f5.derived, 2, 'a fifth-level fighter has two');
+  t.eq(f5.rolls, 2, 'and makes two attack rolls for one action');
+  t.eq(f5.actionLeft, false, 'which costs a single action, not two');
+
+  t.eq(swingsFor('fighter', 11).rolls, 3, 'an eleventh-level fighter makes three');
+  t.eq(swingsFor('fighter', 20).rolls, 4, 'and a twentieth-level fighter four');
+
+  t.eq(swingsFor('paladin', 5).rolls, 2, 'a fifth-level paladin gets Extra Attack too');
+  t.eq(swingsFor('barbarian', 5).rolls, 2, 'and a barbarian');
+  t.eq(swingsFor('rogue', 20).rolls, 1, 'a rogue never does, at any level');
+  t.eq(swingsFor('wizard', 20).rolls, 1, 'and neither does a wizard');
+}
+
+t.section('a weapon only reaches as far as it reaches');
+/*
+ * Nothing checked distance at all, so a longsword hit a target sixty feet away
+ * and a melee fight could be conducted from opposite corners of the room. The
+ * whole point of closing to melee is that you have to close.
+ */
+{
+  const Dispatch = require('../js/engine/dispatch.js');
+  require('../js/engine/interaction.js');
+  require('../js/engine/combat.js');
+  const Character = require('../js/engine/character.js');
+
+  const swingAt = (squares, weaponId) => {
+    const st = State.create({ seed: 'reach-' + squares + weaponId });
+    const c = Character.buildFromSpec({
+      name: 'Reacher', raceId: 'human', classId: 'fighter', levels: 3,
+      backgroundId: 'soldier',
+      abilities: { str: 17, dex: 16, con: 15, int: 10, wis: 12, cha: 10 },
+      proficiencies: { skills: [] },
+    });
+    c.runtime.pos = { x: 2, y: 2 };
+    c.runtime.inventory = [{ uid: 'w1', id: weaponId, name: weaponId }];
+    c.runtime.equipped = { mainHand: 'w1' };
+    State.addActor(st, {
+      id: 'pc1', name: 'Reacher', side: 'party', kind: 'pc',
+      base: c.base, progression: c.progression, runtime: c.runtime,
+    });
+    const f = Character.buildFromSpec({
+      name: 'Target', raceId: 'human', classId: 'fighter', levels: 1,
+      backgroundId: 'soldier',
+      abilities: { str: 12, dex: 12, con: 12, int: 10, wis: 10, cha: 10 },
+      proficiencies: { skills: [] },
+    });
+    f.runtime.pos = { x: 2 + squares, y: 2 };
+    State.addActor(st, {
+      id: 'foe1', name: 'Target', side: 'enemy', kind: 'monster',
+      base: f.base, progression: f.progression, runtime: f.runtime,
+    });
+    State.addSeat(st, { id: 'p1', name: 'P', actorId: 'pc1', control: 'human' });
+    State.refreshAllDerived(st);
+    st.combat = { active: true, round: 1, turnIndex: 0, order: [{ id: 'pc1' }, { id: 'foe1' }] };
+    st.activeActorId = 'pc1';
+    st.actors.pc1.runtime.turn = {
+      action: true, bonus: true, reaction: true, objectInteraction: true,
+      movementRemaining: 30, surprised: false, mountedThisMove: false,
+    };
+    const r = Dispatch.dispatch(st, { past: [], future: [] }, {
+      v: 1, family: 'combat', commandId: 'r' + Math.random(), actorId: 'pc1',
+      stateRevision: st.revision, turnEpoch: st.turnEpoch,
+      primary: { verb: 'attack', targetIds: ['foe1'] },
+    }, {});
+    return !(r.batch && r.batch.refused);
+  };
+
+  t.eq(swingAt(1, 'longsword'), true, 'a longsword reaches five feet');
+  t.eq(swingAt(2, 'longsword'), false, 'and not ten');
+  t.eq(swingAt(12, 'longsword'), false, 'and certainly not sixty');
+
+  t.eq(swingAt(1, 'glaive'), true, 'a glaive reaches five feet');
+  t.eq(swingAt(2, 'glaive'), true, 'and ten, having the reach property');
+  t.eq(swingAt(3, 'glaive'), false, 'but not fifteen');
+
+  t.eq(swingAt(12, 'longbow'), true, 'a longbow reaches sixty feet easily');
+  t.eq(swingAt(100, 'longbow'), true, 'and five hundred');
+  t.eq(swingAt(130, 'longbow'), false, 'but not past its long range of six hundred');
+
+  /* And the bar must not offer a swing that cannot land: a button that always
+     refuses teaches a player that the verb is broken. */
+  const st = State.create({ seed: 'reach-offer' });
+  const c = Character.buildFromSpec({
+    name: 'Reacher', raceId: 'human', classId: 'fighter', levels: 3,
+    backgroundId: 'soldier',
+    abilities: { str: 17, dex: 16, con: 15, int: 10, wis: 12, cha: 10 },
+    proficiencies: { skills: [] },
+  });
+  c.runtime.pos = { x: 2, y: 2 };
+  c.runtime.inventory = [{ uid: 'w1', id: 'longsword', name: 'longsword' }];
+  c.runtime.equipped = { mainHand: 'w1' };
+  State.addActor(st, {
+    id: 'pc1', name: 'Reacher', side: 'party', kind: 'pc',
+    base: c.base, progression: c.progression, runtime: c.runtime,
+  });
+  const far = Character.buildFromSpec({
+    name: 'Far', raceId: 'human', classId: 'fighter', levels: 1, backgroundId: 'soldier',
+    abilities: { str: 12, dex: 12, con: 12, int: 10, wis: 10, cha: 10 },
+    proficiencies: { skills: [] },
+  });
+  far.runtime.pos = { x: 6, y: 2 };
+  State.addActor(st, {
+    id: 'far1', name: 'Far', side: 'enemy', kind: 'monster',
+    base: far.base, progression: far.progression, runtime: far.runtime,
+  });
+  State.addSeat(st, { id: 'p1', name: 'P', actorId: 'pc1', control: 'human' });
+  State.refreshAllDerived(st);
+  st.combat = { active: true, round: 1, turnIndex: 0, order: [{ id: 'pc1' }, { id: 'far1' }] };
+  st.activeActorId = 'pc1';
+  st.actors.pc1.runtime.turn = {
+    action: true, bonus: true, reaction: true, objectInteraction: true,
+    movementRemaining: 30, surprised: false, mountedThisMove: false,
+  };
+  const moves = Dispatch.legalMoves(st, 'pc1', {}) || [];
+  t.eq(moves.some(m => m.step && m.step.verb === 'attack'), false,
+    'no swing is offered at something twenty feet away');
+
+  /* But a way to CLOSE is — otherwise a fight where the sides start apart
+     could never begin, which is exactly what happened: a boss fight ran to the
+     step limit with both lines standing still. */
+  const closing = moves.filter(m => m.step && m.step.verb === 'move' && (m.step.path || []).length > 1);
+  t.ok(closing.length > 0, 'but a way to close the distance is',
+    '(' + closing.map(m => m.what).join(', ') + ')');
+  t.ok(/close on/i.test(closing[0].what), 'and it says so plainly',
+    '(' + closing[0].what + ')');
 }
 
 t.done();

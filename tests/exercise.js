@@ -415,15 +415,21 @@ function bossFight() {
 
     const moves = Dispatch.legalMoves(s, actorId, {});
     const attack = moves.filter(m => m.step.verb === 'attack')[0];
-    if (attack) {
+    /* Nothing in reach? Walk. Weapon reach is enforced now, so a fight where
+       the sides start apart cannot begin unless somebody closes — this loop
+       used to swing from wherever it stood and the fight resolved itself by
+       accident. */
+    const close = moves.filter(m => m.step.verb === 'move' && (m.step.path || []).length > 1)[0];
+    const take = attack || close;
+    if (take) {
       try {
         Dispatch.dispatch(s, history, Command.create({
-          actorId, family: 'combat',
+          actorId, family: attack ? 'combat' : 'movement',
           stateRevision: s.revision, turnEpoch: s.turnEpoch,
-          primary: attack.step,
+          primary: take.step,
         }), {});
       } catch (e) {
-        log(`  \u2717 boss fight threw on ${a.name}'s attack: ${e.message}`);
+        log(`  \u2717 boss fight threw on ${a.name}'s turn: ${e.message}`);
         record('boss', 'attack', 'THREW', e.message);
         break;
       }

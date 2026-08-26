@@ -61,7 +61,7 @@ function foe(id, name, pos) {
     abilities: { str: 14, dex: 12, con: 12, int: 8, wis: 10, cha: 8 },
     proficiencies: { skills: [] },
   });
-  c.runtime.pos = pos || { x: 4, y: 2 };
+  c.runtime.pos = pos || { x: 3, y: 2 };
   return { id, name, side: 'enemy', kind: 'monster', base: c.base, progression: c.progression, runtime: c.runtime };
 }
 
@@ -162,7 +162,7 @@ function main() {
   const caster = State.create({ seed: 'reach-caster' });
   State.addActor(caster, hero('pc1', 'Mage', { classId: 'wizard', levels: 5 }));
   /* An enemy who can cast, so counterspell has something to answer. */
-  const enemyMage = hero('foe1', 'Cult Adept', { classId: 'wizard', levels: 3, side: 'enemy', pos: { x: 4, y: 2 } });
+  const enemyMage = hero('foe1', 'Cult Adept', { classId: 'wizard', levels: 3, side: 'enemy', pos: { x: 3, y: 2 } });
   State.addActor(caster, enemyMage);
   State.addSeat(caster, { id: 'p1', name: 'P1', actorId: 'pc1', control: 'human' });
   /* Counterspell and a ritual spell in the book, and something to attune to. */

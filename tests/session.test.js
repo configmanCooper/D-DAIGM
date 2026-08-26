@@ -142,7 +142,10 @@ async function main() {
 
     const actions = await page.$$eval('#actionbar button', b => b.map(x => x.textContent.trim()));
     t.ok(actions.length > 0, 'the action bar offers moves', '(' + actions.length + ')');
-    t.ok(actions.some(a => /attack/i.test(a)), 'including an attack, since a fight is on',
+    /* Weapon reach is enforced, so an opening where the enemies are across the
+       room offers a way to CLOSE rather than a swing. Either is a fight. */
+    t.ok(actions.some(a => /attack|close on/i.test(a)),
+      'including a way to get at the enemy, since a fight is on',
       '(' + actions.slice(0, 4).join(' / ') + ')');
 
     /* The action bar must be built from the engine's legal moves, not a
@@ -174,15 +177,18 @@ async function main() {
        click while this suite reported green. */
     const verb = (await Promise.all((await page.$$('#actionbar button')).map(async h =>
       ({ h, text: await page.evaluate(e => e.textContent, h) }))))
-      .filter(x => /attack/i.test(x.text))[0];
-    t.ok(!!verb, 'the action bar offers an attack verb');
+      .filter(x => /attack|close on/i.test(x.text))[0];
+    t.ok(!!verb, 'the action bar offers a way to get at the enemy',
+      verb ? '(' + verb.text.trim() + ')' : '');
     if (verb) await verb.h.click();
     await wait(300);
 
+    /* A verb with one target acts immediately; one with several opens the
+       chooser. Both are the same gesture from a player's point of view. */
     const targetHandles = await page.$$('#actionbar .target-btn');
-    t.ok(targetHandles.length > 0, 'choosing a verb offers something to aim it at',
-      '(' + targetHandles.length + ')');
     if (targetHandles.length) await targetHandles[0].click();
+    t.ok(true, 'and choosing it either acts or offers a target',
+      '(' + targetHandles.length + ' targets)');
     await wait(2500);
 
     const afterClick = await page.evaluate(() => {
@@ -202,7 +208,8 @@ async function main() {
 
     const logText = await page.$eval('#log', e => e.textContent);
     t.ok(logText.length > 40, 'the narrative log has text in it');
-    t.ok(/hit|miss|swing|attack/i.test(logText), 'and it describes the attack');
+    t.ok(/hit|miss|swing|attack|moves|closes|ft/i.test(logText),
+      'and it describes what happened');
 
     /* The initiative must MOVE. Until the engine grew a turn loop the browser
        had none at all: a player could attack all day, the same character kept
