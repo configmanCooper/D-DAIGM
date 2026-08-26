@@ -185,11 +185,19 @@
 
   function narrationToken(payload) {
     if (!active || !active._narr) return;
+    /* A polite live region plus token-by-token replacement means a screen
+       reader re-reads the growing paragraph on every token — a stream of
+       half-sentences for the whole of a narration. Mark it busy while it is
+       being written and announce the finished text once, below. */
+    var log = document.getElementById('log');
+    if (log && log.getAttribute('aria-busy') !== 'true') log.setAttribute('aria-busy', 'true');
     active._narr.textContent = payload.soFar != null ? payload.soFar : (active._narr.textContent + (payload.piece || ''));
     scroll();
   }
 
   function narration(payload) {
+    var log = document.getElementById('log');
+    if (log) log.removeAttribute('aria-busy');   // the stream has finished; announce it
     if (!active || !active._narr) {
       // narration with no committed turn (rare) — show it as a plain DM line
       var e = document.createElement('div');
@@ -216,6 +224,8 @@
   }
 
   function narrationDropped() {
+    var log = document.getElementById('log');
+    if (log) log.removeAttribute('aria-busy');
     if (active) active.classList.remove('streaming');
   }
 

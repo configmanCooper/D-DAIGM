@@ -291,25 +291,107 @@
    */
   function askToConfirm(actorId, text) {
     setHint('Reading that\u2026');
-    var input = $('say');
-    if (input) input.disabled = true;
+    /* Lock the WHOLE form, not just the box. Leaving Act live while the
+       referee was thinking let a second press start a second interpretation of
+       the same sentence, and whichever came back last won. */
+    lockComposer(true);
 
     Promise.resolve(DND.Game.interpret(session, actorId, text, {})).then(function (res) {
-      if (input) input.disabled = false;
+      lockComposer(false);
       setHint('');
       if (!res || !res.ok) {
         setHint('That could not be read: ' + ((res && res.reason) || 'unknown'));
+        focusSay();
         return;
       }
       if (res.clarify) {
-        setHint(res.clarify);
+        /* A question deserves a dialog, not a grey line under the box that a
+           player reading the story will never notice. */
+        showClarify(text, res.clarify);
         return;
       }
       showConfirm(actorId, text, res);
     }).catch(function (e) {
-      if (input) input.disabled = false;
+      lockComposer(false);
       setHint('That could not be read: ' + ((e && e.message) || e));
+      focusSay();
     });
+  }
+
+  function lockComposer(on) {
+    var input = $('say');
+    var btn = $('say-btn');
+    if (input) input.disabled = !!on;
+    if (btn) btn.disabled = !!on;
+  }
+
+  function focusSay() { var i = $('say'); if (i && i.focus) i.focus(); }
+
+  /* The Dungeon Master needs to know which one you meant. */
+  function showClarify(text, question) {
+    var host = $('modal-confirm');
+    if (!host) { setHint(question); focusSay(); return; }
+    host.innerHTML =
+      '<div class="box confirm-box" role="document">' +
+      '<h2 id="confirm-title">One thing first</h2>' +
+      '<p class="confirm-said">You said: <em>' + esc(text) + '</em></p>' +
+      '<p class="confirm-clarify">' + esc(question) + '</p>' +
+      '<div class="confirm-btns">' +
+      '<button type="button" id="confirm-edit">Say it another way</button>' +
+      '</div></div>';
+    openModal(host, function () {
+      var i = $('say');
+      if (i) { i.value = text; i.focus(); i.select(); }
+    });
+    $('confirm-edit').onclick = function () { closeModal(host); };
+  }
+
+  /**
+   * Open a dialog properly: remember where the focus came from, keep the focus
+   * inside while it is up, and put it back afterwards.
+   *
+   * The dialogs claimed `aria-modal="true"` and did none of this, so a
+   * keyboard player could tab straight out of the dialog and into the page
+   * behind it — which is exactly the thing `aria-modal` promises will not
+   * happen.
+   */
+  var modalReturn = null;
+  var modalTrap = null;
+  function openModal(host, onClose) {
+    modalReturn = document.activeElement;
+    host.hidden = false;
+    host.__onClose = onClose || null;
+    var appEl = $('app');
+    if (appEl) appEl.setAttribute('aria-hidden', 'true');
+
+    modalTrap = function (ev) {
+      if (ev.key === 'Escape') { closeModal(host); return; }
+      if (ev.key !== 'Tab') return;
+      var focusable = host.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+      if (!focusable.length) return;
+      var first = focusable[0];
+      var last = focusable[focusable.length - 1];
+      if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+      else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', modalTrap, true);
+
+    var go = host.querySelector('button');
+    if (go && go.focus) go.focus();
+  }
+
+  function closeModal(host) {
+    host.hidden = true;
+    var after = host.__onClose;
+    host.__onClose = null;
+    host.innerHTML = '';
+    var appEl = $('app');
+    if (appEl) appEl.removeAttribute('aria-hidden');
+    if (modalTrap) { document.removeEventListener('keydown', modalTrap, true); modalTrap = null; }
+    if (after) { after(); }
+    else if (modalReturn && modalReturn.focus) modalReturn.focus();
+    modalReturn = null;
   }
 
   function showConfirm(actorId, text, res) {
@@ -353,21 +435,31 @@
       rows.join('') +
       '<div class="confirm-btns">' +
       '<button type="button" class="ghost" id="confirm-edit">Change what I said</button>' +
-      '<button type="button" id="confirm-go">Do it</button>' +
+      '<button type="button" id="confirm-go">Do it <kbd>↵</kbd></button>' +
       '</div></div>';
-    host.hidden = false;
     host.setAttribute('aria-labelledby', 'confirm-title');
 
-    var close = function () { host.hidden = true; host.innerHTML = ''; };
-    $('confirm-go').onclick = function () { close(); commitConfirmed(actorId, text, res); };
+    openModal(host, null);
+    $('confirm-go').onclick = function () {
+      closeModal(host);
+      commitConfirmed(actorId, text, res);
+    };
     $('confirm-edit').onclick = function () {
-      close();
-      var i = $('say');
-      if (i) { i.value = text; i.focus(); i.select(); }
+      host.__onClose = function () {
+        var i = $('say');
+        if (i) { i.value = text; i.focus(); i.select(); }
+      };
+      closeModal(host);
     };
-    host.onkeydown = function (ev) {
-      if (ev.key === 'Escape') { close(); var i = $('say'); if (i) i.focus(); }
-    };
+    /* Enter agrees, which is what the hands of anyone who just pressed Enter
+       to submit are already expecting. */
+    host.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' && document.activeElement !== $('confirm-edit')) {
+        ev.preventDefault();
+        closeModal(host);
+        commitConfirmed(actorId, text, res);
+      }
+    });
     var go = $('confirm-go');
     if (go && go.focus) go.focus();
   }
@@ -866,20 +958,30 @@
    * Show the battle map when a fight starts.
    *
    * It used to REPLACE the narrative view, so the moment initiative was rolled
-   * the story you were reading vanished behind a grid. They are both visible
-   * now: the map is a panel that opens itself when a fight begins and can be
-   * closed, moved or resized like any other.
+   * the story you were reading vanished behind a grid. It is a panel now.
+   *
+   * Opened on the TRANSITION into combat, not on every render. The first
+   * version reopened it from `afterTurn`, which runs constantly — so closing
+   * the map lasted until the next state change, and because opening a panel
+   * moves the focus, the caret was pulled out of the composer several times a
+   * turn while a player was trying to type.
    */
   function toggleCombatView() {
     if (!session || !DND.Battle) return;
     var obs = DND.Game.observationFor(session, S.viewerId);
-    var inCombat = obs && obs.combat && obs.combat.active;
+    var inCombat = !!(obs && obs.combat && obs.combat.active);
+    var was = S.inCombatView;
+    S.inCombatView = inCombat;
+
     if (inCombat) {
       DND.Battle.show();
-      if (DND.Windows && !DND.Windows.isOpen('battle')) DND.Windows.open('battle');
+      /* Only when the fight is new, and quietly — a panel that opens because
+         something happened must not take the keyboard from the player. */
+      if (!was && DND.Windows && !S.mapDismissed) DND.Windows.open('battle', { quiet: true });
     } else {
       DND.Battle.hide();
-      if (DND.Windows && DND.Windows.isOpen('battle')) DND.Windows.close('battle');
+      S.mapDismissed = false;                       // a new fight starts fresh
+      if (was && DND.Windows && DND.Windows.isOpen('battle')) DND.Windows.close('battle');
     }
   }
 
@@ -1230,12 +1332,24 @@
     };
 
     // context tabs
-    Array.prototype.forEach.call(document.querySelectorAll('#context-tabs [role="tab"]'), function (tab) {
-      tab.onclick = function () {
-        selectTab(tab.getAttribute('data-tab'));
-        /* On a narrow screen the tabs live inside a drawer, and choosing one
-           should not leave the player staring at the drawer. */
-        if (isDrawerLayout()) closeContext();
+    var tabs = Array.prototype.slice.call(
+      document.querySelectorAll('#context-tabs [role="tab"]'));
+    tabs.forEach(function (tab, i) {
+      tab.onclick = function () { selectTab(tab.getAttribute('data-tab')); };
+      /* The ARIA tab pattern: one stop in the tab order, arrows to move
+         between them. Without it a keyboard player tabs through four separate
+         stops to reach the panel body, and Home/End do nothing. */
+      tab.setAttribute('tabindex', tab.getAttribute('aria-selected') === 'true' ? '0' : '-1');
+      tab.onkeydown = function (ev) {
+        var next = null;
+        if (ev.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+        else if (ev.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+        else if (ev.key === 'Home') next = tabs[0];
+        else if (ev.key === 'End') next = tabs[tabs.length - 1];
+        else return;
+        ev.preventDefault();
+        selectTab(next.getAttribute('data-tab'));
+        next.focus();
       };
     });
 
@@ -1249,15 +1363,33 @@
     bindClick('btn-transcript', function () { doExportTranscript(); });
     /* Load reopens the setup wizard, which is where both a browser save and a
        file on disk are offered. Sending a player back to "New" to find Load
-       was the sort of thing you only forgive in software you wrote yourself. */
-    bindClick('btn-load', function () { DND.Setup && DND.Setup.open(onBegin); });
-    bindClick('btn-new', function () { DND.Setup && DND.Setup.open(onBegin); });
+       was the sort of thing you only forgive in software you wrote yourself.
+       Cancellable when there is a game to go back to. */
+    bindClick('btn-load', function () { openSetup(); });
+    bindClick('btn-new', function () { openSetup(); });
 
     /* The panels only exist once the manager has adopted them. */
-    if (DND.Windows) DND.Windows.boot({ layer: 'windows', dock: 'dock' });
+    if (DND.Windows) {
+      DND.Windows.boot({ layer: 'windows', dock: 'dock' });
+      /* Closing the battle map has to mean it stays closed for this fight.
+         Without this it was reopened by the next render. */
+      DND.Windows.onClose(function (id) {
+        if (id === 'battle') S.mapDismissed = true;
+      });
+    }
   }
 
   function bindClick(id, fn) { var el = $(id); if (el) el.onclick = fn; }
+
+  /* The wizard, with a way back to the table when there is a table to go back
+     to. At boot there is no session, so there is nothing to cancel into. */
+  function openSetup() {
+    if (!DND.Setup) return;
+    DND.Setup.open(onBegin, {
+      cancellable: !!session,
+      onCancel: function () { renderAll(); },
+    });
+  }
 
   /* ------------------------------------------------------- the drawer --- */
   /*
@@ -1285,6 +1417,7 @@
     Array.prototype.forEach.call(document.querySelectorAll('#context-tabs [role="tab"]'), function (tab) {
       var on = tab.getAttribute('data-tab') === name;
       tab.setAttribute('aria-selected', on ? 'true' : 'false');
+      tab.setAttribute('tabindex', on ? '0' : '-1');
     });
     ['sheet', 'inventory', 'journal', 'watch'].forEach(function (n) {
       var pane = $('pane-' + n);

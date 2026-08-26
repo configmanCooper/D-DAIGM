@@ -38,7 +38,7 @@
   /* parchment inks — all >= 4.5:1 on the panels above */
   --ink:       #ece3d2;
   --ink-dim:   #b1a488;
-  --ink-faint: #8a7d64;
+  --ink-faint: #a2957a;
 
   /* accents, each paired in the UI with a glyph or label, never used alone */
   --gold:      #d7a842;
@@ -225,13 +225,25 @@ button { cursor: pointer; }
 .win.minimised .win-body { display: none; }
 .win.minimised .win-grip { display: none; }
 
+/* Which window has the focus. With several open, a focused control inside the
+   one behind was indistinguishable from the one in front. */
+.win.active { border-color: var(--gold-dim); }
+.win.active .win-bar { background: color-mix(in srgb, var(--gold) 8%, var(--panel)); }
+.win.active .win-title { color: var(--gold); }
+
+/* The grip was 16px square and near-invisible: a target you cannot find is not
+   an affordance. Bigger, with an obvious set of ridges, and the title bar
+   carries the keyboard alternative for anyone who cannot drag at all. */
 .win-grip {
-  position: absolute; right: 0; bottom: 0; width: 1rem; height: 1rem;
+  position: absolute; right: 0; bottom: 0; width: 1.5rem; height: 1.5rem;
   cursor: nwse-resize; touch-action: none;
   background:
-    linear-gradient(135deg, transparent 0 50%, var(--line-2) 50% 60%, transparent 60% 70%,
-      var(--line-2) 70% 80%, transparent 80%);
+    linear-gradient(135deg, transparent 0 45%, var(--ink-faint) 45% 55%, transparent 55% 66%,
+      var(--ink-faint) 66% 76%, transparent 76% 86%, var(--ink-faint) 86% 96%, transparent 96%);
+  opacity: 0.55;
 }
+.win-grip:hover, .win:hover .win-grip { opacity: 1; }
+.win-bar:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
 
 /* ---------------------------------------------- confirm what I meant --
    The translation of a typed sentence into the game's own terms, shown before
@@ -257,6 +269,11 @@ button { cursor: pointer; }
 .confirm-rolls ul, .confirm-notes, .confirm-warn { margin: 0; padding-left: 1.1rem; }
 .confirm-rolls li { margin-bottom: 0.25rem; font-size: 0.92rem; }
 .confirm-notes { margin-top: 0.7rem; color: var(--ink-dim); font-size: 0.86rem; }
+.confirm-clarify { margin: 0.8rem 0; font-size: 1rem; color: var(--ink); }
+.confirm-btns kbd {
+  font-family: var(--sans); font-size: 0.7em; opacity: 0.7;
+  border: 1px solid currentColor; border-radius: 3px; padding: 0 0.25em; margin-left: 0.35em;
+}
 .confirm-warn { margin-top: 0.7rem; color: var(--warn, #d9a441); font-size: 0.88rem; list-style: none; padding-left: 0; }
 .confirm-btns { display: flex; gap: 0.6rem; justify-content: flex-end; margin-top: 1.2rem; }
 .confirm-btns button {
@@ -679,16 +696,29 @@ body.show-keys .target-btn[data-key]::after { opacity: 1; transform: scale(1); }
 }
 
 @media (max-width: 46rem) {
-  /* On a phone a floating window is closer to a sheet: full width, docked to
-     the bottom, still closable. Dragging a 4-inch window around a 5-inch
-     screen is not a feature anybody wants. */
+  /* On a phone a floating window is closer to a bottom sheet: full width,
+     fixed height, still closable. Dragging a 4-inch window around a 5-inch
+     screen is not a feature anybody wants.
+
+     It sits ABOVE the composer and the dock rather than over them. The first
+     version pinned it to `bottom: 0` and it swallowed the whole screen — the
+     text box you type into and the dock you close it from were both underneath
+     it, which left a player on a phone with a panel and no way out of it. */
   .win:not(.minimised) {
     left: 0 !important; right: 0; width: 100% !important;
-    top: auto !important; bottom: 0; height: min(70vh, 32rem) !important;
+    top: auto !important; bottom: 8.5rem;
+    height: min(52vh, 24rem) !important;
     border-radius: var(--radius) var(--radius) 0 0;
   }
+  .win.minimised { left: 0 !important; right: 0; width: 100% !important; bottom: 8.5rem; top: auto !important; }
+  .win.maximised { bottom: 8.5rem; height: calc(100% - 12rem) !important; }
   .win-grip { display: none; }
+
   .dock-label { font-size: 0.7rem; }
+  /* Prose sized for a phone, not for a monitor. */
+  .log { font-size: 0.95rem; line-height: 1.55; padding: 0.8rem 0.9rem; }
+  #topbar { flex-wrap: wrap; gap: 0.3rem; }
+  #topbar .chip { font-size: 0.72rem; padding: 0.2rem 0.45rem; }
 }
 
 /* ----------------------------------------------------- reduced motion -- */

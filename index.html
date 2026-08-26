@@ -181,6 +181,10 @@
 
     <div id="setup-validation" class="validation" role="status" aria-live="polite"></div>
     <div class="setup-foot">
+      <!-- Only shown when there is a live session to go back to. Without it,
+           pressing Load with a game running trapped the player in front of the
+           wizard with no way out but a page reload. -->
+      <button class="ghost" id="btn-setup-cancel" type="button" hidden>Back to the game</button>
       <button class="wide" id="btn-begin" type="button" disabled>Begin</button>
     </div>
   </div>

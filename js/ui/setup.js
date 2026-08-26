@@ -63,7 +63,8 @@
   }
 
   /* ------------------------------------------------------------- open --- */
-  function open(onBegin) {
+  function open(onBegin, opts) {
+    opts = opts || {};
     onBeginCb = onBegin;
     W = { campaign: null, seed: '', seats: [] };
     seatSeq = 0;
@@ -75,8 +76,27 @@
     if (addBtn) addBtn.onclick = function () { if (W.seats.length < 4) { addSeat(); validate(); } };
     var begin = document.getElementById('btn-begin');
     if (begin) begin.onclick = beginGame;
+
+    /* A way out, when there is something to go back to.
+       Opened from Load or New with a game already running, this wizard had no
+       cancel and no close — a player who pressed Load to look at their saves
+       was trapped in front of it, with a live session behind that could only
+       be reached by reloading the page. */
+    var cancel = document.getElementById('btn-setup-cancel');
+    if (cancel) {
+      cancel.hidden = !opts.cancellable;
+      cancel.onclick = function () { close(); if (opts.onCancel) opts.onCancel(); };
+    }
     var modal = document.getElementById('modal-setup');
-    if (modal) modal.classList.remove('hidden');
+    if (modal) {
+      modal.classList.remove('hidden');
+      modal.onkeydown = function (ev) {
+        if (ev.key === 'Escape' && opts.cancellable) {
+          close();
+          if (opts.onCancel) opts.onCancel();
+        }
+      };
+    }
     validate();
   }
 

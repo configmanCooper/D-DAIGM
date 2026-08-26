@@ -59,6 +59,31 @@
 
   /* -------------------------------------------------------------- geometry */
 
+  /**
+   * The area a window is allowed to occupy.
+   *
+   * Not the whole viewport: the top bar, the composer and the dock are the
+   * controls a player needs while a panel is open, and clamping to the full
+   * window let the character sheet sit squarely over the text box and the Act
+   * button. A floating panel may cover the STORY — you can move it — but it may
+   * not cover the controls that dismiss it.
+   */
+  function workspace() {
+    var v = {
+      w: global.innerWidth || document.documentElement.clientWidth || 1280,
+      h: global.innerHeight || document.documentElement.clientHeight || 800,
+    };
+    var top = 0, bottom = v.h;
+    var bar = document.getElementById('topbar');
+    if (bar) top = Math.max(top, bar.getBoundingClientRect().bottom);
+    var composer = document.getElementById('composer');
+    if (composer) bottom = Math.min(bottom, composer.getBoundingClientRect().top);
+    var d = document.getElementById('dock');
+    if (d) bottom = Math.min(bottom, d.getBoundingClientRect().top);
+    if (bottom - top < 160) { top = 0; bottom = v.h; }   // a very short window
+    return { x: 0, y: top, w: v.w, h: bottom - top, bottom: bottom };
+  }
+
   function viewport() {
     return {
       w: global.innerWidth || document.documentElement.clientWidth || 1280,
@@ -66,17 +91,28 @@
     };
   }
 
-  /* Keep a window on screen. A window dragged off the edge and then reloaded
-     used to come back at the same off-screen coordinates and be unreachable
-     with no way to get it back short of clearing storage. */
+  /* Keep a window on screen and out of the controls. A window dragged off the
+     edge and then reloaded used to come back at the same off-screen
+     coordinates and be unreachable with no way to get it back short of
+     clearing storage. */
   function clamp(state) {
-    var v = viewport();
-    state.w = Math.max(MIN_W, Math.min(state.w, v.w));
-    state.h = Math.max(MIN_H, Math.min(state.h, v.h));
-    state.x = Math.max(8 - state.w + 80, Math.min(state.x, v.w - 60));
-    state.y = Math.max(0, Math.min(state.y, v.h - 40));
+    var ws = workspace();
+    state.w = Math.max(MIN_W, Math.min(state.w, ws.w));
+    state.h = Math.max(MIN_H, Math.min(state.h, ws.h));
+    state.x = Math.max(8 - state.w + 80, Math.min(state.x, ws.w - 60));
+    state.y = Math.max(ws.y, Math.min(state.y, ws.bottom - 40));
+    /* And do not hang below the composer if there is room not to. */
+    if (state.y + state.h > ws.bottom && ws.h >= state.h) {
+      state.y = Math.max(ws.y, ws.bottom - state.h);
+    }
     return state;
   }
+
+  /* A phone shows one panel at a time: they all occupy the same bottom sheet,
+     so a second open one is simply invisible behind the first — and pressing
+     its dock button "closed" something the player could not see, which needs
+     two presses to reveal. */
+  function isNarrow() { return viewport().w <= 736; }
 
   /* ---------------------------------------------------------- definition -- */
 
@@ -107,12 +143,18 @@
     if (!def || frames[id]) return frames[id];
 
     var saved = recall(id) || {};
+    /* Panels do not open themselves on a narrow screen. At 820px the story
+       still lays out full width behind a floating panel, so a Party window
+       open by default physically covers the sentences it is sitting on —
+       which defeats the point of giving the narration the page. On a phone
+       there is no question at all. */
+    var roomy = viewport().w > 1100;
     var state = clamp({
       x: typeof saved.x === 'number' ? saved.x : def.initial.x,
       y: typeof saved.y === 'number' ? saved.y : def.initial.y,
       w: typeof saved.w === 'number' ? saved.w : def.initial.w,
       h: typeof saved.h === 'number' ? saved.h : def.initial.h,
-      open: typeof saved.open === 'boolean' ? saved.open : def.openByDefault,
+      open: typeof saved.open === 'boolean' ? saved.open : (def.openByDefault && roomy),
       min: !!saved.min,
       max: !!saved.max,
     });
@@ -178,9 +220,21 @@
       el.style.height = s.min ? 'auto' : s.h + 'px';
     }
     var maxBtn = f.bar.querySelector('[data-act="max"]');
-    if (maxBtn) maxBtn.textContent = s.max ? '❐' : '▢';
+    if (maxBtn) {
+      maxBtn.textContent = s.max ? '❐' : '▢';
+      /* The icon changes and so must the words. Leaving these as "Maximise"
+         when the button now restores tells a screen reader the opposite of
+         what will happen. */
+      var maxWord = (s.max ? 'Restore ' : 'Maximise ') + f.def.title;
+      maxBtn.title = s.max ? 'Restore' : 'Maximise';
+      maxBtn.setAttribute('aria-label', maxWord);
+    }
     var minBtn = f.bar.querySelector('[data-act="min"]');
-    if (minBtn) minBtn.textContent = s.min ? '▭' : '–';
+    if (minBtn) {
+      minBtn.textContent = s.min ? '▭' : '–';
+      minBtn.title = s.min ? 'Unroll' : 'Roll up';
+      minBtn.setAttribute('aria-label', (s.min ? 'Restore ' : 'Minimise ') + f.def.title);
+    }
     syncDock(f.def.id);
   }
 
@@ -189,6 +243,9 @@
     if (!f) return;
     zTop += 1;
     f.el.style.zIndex = String(zTop);
+    Object.keys(frames).forEach(function (other) {
+      frames[other].el.classList.toggle('active', other === id);
+    });
   }
 
   /* ------------------------------------------------------------- pointer -- */
@@ -197,6 +254,9 @@
     var s = f.state;
 
     f.el.addEventListener('pointerdown', function () { focus(f.def.id); });
+    /* Tabbing into a window that is behind another left its focused control
+       hidden underneath. Raise on focus as well as on click. */
+    f.el.addEventListener('focusin', function () { focus(f.def.id); });
 
     f.bar.addEventListener('click', function (ev) {
       var btn = ev.target.closest && ev.target.closest('[data-act]');
@@ -214,7 +274,10 @@
       if (ev.target.closest && ev.target.closest('[data-act]')) return;
       if (s.max) return;
       drag = { px: ev.clientX, py: ev.clientY, x: s.x, y: s.y };
-      f.bar.setPointerCapture(ev.pointerId);
+      /* Capture is an optimisation, not a requirement. It throws outright when
+         there is no live pointer with that id — which a synthetic event has —
+         and letting that escape aborted the drag before it began. */
+      try { f.bar.setPointerCapture(ev.pointerId); } catch (e) { /* drag without it */ }
       f.el.classList.add('dragging');
       ev.preventDefault();
     });
@@ -241,7 +304,7 @@
     grip.addEventListener('pointerdown', function (ev) {
       if (s.max || s.min) return;
       size = { px: ev.clientX, py: ev.clientY, w: s.w, h: s.h };
-      grip.setPointerCapture(ev.pointerId);
+      try { grip.setPointerCapture(ev.pointerId); } catch (e) { /* resize without it */ }
       ev.preventDefault();
       ev.stopPropagation();
     });
@@ -266,13 +329,59 @@
     f.el.addEventListener('keydown', function (ev) {
       if (ev.key === 'Escape') { close(f.def.id); ev.stopPropagation(); }
     });
+
+    /* Moving and resizing without a pointer.
+       Dragging a title bar and grabbing a 16-pixel corner are both gestures
+       that require a precise pointing device; with the title bar focusable and
+       these keys, a keyboard or a switch can do everything a mouse can.
+       Arrow keys move, Shift+Arrow resizes, and the step is large enough to
+       cross a screen without wearing out a finger. */
+    f.bar.setAttribute('tabindex', '0');
+    f.bar.setAttribute('role', 'toolbar');
+    f.bar.setAttribute('aria-label', f.def.title +
+      ' — arrow keys move, shift and arrow keys resize');
+    f.bar.addEventListener('keydown', function (ev) {
+      var STEP = ev.altKey ? 4 : 24;
+      var dx = 0, dy = 0;
+      if (ev.key === 'ArrowLeft') dx = -STEP;
+      else if (ev.key === 'ArrowRight') dx = STEP;
+      else if (ev.key === 'ArrowUp') dy = -STEP;
+      else if (ev.key === 'ArrowDown') dy = STEP;
+      else return;
+      if (s.max) return;
+      ev.preventDefault();
+      if (ev.shiftKey) {
+        if (s.min) return;
+        s.w += dx; s.h += dy;
+      } else {
+        s.x += dx; s.y += dy;
+      }
+      clamp(s);
+      apply(f);
+      remember(f.def.id);
+    });
   }
 
   /* ---------------------------------------------------------------- api --- */
 
-  function open(id) {
+  function open(id, opts) {
+    opts = opts || {};
     var f = frames[id] || build(id);
     if (!f) return;
+
+    /* One panel at a time on a phone: they share the same bottom sheet, so a
+       second open one is invisible behind the first, and its dock button then
+       "closes" something the player cannot see. */
+    if (isNarrow()) {
+      Object.keys(frames).forEach(function (other) {
+        if (other !== id && frames[other].state.open) {
+          frames[other].state.open = false;
+          apply(frames[other]);
+          remember(other);
+        }
+      });
+    }
+
     f.state.open = true;
     f.state.min = false;
     clamp(f.state);
@@ -280,8 +389,16 @@
     focus(id);
     remember(id);
     if (f.def.onOpen) { try { f.def.onOpen(f.body); } catch (e) { /* a panel that throws must not take the app with it */ } }
-    var first = f.el.querySelector('button, [tabindex], input, select');
-    if (first && first.focus) first.focus();
+
+    /* Do not steal the caret. A panel that opens because a fight started —
+       rather than because the player asked for it — must not take the focus
+       out of whatever they were typing. */
+    if (opts.quiet) return;
+    /* And focus the CONTENT, not the title bar's Minimise button, which is
+       simply the first button in the DOM and never what anyone wanted. */
+    var target = f.body.querySelector('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+    if (target && target.focus) target.focus();
+    else if (f.bar && f.bar.focus) f.bar.focus();
   }
 
   function close(id) {
@@ -290,9 +407,13 @@
     f.state.open = false;
     apply(f);
     remember(id);
+    closeListeners.forEach(function (fn) { try { fn(id); } catch (e) { /* a listener must not block closing */ } });
     var btn = dock && dock.querySelector('[data-win="' + id + '"]');
     if (btn && btn.focus) btn.focus();
   }
+
+  var closeListeners = [];
+  function onClose(fn) { if (typeof fn === 'function') closeListeners.push(fn); }
 
   function toggle(id) {
     var f = frames[id];
@@ -342,12 +463,13 @@
 
   function resetLayout() {
     writeStore({});
+    var roomy = viewport().w > 1100;
     Object.keys(frames).forEach(function (id) {
       var f = frames[id];
       var d = f.def.initial;
       f.state.x = d.x; f.state.y = d.y; f.state.w = d.w; f.state.h = d.h;
       f.state.min = false; f.state.max = false;
-      f.state.open = f.def.openByDefault;
+      f.state.open = f.def.openByDefault && roomy;
       clamp(f.state);
       apply(f);
     });
@@ -383,6 +505,7 @@
   var api = {
     define: define, boot: boot,
     open: open, close: close, toggle: toggle, focus: focus, isOpen: isOpen,
+    onClose: onClose,
     resetLayout: resetLayout,
     bodyOf: function (id) { return frames[id] && frames[id].body; },
     ids: function () { return Object.keys(defs); },
