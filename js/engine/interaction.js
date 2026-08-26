@@ -1334,16 +1334,30 @@
       var uid = i.uid || i.id;
       var label = i.name || i.id;
       var def = table[i.id] || table[uid] || i;
-      if (i.heal || i.consumable || (def && def.consumable)) {
-        moves.push(mv('drink', 'Drink ' + label, 'action', { itemId: uid }));
-      } else {
-        moves.push(mv('use', 'Use ' + label, 'action', { itemId: uid }));
-      }
 
       /* Wearing and wielding. Neither was ever offered, so a character could
          pick a sword up and had no way to draw it. */
       var wearable = def && (def.slot || def.armor || def.weapon ||
         def.category === 'weapon' || def.category === 'armor' || def.category === 'shield');
+
+      if (i.heal || i.consumable || (def && def.consumable)) {
+        moves.push(mv('drink', 'Drink ' + label, 'action', { itemId: uid }));
+      } else if (!wearable) {
+        /* "Use" is NOT offered for a weapon or a suit of armour.
+           It was, and it did nothing: the resolver has no case for them, so
+           it emitted a note — "Shen Cooper uses Longsword." — spent the
+           action, and changed not one thing. It looked exactly like an
+           attack in the action list, so a model playing the character picked
+           it over and over, and the narrator, handed a beat with no outcome
+           in it, invented outcomes to match: goblins crumpling from a blow
+           that never landed. Across one live wave the party made a single
+           real attack in a hundred turns and nothing died.
+
+           A weapon's use is to attack with it, and armour's is to be worn.
+           Both of those have their own verbs, and both are offered below. */
+        moves.push(mv('use', 'Use ' + label, 'action', { itemId: uid }));
+      }
+
       if (wearable) {
         if (onBody[uid]) {
           moves.push(mv('unequip', 'Put away ' + label, 'object', { itemId: uid }));

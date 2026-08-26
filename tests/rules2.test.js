@@ -2699,4 +2699,81 @@ t.section('a bonus action cannot be spent without something granting one');
   t.eq(cure.cost, 'action', 'while Cure Wounds still costs an action');
 }
 
+/* ---------------------------------------------------------------------------
+   An action that always does nothing must never be offered.
+
+   "Use" was offered for every non-consumable item in the pack, weapons and
+   armour included, and the resolver has no case for them: it emitted a note —
+   "Shen Cooper uses Longsword." — spent the action, and changed nothing. In
+   the action list it looked exactly like attacking, so a model playing the
+   character picked it turn after turn, and the narrator, handed a beat with
+   no outcome in it, invented outcomes to match: goblins crumpling from a blow
+   that never landed. One live wave ran a hundred turns, produced a single
+   real attack, and killed nothing.
+--------------------------------------------------------------------------- */
+t.section('a weapon is never offered as something to "use"');
+{
+  const spec = Chargen.generate({ rng: new RNG('use-w'), fixed: { classId: 'fighter', levels: 3 } });
+  const built = Character.buildFromSpec(spec);
+  const s = State.create({ seed: 'use-w' });
+  State.addActor(s, {
+    id: 'f', name: 'Fighter', side: 'party', kind: 'pc',
+    base: built.base, progression: built.progression, runtime: built.runtime,
+  });
+  State.refreshAllDerived(s);
+
+  const moves = Dispatch.legalMoves(s, 'f', {}) || [];
+  const uses = moves.filter(m => m.step && m.step.verb === 'use');
+  const inv = (s.actors.f.runtime.inventory || []).map(i => i.name || i.id);
+
+  t.ok(inv.some(n => /sword|axe|mace|bow/i.test(n)),
+    'the fighter is carrying a weapon to be tempted by', inv.join(', '));
+  t.deep(uses.filter(m => /sword|axe|mace|bow|armor|armour|shield|mail/i.test(m.what || '')), [],
+    'and no weapon, armour or shield is offered as a "Use" action',
+    uses.map(m => m.what).join(' | '));
+
+  /* Consumables still are, because drinking one does something. */
+  const drinks = moves.filter(m => m.step && m.step.verb === 'drink');
+  if (inv.some(n => /potion/i.test(n))) {
+    t.ok(drinks.length > 0, 'but a potion can still be drunk',
+      drinks.map(m => m.what).join(' | '));
+  }
+}
+
+t.section('every offered item action actually changes something');
+{
+  /* The general form of the rule. An action in the list that commits without
+     changing any state is worse than one that refuses: a refusal tells the
+     player why, and this told them nothing while spending their turn. */
+  const spec = Chargen.generate({ rng: new RNG('use-any'), fixed: { classId: 'rogue', levels: 3 } });
+  const built = Character.buildFromSpec(spec);
+  const s = State.create({ seed: 'use-any' });
+  State.addActor(s, {
+    id: 'r', name: 'Rogue', side: 'party', kind: 'pc',
+    base: built.base, progression: built.progression, runtime: built.runtime,
+  });
+  State.refreshAllDerived(s);
+
+  const inert = [];
+  (Dispatch.legalMoves(s, 'r', {}) || [])
+    .filter(m => m.step && (m.step.verb === 'use' || m.step.verb === 'drink'))
+    .forEach(m => {
+      const before = JSON.stringify(s.actors.r.runtime);
+      const cmd = Command.create({
+        sessionId: s.sessionId, stateRevision: s.revision, turnEpoch: s.turnEpoch,
+        actorId: 'r', family: m.family, primary: m.step,
+      });
+      let out;
+      try { out = Dispatch.dispatch(s, State.makeHistory(), cmd, {}); } catch (e) { out = null; }
+      if (!out || !out.ok) return;              /* a refusal is fine */
+      const changed = JSON.stringify(s.actors.r.runtime) !== before;
+      /* Ignore the action economy itself: spending the action is not a change
+         the player asked for. */
+      if (!changed) inert.push(m.what);
+    });
+
+  t.deep(inert, [],
+    'no item action commits successfully while changing nothing at all');
+}
+
 t.done();
