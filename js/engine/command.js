@@ -42,7 +42,11 @@
     movement: ['move', 'stand_up', 'drop_prone', 'climb', 'swim', 'jump', 'crawl', 'mount', 'dismount'],
     spell: ['cast', 'dismiss_concentration', 'counterspell', 'ritual_cast'],
     item: ['use', 'equip', 'unequip', 'attune', 'unattune', 'drink', 'throw', 'give', 'drop', 'pick_up', 'buy', 'sell'],
-    social: ['persuade', 'deceive', 'intimidate', 'perform', 'ask', 'tell', 'offer', 'refuse', 'insight'],
+    social: ['persuade', 'deceive', 'intimidate', 'perform', 'ask', 'tell', 'offer', 'refuse', 'insight',
+      /* Who is travelling with whom. A party that can never change is not a
+         party, it is a cast list: people fall out, walk off, and are talked
+         round again, and all three of those are ordinary play. */
+      'recruit', 'part_ways'],
     exploration: ['search', 'investigate', 'perceive', 'unlock', 'disarm_trap', 'travel',
       'short_rest', 'long_rest', 'interact', 'track', 'forage', 'read'],
     improvised: ['improvise'],

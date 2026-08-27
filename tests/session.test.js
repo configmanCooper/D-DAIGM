@@ -41,11 +41,11 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
  * longer than any constant short enough to be worth using, and assertions
  * failed for timing rather than for anything they were meant to check.
  */
-async function waitFor(page, fn, timeoutMs) {
+async function waitFor(page, fn, timeoutMs, arg) {
   const deadline = Date.now() + (timeoutMs || 15000);
   for (;;) {
     let ok = false;
-    try { ok = await page.evaluate(fn); } catch (e) { ok = false; }
+    try { ok = await page.evaluate(fn, arg); } catch (e) { ok = false; }
     if (ok) return true;
     if (Date.now() > deadline) return false;
     await wait(250);
@@ -155,19 +155,36 @@ async function main() {
       const moves = window.DND.Dispatch.legalMoves(st, who, window.DND.Game.sceneCtx(s)) || [];
       const attacks = moves.filter(m => m.step && /^(attack|multiattack|unarmed_strike)$/.test(m.step.verb));
       const closes = moves.filter(m => m.step && m.step.verb === 'move' && (m.step.path || []).length > 1);
+      const social = moves.filter(m => m.family === 'social');
+      const explore = moves.filter(m => m.family === 'exploration');
       const me = st.actors[who];
       return {
-        can: attacks.length > 0 || closes.length > 0,
+        foes: window.DND.State.livingEnemies(st).length,
+        canFight: attacks.length > 0 || closes.length > 0,
+        canTalkOrLook: social.length > 0 || explore.length > 0,
         attacks: attacks.length,
         closes: closes.map(m => m.what),
         myPos: me && me.runtime.pos,
         speed: me && me.runtime.turn ? me.runtime.turn.movementRemaining : null,
       };
     });
-    t.ok(engage.can, 'including a way to get at the enemy, since a fight is on',
-      engage.can
-        ? '(' + engage.attacks + ' attacks, ' + engage.closes.length + ' ways to close)'
-        : JSON.stringify(engage));
+    /* Most generated games now open PEACEFULLY — a taproom, a library after
+       hours, a cart with a bad wheel — so "a fight is on" is no longer a safe
+       premise for a test. What must hold is that the opening is coherent: if
+       something hostile is standing there, the party can reach it; and if
+       nothing is, there is still something to do. An opening that offers
+       neither is the empty room this whole subsystem exists to prevent. */
+    if (engage.foes > 0) {
+      t.ok(engage.canFight, 'with something hostile present, there is a way to get at it',
+        engage.canFight
+          ? '(' + engage.attacks + ' attacks, ' + engage.closes.length + ' ways to close)'
+          : JSON.stringify(engage));
+    } else {
+      t.ok(engage.canTalkOrLook,
+        'a peaceful opening still gives the party something to do \u2014 people to ' +
+        'talk to, and a place to look at',
+        JSON.stringify({ foes: engage.foes, canTalkOrLook: engage.canTalkOrLook }));
+    }
 
     /* The action bar must be built from the engine's legal moves, not a
        hand-written list, or the buttons and the rules drift apart. */
@@ -282,17 +299,29 @@ async function main() {
        Under full-suite load the DM and the monsters' turns take longer than
        any constant that is short enough to be worth using, and this assertion
        failed for timing rather than for anything about the turn loop. */
-    await waitFor(page, () => {
-      const s = window.DND.App.session;
-      return s.state.turnEpoch > 0;
-    }, 20000);
+    /* Wait for the game to actually move on rather than sleeping a fixed
+       time. Under full-suite load the DM and the monsters' turns take longer
+       than any constant short enough to be worth using.
 
-    const turnState = await page.evaluate(() => {
+       "The epoch advances" was the wrong invariant once most openings became
+       peaceful. In a fight, ending a turn bumps the epoch. Out of combat the
+       spotlight rotates on its own schedule, and a game that opens in a
+       taproom can sit at epoch 0 quite legitimately while still being fully
+       alive. What must be true either way is that ACTING MOVES THE GAME ON —
+       something in the state changes. */
+    const startRevision = await page.evaluate(() => window.DND.App.session.state.revision);
+    await waitFor(page, (rev) => {
+      const s = window.DND.App.session;
+      return s.state.turnEpoch > 0 || s.state.revision > rev;
+    }, 20000, startRevision);
+
+    const turnState = await page.evaluate((rev) => {
       const s = window.DND.App.session;
       return {
         active: s.state.activeActorId,
         round: s.state.combat && s.state.combat.round,
         epoch: s.state.turnEpoch,
+        moved: s.state.turnEpoch > 0 || s.state.revision > rev,
         enemyActed: s.state.log.some(b => {
           const a = s.state.actors[b.actorId];
           return a && a.side === 'enemy';
@@ -302,12 +331,13 @@ async function main() {
           return e.kind === 'hp' && e.delta < 0 && t && t.side === 'party';
         })),
       };
-    });
-    t.ok(turnState.epoch > 0, 'the turn epoch advances in the real game, not just in tests',
-      '(' + turnState.epoch + '; end-turn button ' + (clicked.found ? 'clicked' : 'ABSENT')
-      + '; bar: ' + (clicked.labels.join(' / ') || 'empty')
+    }, startRevision);
+    t.ok(turnState.moved, 'taking a turn moves the real game on, not just the tests',
+      '(epoch ' + turnState.epoch + '; end-turn button ' + (clicked.found ? 'clicked' : 'ABSENT')
       + '; active ' + turnState.active + ')');
     if (inFight) {
+      t.ok(turnState.epoch > 0, 'and in a fight the turn epoch advances',
+        '(' + turnState.epoch + ')');
       t.ok(turnState.enemyActed || turnState.enemyDamage,
         'the monsters take their own turns after the player takes theirs');
     } else {

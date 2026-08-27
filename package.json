@@ -14,7 +14,7 @@
   "scripts": {
     "start": "node server.js",
     "stop": "powershell -NoProfile -ExecutionPolicy Bypass -File ./start.ps1 -Stop",
-    "test": "node tests/dice.test.js && node tests/core.test.js && node tests/ai.test.js && node tests/rules.test.js && node tests/rules2.test.js && node tests/ooc.test.js && node tests/retcon.test.js && node tests/fidelity.test.js && node tests/exercise.js --quiet && node tests/reach.js --quiet --strict && node tests/character.test.js && node tests/combat.test.js && node tests/data.test.js && node tests/art.test.js && node tests/chargen.test.js && node tests/mortality.test.js && node tests/prepare.test.js && node tests/progression.test.js && node tests/campaign.test.js && node tests/quests.test.js && node tests/saveload.test.js && node tests/everything.js --quiet && node tests/ui.test.js && node tests/browser.test.js &&     node tests/session.test.js && node tests/windows.test.js && node tests/ooc-ui.test.js && node tests/retcon-ui.test.js && node tests/resume.test.js && node tests/chapter1.test.js && node tests/ui-chargen.test.js",
+    "test": "node tests/dice.test.js && node tests/core.test.js && node tests/ai.test.js && node tests/rules.test.js && node tests/rules2.test.js && node tests/ooc.test.js && node tests/retcon.test.js && node tests/fidelity.test.js && node tests/openings.test.js && node tests/exercise.js --quiet && node tests/reach.js --quiet --strict && node tests/character.test.js && node tests/combat.test.js && node tests/data.test.js && node tests/art.test.js && node tests/chargen.test.js && node tests/mortality.test.js && node tests/prepare.test.js && node tests/progression.test.js && node tests/campaign.test.js && node tests/quests.test.js && node tests/saveload.test.js && node tests/everything.js --quiet && node tests/ui.test.js && node tests/browser.test.js &&     node tests/session.test.js && node tests/windows.test.js && node tests/ooc-ui.test.js && node tests/retcon-ui.test.js && node tests/resume.test.js && node tests/chapter1.test.js && node tests/ui-chargen.test.js",
     "test:fast": "node tests/dice.test.js && node tests/core.test.js && node tests/ai.test.js",
     "test:offline": "node tests/dice.test.js && node tests/core.test.js && node tests/ai.test.js && node tests/rules.test.js && node tests/rules2.test.js && node tests/exercise.js --quiet && node tests/reach.js --quiet --strict && node tests/rules2.test.js && node tests/exercise.js --quiet && node tests/reach.js --quiet --strict && node tests/character.test.js && node tests/combat.test.js && node tests/data.test.js && node tests/art.test.js && node tests/campaign.test.js && node tests/quests.test.js && node tests/saveload.test.js && node tests/everything.js --quiet && node tests/ui.test.js",
     "test:dice": "node tests/dice.test.js",
@@ -24,7 +24,7 @@
     "test:rules2": "node tests/rules2.test.js",
     "test:ooc": "node tests/ooc.test.js",
     "test:retcon": "node tests/retcon.test.js",
-    "test:fidelity": "node tests/fidelity.test.js",
+    "test:fidelity": "node tests/fidelity.test.js && node tests/openings.test.js",
     "test:exercise": "node tests/exercise.js",
     "test:reach": "node tests/reach.js",
     "test:character": "node tests/character.test.js",

@@ -574,22 +574,126 @@
     return mod;
   }
 
+  /**
+   * Is this character played by somebody at the table?
+   *
+   * A seated character belongs to a person, and is not the party's to dismiss
+   * — nor is one the party can "recruit", since they are already here.
+   */
+  function isSeated(state, actorId) {
+    return (state.seats || []).some(function (s) { return s.actorId === actorId; });
+  }
+
+  /**
+   * Who travels with whom.
+   *
+   * A party that can never change is not a party, it is a cast list. People
+   * fall out, walk off, and are talked round again, and all three are
+   * ordinary play. Leaving is a change of SIDE rather than a deletion: the
+   * companion is still a person standing where they were standing, still
+   * carries every relationship recorded about them, and can be found and
+   * argued with later. Deleting them would make coming back impossible.
+   */
+  function resolveRoster(state, command, b, verb, a, target, targetId) {
+    if (!target) return Events.refuse(b, 'no-target', 'there is nobody there to say that to');
+    /* Not mid-fight. Settling the roster with blades out leaves the
+       initiative order pointing at somebody who has just walked off, and
+       nobody at a real table does it either. */
+    if (state.combat && state.combat.active) {
+      return Events.refuse(b, 'in-combat',
+        'the roster is not settled with blades out \u2014 finish this first');
+    }
+    if (isSeated(state, targetId)) {
+      return Events.refuse(b, 'is-a-player',
+        (target.name || targetId) + ' is played by somebody at this table, ' +
+        'and is not yours to dismiss');
+    }
+
+    if (verb === 'part_ways') {
+      if (target.side !== 'party') {
+        return Events.refuse(b, 'not-in-party',
+          (target.name || targetId) + ' is not travelling with you');
+      }
+      Events.push(b, 'party_membership', {
+        actorId: targetId, member: false,
+        reason: command.goal || 'parted ways',
+        at: state.clock ? state.clock.minutes : null,
+      }, (target.name || targetId) + ' parts ways with the party.');
+      /* Being dismissed is a thing that happened between two people, and it
+         is remembered when they are asked back. Deliberately a bruise rather
+         than a wound: one parting must not bar somebody for ever, or
+         "rejoin" is a feature nobody can ever reach. It takes a pattern —
+         several dismissals, or real mistreatment on top — to make them
+         refuse. */
+      Events.push(b, 'relationship', {
+        fromId: targetId, toId: command.actorId,
+        affinity: -6, trust: -4,
+        because: 'was asked to leave the party',
+      }, '');
+      return b;
+    }
+
+    /* recruit */
+    if (target.side === 'party') {
+      return Events.refuse(b, 'already-with-you',
+        (target.name || targetId) + ' is already travelling with you');
+    }
+    if (target.side === 'enemy') {
+      return Events.refuse(b, 'hostile',
+        (target.name || targetId) + ' is not about to join you');
+    }
+    /* How they feel about the person asking. Somebody the party threw out
+       repeatedly, or treated badly on top of it, does not simply fall back
+       in. The threshold is deliberately well below a single parting: one
+       dismissal costs ten points between affinity and trust, and it takes
+       roughly three of those — or one and a genuine betrayal — before the
+       answer becomes no. A companion who can never be asked back is a
+       companion the feature cannot reach. */
+    var rel = (state.relationships || {})[targetId + '->' + command.actorId] || {};
+    var warmth = (rel.affinity || 0) + (rel.trust || 0);
+    var cameBack = (target.partyHistory || []).some(function (h) { return !h.member; });
+    if (cameBack && warmth <= -25) {
+      return Events.refuse(b, 'will-not-return',
+        (target.name || targetId) + ' has not forgiven how that ended');
+    }
+    Events.push(b, 'party_membership', {
+      actorId: targetId, member: true,
+      reason: command.goal || (cameBack ? 'came back' : 'joined the party'),
+      at: state.clock ? state.clock.minutes : null,
+    }, (target.name || targetId) + (cameBack ? ' falls back in with the party.' : ' joins the party.'));
+    Events.push(b, 'relationship', {
+      fromId: targetId, toId: command.actorId,
+      affinity: 4, trust: 3,
+      because: cameBack ? 'was asked back' : 'was asked along',
+    }, '');
+    return b;
+  }
+
   function resolveSocial(state, command, ctx) {
     ctx = ctx || {};
     var b = Events.makeBatch(command);
     var a = actor(state, command.actorId);
     if (!a) return Events.refuse(b, 'no-actor', 'nobody is there to speak');
     var verb = command.primary.verb;
-    var spec = SOCIAL[verb];
-    if (!spec) return Events.refuse(b, 'unknown-verb', 'social does not handle ' + verb);
-
     var targetId = (command.primary.targetIds || [])[0];
     var target = targetId ? actor(state, targetId) : null;
-    if (spec.skill && !target) {
-      return Events.refuse(b, 'no-target', 'there is nobody there to say that to');
-    }
     if (target && target.runtime && target.runtime.dead) {
       return Events.refuse(b, 'dead-target', target.name + ' is beyond talking to');
+    }
+
+    /* -------------------------------------------------- the roster ------ *
+       Leaving and rejoining. Handled BEFORE the skill machinery, and before
+       the SOCIAL table is consulted at all: neither is a check against a DC.
+       Walking away is always allowed, and being asked back turns on how you
+       have treated them, which the relationship already records. */
+    if (verb === 'part_ways' || verb === 'recruit') {
+      return resolveRoster(state, command, b, verb, a, target, targetId);
+    }
+
+    var spec = SOCIAL[verb];
+    if (!spec) return Events.refuse(b, 'unknown-verb', 'social does not handle ' + verb);
+    if (spec.skill && !target) {
+      return Events.refuse(b, 'no-target', 'there is nobody there to say that to');
     }
 
     var social = command.primary.social || {};
@@ -732,6 +836,23 @@
         moves.push(mv('offer', 'Offer ' + who + ' a deal', 'a moment', { targetIds: [id] }));
         moves.push(mv('refuse', 'Refuse ' + who, 'a moment', { targetIds: [id] },
           'refusing is remembered too'));
+      }
+
+      /* Who travels with whom.
+         Not offered mid-fight: deciding the roster while blades are out
+         leaves the initiative order pointing at somebody who has just walked
+         off, and nobody at a real table does it either. */
+      if (!(state.combat && state.combat.active) && talks) {
+        if (o.side === 'party' && !isSeated(state, id)) {
+          moves.push(mv('part_ways', 'Part ways with ' + who, 'a moment', { targetIds: [id] },
+            'they stay where they are, and remember this'));
+        } else if ((o.side === 'ally' || o.side === 'neutral') && !isSeated(state, id)) {
+          var back = (o.partyHistory || []).length > 0;
+          moves.push(mv('recruit',
+            back ? 'Ask ' + who + ' to come back' : 'Ask ' + who + ' to travel with you',
+            'a moment', { targetIds: [id] },
+            back ? 'they left once; that will come up' : null));
+        }
       }
     });
 

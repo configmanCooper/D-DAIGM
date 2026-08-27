@@ -19,6 +19,8 @@
   var RNG = (global.DND && global.DND.RNG) || (req('../rng.js') || {}).RNG;
   var State = (global.DND && global.DND.State) || req('../engine/state.js');
   var Rules = (global.DND && global.DND.Rules) || req('../engine/rules.js');
+  var Openings = (global.DND && global.DND.Openings) || req('./openings.js');
+  var Companions = (global.DND && global.DND.Companions) || req('./companions.js');
 
   function monsterData() {
     var g = global.DND && global.DND.Data && global.DND.Data.MONSTERS;
@@ -148,9 +150,37 @@
     opts = opts || {};
     var rng = opts.rng || (state.rng ? state.rng.fork('worldgen') : new RNG(String(Date.now())));
     var MONSTERS = monsterData();
-    var scene = opts.opening || rng.pick(OPENINGS);
 
+    /* Fill the table to four BEFORE anything else, because everything after
+       this depends on who is actually here: which opening suits them, what
+       bond they share, and how big the encounter should be if there is one.
+       A one-player game used to begin with a lone character and a monster. */
+    var companionIds = [];
+    if (Companions && opts.fillParty !== false) {
+      try { companionIds = Companions.fillParty(state, { rng: rng, size: opts.partySize }); }
+      catch (e) { companionIds = []; }
+    }
+
+    /* Who the party are, for choosing a scene that belongs to them. */
     var partyIds = State.partyIds(state);
+    var who = partyIds.map(function (id) {
+      var a = state.actors[id];
+      var base = a.base || {};
+      return {
+        classId: ((base.classes || [{}])[0] || {}).classId,
+        raceId: base.raceId, subraceId: base.subraceId,
+        backgroundId: base.backgroundId,
+      };
+    });
+
+    /* Scored against the party rather than drawn at random, so a wizard
+       usually gets the library and a soldier the muster yard — and sometimes
+       does not, because a generator that always agrees with you is a lookup
+       table. */
+    var scene = opts.opening ||
+      (Openings ? Openings.chooseOpening(rng, who, opts) : rng.pick(OPENINGS));
+    var bond = Openings ? Openings.chooseBond(rng, scene, who, opts) : null;
+
     var levels = partyIds.map(function (id) {
       var a = state.actors[id];
       return (a.progression && a.progression.levels && a.progression.levels.length) || 1;
@@ -189,10 +219,19 @@
     });
     actorsAdded.push(localId);
 
-    /* The problem. */
-    var mookId = pickAvailable(rng, scene.threats, MONSTERS);
-    var bossId = pickAvailable(rng, scene.boss, MONSTERS);
+    /* The problem \u2014 if this scene has one standing in front of them.
+       Most do not. Twelve of the nineteen openings begin with nobody hostile
+       present at all: a taproom, a library after hours, a cart with a bad
+       wheel. Spawning monsters unconditionally is what made every generated
+       game start by rolling initiative, whatever the scene said it was. */
+    var mookId = null, bossId = null;
     var enemies = [];
+    var hostile = scene.opens === 'violent' || scene.opens === 'tense';
+
+    if (hostile && (scene.threats || scene.boss)) {
+      mookId = pickAvailable(rng, scene.threats, MONSTERS);
+      bossId = pickAvailable(rng, scene.boss, MONSTERS);
+    }
 
     if (MONSTERS && mookId) {
       var mook = MONSTERS[mookId];
@@ -224,7 +263,7 @@
     state.quests['clear-' + scene.id] = {
       id: 'clear-' + scene.id,
       status: 'open',
-      title: 'Deal with what is in ' + scene.name,
+      title: questTitleFor(scene),
       objectives: { 'find-out': 'open', 'resolve': 'open' },
       notes: [scene.hook],
     };
@@ -233,11 +272,29 @@
 
     return {
       scene: scene,
+      bond: bond,
       locationId: scene.id,
       localId: localId,
       enemyIds: enemies,
+      companionIds: companionIds,
+      /* Whether anything hostile is present when the first line is read. The
+         caller decides whether to roll initiative; it must not have to infer
+         that from the enemy list, because a tense scene has enemies in it and
+         still opens with talking. */
+      opens: scene.opens || 'peaceful',
       campaign: campaignFor(scene, opts),
     };
+  }
+
+  /** A quest title that fits the kind of scene it came from. */
+  function questTitleFor(scene) {
+    if (scene.kind === 'combat') return 'Deal with what is in ' + scene.name;
+    if (scene.kind === 'mystery') return 'Find out what happened at ' + scene.name;
+    if (scene.kind === 'crisis') return 'Get everyone out of ' + scene.name;
+    if (scene.kind === 'study') return 'Make sense of what was found at ' + scene.name;
+    if (scene.kind === 'work') return 'See the work through at ' + scene.name;
+    if (scene.kind === 'travel') return 'Get where you are going';
+    return 'See what comes of ' + scene.name;
   }
 
   /** A campaign object shaped the way prompt.buildSystem expects. */

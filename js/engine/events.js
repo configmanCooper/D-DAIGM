@@ -61,6 +61,12 @@
     'spawn', 'despawn',
     'narration',         // prose attached to this batch, after the fact
     'note',              // engine commentary for the log; no state change
+    /* Somebody joined the party, or walked away from it. Not a despawn: a
+       companion who leaves is still a person in the world, still standing
+       where they were standing, and can be talked round later. Deleting them
+       would make "rejoin" impossible and quietly break every relationship
+       already recorded about them. */
+    'party_membership',
     /* An amendment to the record. Not an undo: it establishes that something
        was already true and leaves everything since intact, so it is committed
        forward like any other change and shows up in the export. */
@@ -577,6 +583,32 @@
      * Master's prompt as settled truth, which is the whole point: a retcon
      * nobody remembers is just a bug the player asked for.
      */
+    /**
+     * Joining the party, or leaving it.
+     *
+     * Side is the membership. A companion who walks out becomes an ALLY —
+     * still friendly, still present, still somebody the party can find and
+     * argue with later — rather than being removed from the world. Deleting
+     * them would make rejoining impossible, orphan every relationship already
+     * recorded about them, and leave a hole in the initiative order if it
+     * happened mid-fight.
+     */
+    party_membership: function (state, e) {
+      var a = state.actors && state.actors[e.actorId];
+      if (!a) return;
+      a.partyHistory = a.partyHistory || [];
+      a.partyHistory.push({
+        member: !!e.member, reason: e.reason || '', at: e.at || null,
+      });
+      if (e.member) {
+        a.side = 'party';
+        a.leftPartyBecause = null;
+      } else {
+        a.side = 'ally';
+        a.leftPartyBecause = e.reason || '';
+      }
+    },
+
     retcon: function (state, e) {
       state.retcons = state.retcons || [];
       state.retcons.push({

@@ -1110,6 +1110,12 @@
       session.locationName = W.opening.scene.name;
       session.timeOfDay = W.opening.scene.timeOfDay;
       session.weather = W.opening.scene.weather;
+      /* Carried onto the session so the opening narration can say how these
+         four know each other, and so a peaceful scene is not narrated as an
+         ambush. */
+      session.bond = W.opening.bond || null;
+      session.opens = W.opening.opens || 'peaceful';
+      session.outs = (W.opening.scene && W.opening.scene.outs) || null;
     }
     if (W.shenScene) {
       session.locationName = W.shenScene.name;

@@ -597,13 +597,33 @@
       '2. The party, by name. One clause each, describing how they LOOK and carry ' +
       'themselves — not their statistics. Use these people and no others:\n' +
       roster + '\n' +
+      (opts.bond
+        ? '   AND how they come to be together. This is not optional and it is not ' +
+          'background: it is ' + opts.bond.short + '.\n' +
+          '   ' + opts.bond.text + '\n' +
+          (opts.bond.strangers
+            ? '   They do NOT know each other. Do not write them as old friends, do not ' +
+              'give them shared history, and do not have them finish each other\u2019s ' +
+              'sentences. Show four people sizing each other up.\n'
+            : '   They DO know each other, and it should show \u2014 in shorthand, in an ' +
+              'old argument, in who defers to whom.\n')
+        : '') +
       '3. What is in front of them right now, and why it matters enough to stop for.\n\n' +
+      (opts.opens === 'peaceful'
+        ? 'NOBODY IS FIGHTING. Nothing hostile is present. Do not put a monster, an ' +
+          'ambush, a scream or a drawn blade in this scene. It opens with people in ' +
+          'a place, and the problem is a thing to be talked about, looked into or ' +
+          'worried over \u2014 not something to swing at.\n'
+        : opts.opens === 'tense'
+          ? 'Something is wrong here, but no blades are out yet. Let it be uneasy ' +
+            'rather than violent. Nobody has attacked anybody.\n'
+          : '') +
       'Rules: reveal nothing the party has not learned. No prophecy, no hints at ' +
       'what is really going on, no villain the party has not met. Do not mention ' +
       'dice, rules, levels, hit points or classes. Do not tell anyone what they ' +
       'feel or decide. End on the situation, not on a question.\n' +
       'Separate the three paragraphs with a blank line. Keep sentences short — ' +
-      'two clauses at most. Around 180 words in total, and never more than 250.';
+      'two clauses at most. Around 200 words in total, and never more than 280.';
 
     if (!Backend.available()) {
       return Promise.resolve({

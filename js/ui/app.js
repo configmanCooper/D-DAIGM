@@ -258,6 +258,13 @@
        whole table. */
     return Promise.resolve(N.opening(session.state, session.store, session.campaign, {
       locationName: locationName(),
+      /* How these four came to be in the same room, and whether anything
+         hostile is standing in it. Both are decided by world generation and
+         recorded on the session; without them the Dungeon Master introduced
+         a party that had apparently always existed, and put a monster in a
+         scene that was supposed to be a library after hours. */
+      bond: session.bond || null,
+      opens: session.opens || null,
     })).then(function (res) {
       /* `narration` takes a PAYLOAD, not a string. Passing the text as the
          first argument put `undefined` on the page and left a blank entry
@@ -1079,7 +1086,19 @@
        one is up, so do nothing" froze the table: End turn committed its event
        and then the turn never passed. Falling through hands it to endHumanTurn,
        which copes with an empty seat and fills it. */
-    if (actorId && !DND.Game.turnIsSpent(session, actorId, 0)) return;
+    /* The `passes` argument is what makes this work out of combat.
+       There is no action economy outside a fight, so `turnIsSpent` answers
+       "has this seat had a go?" — and asking with 0 means "no, not yet",
+       every time, for ever. The human has just HAD their go; that is what
+       this function is called for. So out of combat they are asked with 1.
+       In a fight it stays 0, or a player with a bonus action still in hand
+       would have their turn cut short the moment they swung.
+
+       Left at 0, a peaceful opening was silent: the player could act all
+       evening and the three companions beside them never once took a turn or
+       said anything. */
+    var inCombat = !!(session.state.combat && session.state.combat.active);
+    if (actorId && !DND.Game.turnIsSpent(session, actorId, inCombat ? 0 : 1)) return;
     DND.Game.endHumanTurn(session, {}).then(function () {
       afterTurn();
       /* The loop stops at a human, at the end of a fight, or when it runs
