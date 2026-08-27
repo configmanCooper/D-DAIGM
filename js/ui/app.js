@@ -265,6 +265,10 @@
          scene that was supposed to be a library after hours. */
       bond: session.bond || null,
       opens: session.opens || null,
+      /* The person with the problem. Without them, paragraph three ends on
+         "something waits beyond the threshold" instead of somebody asking
+         the party for something. */
+      local: session.local || null,
     })).then(function (res) {
       /* `narration` takes a PAYLOAD, not a string. Passing the text as the
          first argument put `undefined` on the page and left a blank entry

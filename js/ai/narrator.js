@@ -73,6 +73,106 @@
   /* Second person about anybody. The narration is third-person by design. */
   var SECOND_PERSON = /\b(?:you|your|yours|yourself)\b/i;
 
+  /** The narration with everything anybody SAID taken out of it.
+   *
+   * Several gates are about the narrator's own voice and must not judge the
+   * words in a character's mouth. People say "you" to each other constantly;
+   * a Dungeon Master describing the scene should not. */
+  function outsideQuotes(text) {
+    return String(text || '')
+      .replace(/\u201c[^\u201d]*\u201d/g, ' ')
+      .replace(/"[^"]*"/g, ' ')
+      .replace(/\u2018[^\u2019]*\u2019/g, ' ');
+  }
+
+  /* A sentence that has stopped being a sentence.
+     Sentence length in generated openings is bimodal: the median is 21 words
+     and then there is a second population running 57 to 171, where the model
+     has lost the thread and is padding — "somewhere far off in some other
+     place they haven't told anyone about together just now either way really
+     doesn't matter much since none of it matters at all right here". Nothing
+     sits between 40 and 50, so a limit there separates the two cleanly
+     without touching a single healthy sentence. */
+  var RUN_ON_WORDS = 45;
+
+  function longestSentence(text) {
+    var longest = 0;
+    String(text || '').split(/(?<=[.!?])\s+/).forEach(function (s) {
+      var n = s.trim().split(/\s+/).filter(Boolean).length;
+      if (n > longest) longest = n;
+    });
+    return longest;
+  }
+
+  /* Where a runaway sentence can be cut so that both halves still read.
+     Comma-led conjunctions first, because those are real clause boundaries. */
+  var SPLIT_POINTS = /,\s+(?=(?:and|but|while|though|although|then|yet|so|because|as|where|which|who)\b)|;\s+|\s+\u2014\s+/i;
+  /* And bare conjunctions as a fallback, for the sentences that have no
+     punctuation in them at all — which is exactly what the model produces
+     when it has lost the thread: "...far enough yet still loudly demanding
+     more hands quickly moving toward them fast but clearly trying harder..."
+     Cutting there is inelegant. It is much better than the alternative. */
+  var BARE_SPLITS = /\s+(?=(?:and|but|while|though|although|then|yet|so|because|where|which|who)\b)/i;
+
+  /**
+   * Break a sentence that has stopped being one.
+   *
+   * Repaired rather than rejected. Asking a 4B model for three paragraphs
+   * with no sentence over forty-five words fails EVERY time — measured, five
+   * openings out of five, twice each — and rejecting threw away prose that
+   * had already done the hard parts: named the quest-giver, established the
+   * bond, introduced four people. Losing all of that over one long sentence
+   * is a much worse trade than an occasional slightly abrupt full stop.
+   *
+   * Cuts at the conjunction nearest the middle, recursively, and gives up on
+   * a sentence with nowhere to cut — which then gets dropped rather than
+   * mangled.
+   */
+  function splitRunOns(text, limit) {
+    var out = [];
+    String(text || '').split(/(?<=[.!?])\s+/).forEach(function (sentence) {
+      out.push.apply(out, breakUp(sentence.trim(), limit || RUN_ON_WORDS, 0));
+    });
+    return out.filter(Boolean).join(' ');
+  }
+
+  function breakUp(sentence, limit, depth) {
+    var words = sentence.split(/\s+/).filter(Boolean);
+    if (words.length <= limit || depth > 5) {
+      return words.length > limit * 2 ? [] : [sentence];
+    }
+    var best = bestCut(sentence, words.length, SPLIT_POINTS);
+    if (best < 0) best = bestCut(sentence, words.length, BARE_SPLITS);
+    if (best <= 0) return words.length > limit * 2 ? [] : [sentence];
+
+    var head = sentence.slice(0, best).trim().replace(/[,;\u2014]\s*$/, '');
+    var tail = sentence.slice(best).replace(/^[,;\s\u2014]+/, '').trim();
+    if (!head || !tail) return [sentence];
+    if (!/[.!?]$/.test(head)) head += '.';
+    tail = tail.charAt(0).toUpperCase() + tail.slice(1);
+    return breakUp(head, limit, depth + 1).concat(breakUp(tail, limit, depth + 1));
+  }
+
+  /** The cut nearest the middle, so both halves stay readable. */
+  function bestCut(sentence, totalWords, pattern) {
+    var best = -1, bestDist = Infinity, from = 0;
+    for (var guard = 0; guard < 40; guard++) {
+      var rest = sentence.slice(from);
+      var m = rest.search(pattern);
+      if (m < 0) break;
+      var at = from + m;
+      if (at <= 0) { from = at + 1; continue; }
+      var before = sentence.slice(0, at).split(/\s+/).filter(Boolean).length;
+      /* Never cut so close to an end that one side is a fragment. */
+      if (before >= 4 && totalWords - before >= 4) {
+        var dist = Math.abs(before - totalWords / 2);
+        if (dist < bestDist) { bestDist = dist; best = at; }
+      }
+      from = at + 1;
+    }
+    return best;
+  }
+
   /** Does any beat this turn report a blow that actually landed? */
   function beatsShowHarm(beats) {
     return (beats || []).some(function (b) {
@@ -107,7 +207,8 @@
          layer can produce: the player reads it and acts on it. */
       'phantom_outcome', 'phantom_wound', 'second_person'],
     /* These are repaired in place. */
-    repairable: ['player_voice', 'forbidden_name', 'too_long', 'repeated_opening', 'reads_numbers'],
+    repairable: ['player_voice', 'forbidden_name', 'too_long', 'repeated_opening',
+      'reads_numbers', 'run_on'],
   };
 
   /* ---------------------------------------------------------------- gates -- */
@@ -309,11 +410,33 @@
 
     /* Second person. The narration is third-person by design, and "you feel
        no shock" additionally decides what the player's character feels, which
-       is the player's to decide and nobody else's. */
-    if (SECOND_PERSON.test(text)) {
+       is the player's to decide and nobody else's.
+
+       Dialogue is exempt, and has to be. People say "you" to each other:
+       the quest-giver's own authored lines include "You four — yes, you —
+       third house, back way, go" and "You will want boots you don't mind
+       losing". Checking the raw text rejected four openings in ten for
+       quoting the very lines the scene was written around. */
+    if (SECOND_PERSON.test(outsideQuotes(text))) {
       report.issues.push('second_person');
       report.regenerate = true;
       report.usable = false;
+    }
+
+    /* A sentence that has run away. Asking for short sentences works until
+       the word budget gives the model room to pad, and then it produces a
+       hundred-and-seventy-word single sentence that no table survives being
+       read aloud. Repaired by cutting it at its conjunctions rather than
+       rejected: rejecting failed every opening five times out of five and
+       threw away prose that had already named the quest-giver and
+       established the bond. */
+    var longest = longestSentence(text);
+    if (longest > RUN_ON_WORDS) {
+      report.issues.push('run_on');
+      report.longestSentence = longest;
+      text = splitRunOns(text, RUN_ON_WORDS);
+      report.stillLong = longestSentence(text);
+      if (text.trim().length < 60) { report.regenerate = true; report.usable = false; }
     }
 
     var voice = findPlayerVoice(text, opts.playerCharacters);    if (voice.length) {
@@ -545,6 +668,11 @@
       notes.push('You stated damage numbers. Never write a figure, "points" or "damage" \u2014 ' +
         'turn the number into how hard the blow looked.');
     }
+    if (report.issues.indexOf('run_on') >= 0) {
+      notes.push('One of your sentences ran to ' + (report.longestSentence || 'far too many') +
+        ' words and stopped making sense. Write SHORT sentences. Never more than ' +
+        'fifteen words. Full stop, then start a new one.');
+    }
     notes.push('Rewrite it. Narration only.');
     return notes.join(' ');
   }
@@ -575,7 +703,7 @@
     var party = opts.party || partyRoster(state);
     var built = Prompt.forNarration(state, store, campaign, [], Object.assign({}, opts, {
       party: party,
-      maxWords: opts.maxWords || 220,
+      maxWords: opts.maxWords || 150,
       sentences: 10,
       paragraphs: 3,
     }));
@@ -594,8 +722,11 @@
       'Write three short paragraphs:\n' +
       '1. The world and the moment — where this is, what kind of place it is, the ' +
       'hour and the weather, in a couple of sentences. Concrete and physical.\n' +
-      '2. The party, by name. One clause each, describing how they LOOK and carry ' +
-      'themselves — not their statistics. Use these people and no others:\n' +
+      '2. The party, by name. Give TWO of them a vivid, specific detail \u2014 a scar, ' +
+      'a habit, a thing they are carrying, something they have just said. Name the ' +
+      'other two in a single clause each and move on. Do NOT give all four the same ' +
+      'kind of detail, and nobody should merely "stand with a hand on" something. ' +
+      'Use these people and no others:\n' +
       roster + '\n' +
       (opts.bond
         ? '   AND how they come to be together. This is not optional and it is not ' +
@@ -605,10 +736,41 @@
             ? '   They do NOT know each other. Do not write them as old friends, do not ' +
               'give them shared history, and do not have them finish each other\u2019s ' +
               'sentences. Show four people sizing each other up.\n'
-            : '   They DO know each other, and it should show \u2014 in shorthand, in an ' +
-              'old argument, in who defers to whom.\n')
+            /* As concrete as the strangers branch, because the vague version
+               produced fog: "as if bound by something older than any law ever
+               written down", naming no grove, no season and no obligation.
+               "They know each other somehow" is the unforced error the whole
+               bond system exists to kill. */
+            : '   They DO know each other. Show it with ONE specific, concrete thing ' +
+              'out of their shared past \u2014 an old argument they are plainly ' +
+              'resuming, a nickname, a job one of them always does for the others, ' +
+              'a grudge. Do not merely say they are close or "bound by" something. ' +
+              'Show the history; do not announce it.\n')
         : '') +
-      '3. What is in front of them right now, and why it matters enough to stop for.\n\n' +
+      /* The person with the problem.
+         Every opening authors one \u2014 a name, a role, what they want, how
+         they talk, and three lines of their dialogue \u2014 and not one of
+         fourteen sample openings named any of them, because the roster was
+         built from the party alone and paragraph three asked only for "what is
+         in front of them". Every scene ended on ambient dread instead of
+         somebody asking for something. A session-one hook is a PERSON WANTING
+         SOMETHING: "a nervous sub-librarian wants the book back before the
+         third bell" is a scene a table acts on in ten seconds, and "something
+         waits beyond the threshold" is a mood. */
+      (opts.local
+        ? '3. The person in front of them, and what they want. Name them: ' +
+          opts.local.name + ', ' + opts.local.role + '. They want ' +
+          opts.local.wants + '. They sound like this: ' + opts.local.voice + '\n' +
+          '   Give them ONE line of dialogue in their own voice' +
+          ((opts.local.lines || []).length
+            ? ' \u2014 one of these, or something very like them:\n' +
+              opts.local.lines.map(function (l) { return '     "' + l + '"'; }).join('\n') + '\n'
+            : '.\n') +
+          '   End on what they are ASKING FOR. Not on a vague dread, not on ' +
+          'something unseen watching, not on a threshold.\n\n'
+        : '3. What is in front of them right now, and why it matters enough to ' +
+          'stop for. Somebody here has a problem and is saying so. End on what ' +
+          'they are asking for.\n\n') +
       (opts.opens === 'peaceful'
         ? 'NOBODY IS FIGHTING. Nothing hostile is present. Do not put a monster, an ' +
           'ambush, a scream or a drawn blade in this scene. It opens with people in ' +
@@ -621,9 +783,20 @@
       'Rules: reveal nothing the party has not learned. No prophecy, no hints at ' +
       'what is really going on, no villain the party has not met. Do not mention ' +
       'dice, rules, levels, hit points or classes. Do not tell anyone what they ' +
-      'feel or decide. End on the situation, not on a question.\n' +
-      'Separate the three paragraphs with a blank line. Keep sentences short — ' +
-      'two clauses at most. Around 200 words in total, and never more than 280.';
+      'feel or decide.\n' +
+      /* A hard number, not a polite request. "Two clauses at most" was ignored
+         the moment the word budget gave the model room, and it padded into
+         150-word single sentences that no table survives reading aloud:
+         "somewhere far off in some other place they haven't told anyone about
+         together just now either way really doesn't matter much since none of
+         it matters at all right here". Small models obey a countable limit
+         far better than a stylistic one. */
+      'Write in short declarative sentences. NEVER write a sentence longer than ' +
+      'fifteen words. If a sentence starts to run long, stop it with a full stop ' +
+      'and begin another. Do not use "because", "while" or "as" more than once in ' +
+      'any sentence.\n' +
+      'Separate the three paragraphs with a blank line. Around 150 words in total, ' +
+      'and never more than 190.';
 
     if (!Backend.available()) {
       return Promise.resolve({
@@ -632,26 +805,53 @@
       });
     }
 
-    return Backend.chat({
-      profile: 'narrator',
-      messages: [{ role: 'system', content: built.system }, { role: 'user', content: stage }],
-      numPredict: 420,
-      onToken: opts.onToken,
-      signal: opts.signal,
-    }).then(function (res) {
-      var gated = applyGates(res.text, {
-        playerCharacters: built.ctx.playerCharacters,
-        mustNotName: built.ctx.mustNotName,
-        recent: [],
-        maxWords: 260,
+    var gateOpts = {
+      playerCharacters: built.ctx.playerCharacters,
+      mustNotName: built.ctx.mustNotName,
+      recent: [],
+      maxWords: 200,
+    };
+
+    /**
+     * Ask, check, and ask ONCE more if the answer was unusable.
+     *
+     * The opening ran its prose through the gates and then returned it
+     * whatever they said: a fatal issue set `usable: false` and the text was
+     * shipped anyway, because only `narrate()` had a retry loop. So none of
+     * the fidelity or readability gates applied to the single most important
+     * paragraph in the game — the first thing anybody reads. A hundred and
+     * seventy word sentence sailed straight through.
+     */
+    function attempt(messages, tries) {
+      return Backend.chat({
+        profile: 'narrator',
+        messages: messages,
+        numPredict: 300,
+        onToken: tries === 0 ? opts.onToken : null,
+        signal: opts.signal,
+      }).then(function (res) {
+        var gated = applyGates(res.text, gateOpts);
+        var text = gated.text;
+        var fatal = (gated.report.issues || []).some(function (i) {
+          return GATES.fatal.indexOf(i) >= 0;
+        });
+        if ((!text || text.length < 60 || fatal) && tries < 1) {
+          return attempt(messages.concat([
+            { role: 'assistant', content: res.text || '' },
+            { role: 'user', content: correctionFor(gated.report, built.ctx) },
+          ]), tries + 1);
+        }
+        if (!text || text.length < 60 || fatal) {
+          return { text: offlineOpening(state, campaign, party, built.ctx), source: 'offline',
+            report: { issues: ['fallback:' + ((gated.report.issues || []).join(',') || 'too short')] } };
+        }
+        return { text: text, source: res.kind, report: gated.report };
       });
-      var text = gated.text;
-      if (!text || text.length < 60) {
-        return { text: offlineOpening(state, campaign, party, built.ctx), source: 'offline',
-          report: { issues: ['fallback:too short'] } };
-      }
-      return { text: text, source: res.kind, report: gated.report };
-    }).catch(function () {
+    }
+
+    return attempt(
+      [{ role: 'system', content: built.system }, { role: 'user', content: stage }], 0
+    ).catch(function () {
       return { text: offlineOpening(state, campaign, party, built.ctx), source: 'offline',
         report: { issues: ['fallback:error'] } };
     });

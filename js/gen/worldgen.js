@@ -282,6 +282,17 @@
          that from the enemy list, because a tense scene has enemies in it and
          still opens with talking. */
       opens: scene.opens || 'peaceful',
+      /* The person with the problem, handed to the narrator so paragraph
+         three can name them and say what they want. Authored on every scene
+         since the beginning and never once reaching the page. */
+      local: {
+        id: localId,
+        name: scene.localName,
+        role: scene.localRole,
+        wants: scene.localWants,
+        voice: scene.localVoice,
+        lines: (scene.lines || []).slice(),
+      },
       campaign: campaignFor(scene, opts),
     };
   }
@@ -354,7 +365,15 @@
       tone: opts.tone || 'grounded, physical, a little grim. Ordinary people with ordinary problems that happen to be dangerous.',
       openCanon: [
         'This is a small place at the edge of somewhere larger.',
-        'Nobody here has been rescued by adventurers before.',
+        /* "Nobody here has been rescued by adventurers before" was meant as
+           tone guidance and the model recited it, badly, in three openings
+           out of fourteen: "some larger place where nobody has been saved
+           before by an adventurer's party", "this quiet corner town where no
+           one has been saved by adventurers before". Both "adventurers" and
+           "rescued" are words from outside the fiction, in a narrator whose
+           entire discipline is staying inside it. Reworded to something that
+           cannot be turned meta. */
+        'Nothing extraordinary has happened here in living memory.',
       ],
       hardRules: [],
       locations: (function () {

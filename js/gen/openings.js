@@ -120,6 +120,30 @@
         'has quietly organised the group ever since. Whether that person wanted ' +
         'the responsibility is a live question.',
     },
+    /* These two were referenced by nine scenes and defined by none.
+       They existed, were renamed to `school` and `order` when the vocation
+       bonds were written, and the scenes that named them were not updated —
+       so `chooseBond` weighted a key that did not exist, the +6 preference
+       did nothing, and the library, the observatory and the barrow could
+       never open the way they were written to. Restored rather than
+       repointed, because "students of the same subject" is not the same
+       thing as "taught by the same hand", and "bound by an oath" is not
+       "sworn into an order". A test now asserts every referenced bond exists. */
+    students: {
+      id: 'students', strangers: false,
+      short: 'students of the same subject',
+      text: 'They sat the same lectures, copied the same notes and sat up the ' +
+        'same nights before the same examinations. They disagree about the ' +
+        'material the way only people who love it can, and one of them was ' +
+        'always the favourite.',
+    },
+    oath: {
+      id: 'oath', strangers: false,
+      short: 'bound by the same oath',
+      text: 'They swore the same words, and meant them to different degrees. ' +
+        'The oath is the thing they share and the thing they argue about; each ' +
+        'of them privately thinks they keep it better than the others.',
+    },
 
     /* ---------------------------------------------------- vocation ----- *
        The bond IS the calling. Reached for when the party actually contains
@@ -540,10 +564,86 @@
         'Take the board. I have it by heart now anyway.'],
     },
 
+    /* ------------------------------------------------- forced together - *
+       The commonest cold open in the medium, and there were three
+       strangers-bonds with no scene built for any of them. */
+    {
+      id: 'holding-cells', name: 'the holding cells under the Weighhouse', biome: 'town',
+      kind: 'crisis', opens: 'tense',
+      timeOfDay: 'no way to tell', weather: 'none, down here',
+      hook: 'Four people in one cell, none of them sure what the charge is, and a ' +
+        'turnkey who keeps saying the magistrate will sort it in the morning.',
+      firstBeat: 'Straw, one lamp along the passage, and a door that has been locked ' +
+        'long enough that everybody has stopped rattling it.',
+      outs: [
+        'The turnkey is bored and underpaid and will talk for the right question.',
+        'One of them recognises the name on the charge-sheet, and it is none of theirs.',
+        'The morning bell is hours off, and hours is a long time to compare stories.',
+        'Nobody has actually been charged. Somebody wants them out of the way until dawn.',
+      ],
+      bonds: ['conscripts', 'debt', 'notice', 'survivors'],
+      fits: { classes: ['rogue', 'barbarian', 'fighter'], backgrounds: ['criminal', 'urchin', 'soldier', 'charlatan'] },
+      localName: 'Turnkey Somm', localRole: 'who holds the keys and did not make the arrests',
+      localWants: 'a quiet shift and no trouble he has to write down',
+      localVoice: 'Weary, chatty when it costs him nothing, deaf when it does.',
+      lines: ['Magistrate sorts it in the morning. Everything is the morning, down here.',
+        'I did not bring you in. I just keep the door.',
+        'Keep it down and I keep the lamp lit. That is the whole of the deal.'],
+    },
+    {
+      id: 'patrons-hall', name: 'the long hall at Averlan House', biome: 'town',
+      kind: 'social', opens: 'peaceful',
+      timeOfDay: 'late morning', weather: 'sun through high windows',
+      hook: 'Somebody with money has sent for four people and has not yet said why.',
+      firstBeat: 'A long table, four chairs on one side of it, and a steward who has ' +
+        'been told to offer wine and nothing else.',
+      bonds: ['hired', 'debt', 'patron', 'notice', 'conscripts'],
+      fits: { classes: ['bard', 'rogue', 'paladin', 'warlock'], backgrounds: ['noble', 'charlatan', 'soldier', 'guildArtisan'] },
+      localName: 'Steward Ivane', localRole: 'who speaks for a house that does not speak for itself',
+      localWants: 'the work agreed to before her mistress has to be involved',
+      localVoice: 'Courteous, exact, and answers only the question that was asked.',
+      lines: ['You were sent for. That is not the same as being hired.',
+        'The terms are generous. I would not describe the work that way.',
+        'You may refuse. Nobody has, but you may.'],
+    },
+    {
+      id: 'graveside', name: 'the burying ground at Hask', biome: 'town',
+      kind: 'celebration', opens: 'peaceful',
+      timeOfDay: 'morning', weather: 'thin rain',
+      hook: 'A funeral four people came a long way for, and a grave that was ' +
+        'disturbed the night before the burial.',
+      firstBeat: 'Wet earth, forty mourners, and a sexton who has been trying to ' +
+        'catch the family\u2019s eye without causing a scene.',
+      bonds: ['kin', 'order', 'temple', 'regiment', 'company', 'survivors'],
+      fits: { classes: ['cleric', 'paladin', 'fighter', 'bard'], backgrounds: ['acolyte', 'soldier', 'noble', 'folkHero'] },
+      localName: 'Sexton Dell', localRole: 'who digs the graves here and closed this one himself',
+      localWants: 'to know what was after it before he has to tell the widow',
+      localVoice: 'Quiet, respectful of the occasion, and absolutely certain of what he saw.',
+      lines: ['I closed it Tuesday. I know how I leave a grave.',
+        'Nothing was taken. That is the part I cannot account for.',
+        'Not today. After. But do not let it be nothing.'],
+    },
+    {
+      id: 'ships-deck', name: 'the deck of the Marreck, three days out', biome: 'sea',
+      kind: 'travel', opens: 'peaceful',
+      timeOfDay: 'first watch', weather: 'a steady following wind',
+      hook: 'Three days of open water either way, and a passenger who was on the ' +
+        'manifest this morning and is not on the ship this evening.',
+      firstBeat: 'Rigging, a lamp swinging on its hook, and a mate counting heads ' +
+        'for the second time.',
+      bonds: ['crew', 'road', 'hired', 'notice', 'company'],
+      fits: { classes: ['fighter', 'rogue', 'barbarian', 'ranger'], backgrounds: ['sailor', 'urchin', 'outlander'] },
+      localName: 'Mate Corrow', localRole: 'who keeps the manifest and has counted it three times',
+      localWants: 'to find the passenger before he has to write the word "lost"',
+      localVoice: 'Brisk and superstitious, and will not say the missing man\u2019s name.',
+      lines: ['Twenty-six aboard this morning. Twenty-five now. I can count.',
+        'Nobody went over. I would have heard a man go over.',
+        'Do not say his name on deck. Humour me.'],
+    },
+
     /* ---------------------------------------------------- combat ------- *
        Kept, and now the minority. A game that always starts here is a
-       skirmish generator; a game that never does has no teeth. */
-    {
+       skirmish generator; a game that never does has no teeth. */    {
       id: 'toll-bridge', name: 'the Ashford toll bridge', biome: 'river',
       kind: 'combat', opens: 'violent',
       timeOfDay: 'morning', weather: 'mist off the water',
@@ -658,12 +758,20 @@
   /** How well an opening suits the people who will actually play it. */
   function scoreFor(opening, party) {
     var fits = opening.fits || {};
-    var score = 1;                       // everything is possible
+    /* The floor was 1 and a class fit was +3, so on a four-person party the
+       base weight was a large share of the total and the "unlikely pairing"
+       fired far more often than sometimes — fourteen sample games produced a
+       half-orc barbarian checking star-tables on an observatory stair, with
+       nothing to do in the scene and prose that flailed accordingly.
+       Half the floor, and a fit worth five, so a wizard beats a barbarian for
+       the library by a real margin. Still weighted, still not a lookup table:
+       the wizard can end up on the toll bridge. */
+    var score = 0.5;
     (party || []).forEach(function (p) {
-      if (p.classId && (fits.classes || []).indexOf(p.classId) >= 0) score += 3;
-      if (p.backgroundId && (fits.backgrounds || []).indexOf(p.backgroundId) >= 0) score += 3;
-      if (p.raceId && (fits.races || []).indexOf(p.raceId) >= 0) score += 2;
-      if (p.subraceId && (fits.races || []).indexOf(p.subraceId) >= 0) score += 2;
+      if (p.classId && (fits.classes || []).indexOf(p.classId) >= 0) score += 5;
+      if (p.backgroundId && (fits.backgrounds || []).indexOf(p.backgroundId) >= 0) score += 5;
+      if (p.raceId && (fits.races || []).indexOf(p.raceId) >= 0) score += 3;
+      if (p.subraceId && (fits.races || []).indexOf(p.subraceId) >= 0) score += 3;
     });
     return score;
   }

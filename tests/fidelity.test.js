@@ -149,6 +149,8 @@ t.section('the gates are registered as fatal or repairable');
   });
   t.ok(Narrator.GATES.repairable.indexOf('reads_numbers') >= 0,
     'reads_numbers is repairable \u2014 the sentence goes, the paragraph stays');
+  t.ok(Narrator.GATES.repairable.indexOf('run_on') >= 0,
+    'and run_on is repairable \u2014 the sentence is cut, the opening survives');
 }
 
 t.section('but old blood is not new blood');
@@ -173,6 +175,69 @@ t.section('but old blood is not new blood');
     t.deep(r.report.issues, [], 'honest narration ' + (i + 1) + ' is not rejected',
       r.report.issues.join(', '));
   });
+}
+
+t.section('a sentence that has stopped being a sentence is rewritten');
+{
+  /* Sentence length in generated openings is bimodal: a healthy population
+     around twenty words, and a second one running fifty-seven to a hundred
+     and seventy where the model has lost the thread and is padding. Nothing
+     sits between forty and fifty, so the limit separates them cleanly. */
+  const rambling =
+    'Smoke hangs over the quarter somewhere far off in some other place they have not ' +
+    'told anyone about together just now either way really does not matter much since ' +
+    'none of it matters at all right here because nothing matters unless it does matter ' +
+    'at all really none of this makes any sense to anybody standing here waiting.';
+  const r = gate(rambling, ['Shen Cooper searches the area.']);
+  t.eq(has(r, 'run_on'), true, 'a fifty-word sentence is caught');
+  t.ok(r.report.longestSentence > 45, 'the report says how long it ran',
+    String(r.report.longestSentence));
+  /* Repaired, not rejected. Asking a 4B model for three paragraphs with no
+     sentence over forty-five words failed EVERY time — five openings out of
+     five, twice each — and rejecting threw away prose that had already named
+     the quest-giver, established the bond and introduced four people. Losing
+     all of that over one long sentence is a far worse trade than an
+     occasional abrupt full stop. */
+  t.eq(r.report.usable, true, 'and repaired rather than thrown away');
+  t.ok(r.report.stillLong <= 45,
+    'the runaway sentence is cut at its conjunctions until it reads',
+    r.report.longestSentence + ' -> ' + r.report.stillLong);
+  t.ok(/\./.test(r.text), 'and the result has full stops in it');
+
+  const fine =
+    'Smoke hangs low over the quarter. The fire has half of one street. ' +
+    'Thirty people wait for buckets that have not come. Heat presses against their faces.';
+  const ok = gate(fine, ['Shen Cooper searches the area.']);
+  t.eq(has(ok, 'run_on'), false, 'and ordinary short prose passes untouched');
+  t.deep(ok.report.issues, [], 'with nothing else flagged either');
+
+  /* The boundary is where the two populations separate, not an arbitrary
+     tightness: a long-but-coherent sentence must still be allowed. */
+  const longish = 'The bridge is held at both ends by men who have been paid to ' +
+    'stand there since before dawn and who have stopped pretending it is a toll.';
+  t.eq(has(gate(longish, ['x hits for 3']), 'run_on'), false,
+    'a long but coherent sentence is not punished for being long');
+}
+
+t.section('but a character may say "you" out loud');
+{
+  /* People say "you" to each other. The quest-giver's own authored lines are
+     full of it — "You four, yes, you, third house, back way, go" — and
+     judging the raw text rejected four openings in ten for quoting the very
+     line the scene was written around. The rule is about the NARRATOR's
+     voice, not about what anybody says. */
+  const spoken = gate(
+    'Warden Iss turns from the bucket line, soot to the elbow. \u201cYou four \u2014 ' +
+    'yes, you \u2014 third house, back way, go.\u201d Nobody moves yet.',
+    ['Warden Iss calls out to the party.']);
+  t.eq(has(spoken, 'second_person'), false, 'dialogue containing "you" is allowed');
+  t.eq(spoken.report.usable, true, 'and the opening survives');
+
+  const narrated = gate(
+    'The wolf\u2019s jaws close on your arm and you stagger back against the rail.',
+    ['Wolf swings at Shen Cooper.', 'Wolf hits for 8.']);
+  t.eq(has(narrated, 'second_person'), true,
+    'but the narrator saying it is still caught');
 }
 
 t.done();

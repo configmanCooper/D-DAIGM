@@ -66,6 +66,7 @@ const PLAYERS = [
         weather: o.scene.weather,
         bond: o.bond,
         opens: o.opens,
+        local: o.local,
       });
       prose = res.text + '\n\n*(' + res.source + ')*';
     } catch (e) { prose = 'FAILED: ' + e.message; }

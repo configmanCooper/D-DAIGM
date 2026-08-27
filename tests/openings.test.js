@@ -150,6 +150,13 @@ t.section('the opening suits the people who will play it');
     JSON.stringify({ wildman: wildman.travel || 0, scholar: scholar.travel || 0 }));
   t.ok((scholar.combat || 0) > 0,
     'but the wizard can still end up in a fight \u2014 this is weighted, not a lookup table');
+  /* An independent review found a half-orc barbarian checking star-tables on
+     an observatory stair, with nothing to do in the scene. The floor was too
+     high relative to a fit, so the unlikely pairing fired far more often than
+     "sometimes". */
+  t.ok((wildman.study || 0) * 6 < (scholar.study || 1),
+    'and a barbarian on an observatory stair is genuinely rare, not a coin flip',
+    JSON.stringify({ barbarianStudy: wildman.study || 0, wizardStudy: scholar.study || 0 }));
 }
 
 t.section('the bond suits them too');
@@ -192,6 +199,45 @@ t.section('a bond says whether they are strangers, because it changes everything
     t.ok(!!b.short && !!b.text && b.text.length > 60,
       id + ' tells the Dungeon Master enough to play it');
   });
+}
+
+t.section('every bond a scene asks for actually exists');
+{
+  /* Found by an independent review, not by anything here. `students` and
+     `oath` were renamed to `school` and `order` when the vocation bonds were
+     written, and nine scenes went on naming the old ids. `chooseBond`
+     weighted a key that did not exist, the preference did nothing, and the
+     library, the observatory and the barrow could never open the way they
+     were written to. Nothing failed; the intent was simply unreachable. */
+  const defined = Object.keys(Openings.BONDS);
+  const dangling = [];
+  Openings.OPENINGS.forEach(o => {
+    (o.bonds || []).forEach(id => {
+      if (defined.indexOf(id) < 0) dangling.push(o.id + ' -> ' + id);
+    });
+  });
+  t.deep(dangling, [], 'no scene names a bond that was never written');
+}
+
+t.section('every opening carries the person with the problem');
+{
+  /* A session-one hook is a PERSON WANTING SOMETHING. Every scene authors
+     one; for a long time not one of them reached the page. */
+  const thin = Openings.OPENINGS.filter(o =>
+    !o.localName || !o.localRole || !o.localWants || !o.localVoice ||
+    !(o.lines && o.lines.length >= 2)).map(o => o.id);
+  t.deep(thin, [],
+    'every opening names somebody, says what they want, and gives them lines');
+}
+
+t.section('and world generation hands that person to the Dungeon Master');
+{
+  const s = seatedParty('local', [{ classId: 'cleric', levels: 2 }]);
+  const o = Worldgen.generateOpening(s, { rng: new RNG('local') });
+  t.ok(!!o.local, 'the opening returns the local');
+  t.ok(!!o.local.name && !!o.local.wants,
+    'with a name and something they want', JSON.stringify(o.local && o.local.name));
+  t.ok((o.local.lines || []).length > 0, 'and words in their own mouth');
 }
 
 /* ------------------------------------------------------------------ */
