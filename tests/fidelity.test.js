@@ -151,4 +151,28 @@ t.section('the gates are registered as fatal or repairable');
     'reads_numbers is repairable \u2014 the sentence goes, the paragraph stays');
 }
 
+t.section('but old blood is not new blood');
+{
+  /* The first version of this gate used the bare nouns "blood" and "wound"
+     and rejected a THIRD of all narration in a live run. A character who has
+     been fighting for ten rounds has blood on them already; describing it on
+     a turn where everyone missed is accurate, not invented. The gate has to
+     catch a fresh kill or a fresh blow, not the state of somebody's armour. */
+  const fine = [
+    ["The goblin's scythe rings off the shield rim. Shen sets his feet, the old blood on his greaves gone tacky in the cold.",
+      ['Goblin A swings at Shen Cooper.', 'The blow misses.']],
+    ["Mara circles wide of the wounded goblin, spear level, waiting for it to commit.",
+      ['Dame Mara Thorne takes the Dodge action.']],
+    ["Aldren's swing goes wide and the wolf slides past him, blood still matted along its flank from the last exchange.",
+      ['Sir Aldren Vey swings at Wolf.', 'The blow misses.']],
+    ["Shen searches the wreckage. Nothing but wet rope and a split crate.",
+      ['Shen Cooper searches the area.', 'Nothing gives.']],
+  ];
+  fine.forEach(([text, beats], i) => {
+    const r = gate(text, beats);
+    t.deep(r.report.issues, [], 'honest narration ' + (i + 1) + ' is not rejected',
+      r.report.issues.join(', '));
+  });
+}
+
 t.done();

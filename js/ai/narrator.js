@@ -48,15 +48,27 @@
      AND checked here, because asking alone works about four times in five and
      one failure in five is a player told an enemy is dead when it is not. */
 
-  /* Prose that shows somebody wounded or killed. */
+  /* Prose that shows somebody wounded or killed BY THIS TURN.
+     Deliberately narrow. An earlier, broader version included the bare nouns
+     "blood" and "wound", and rejected a third of all narration in a live run:
+     a character who has been fighting for ten rounds has blood on them
+     already, and describing it on a turn where everyone missed is accurate,
+     not invented. What must be caught is a fresh kill or a fresh blow — not
+     the state of somebody's armour. */
   var SHOWS_HARM = new RegExp(
-    '\\b(?:dies|died|dead|kills?|killed|slain|falls? (?:silent|still|limp|dead)|' +
-    'goes limp|slumps|crumples|collapses|blood|bleed\\w*|wound\\w*|gash|' +
-    'severs?|impales?|run through|drives? (?:it|the blade|his blade|her blade)|' +
-    'sinks? (?:in|into)|tears? into|bites? deep)\\b', 'i');
+    '\\b(?:dies|died|is dead|drops dead|kills?|killed|slain|slays?|' +
+    'falls? (?:silent|still|limp|dead)|goes limp|slumps|crumples|' +
+    'collapses|severs?|impales?|runs? through|cuts? (?:him|her|it|them)? ?down)\\b' +
+    '|\\b(?:blade|sword|spear|axe|steel|point|arrow|bolt|fist)\\s+(?:drives?|sinks?|bites?|tears?|punches?)\\s+(?:in|into|through|deep)\\b' +
+    '|\\bdrives? (?:his|her|its|their|the) \\w+ (?:into|through)\\b', 'i');
 
-  /* Prose that draws blood specifically — the miss case. */
-  var DRAWS_BLOOD = /\b(?:blood|bleed\w*|wound\w*|gash|red streak|tears? into|sinks? in|bites? deep|crimson)\b/i;
+  /* Fresh blood specifically — the miss case. Phrasing that can only mean a
+     wound opened just now, rather than one already there. */
+  var DRAWS_BLOOD = new RegExp(
+    '\\bblood (?:sprays?|spurts?|wells?|bursts?|flies|arcs?|runs? fresh)\\b' +
+    '|\\b(?:opens?|tears?|carves?|rips?) (?:a |an )?(?:new )?(?:gash|wound|cut|rent)\\b' +
+    '|\\bbites? deep\\b|\\bsinks? (?:in|into) (?:flesh|bone|muscle)\\b' +
+    '|\\bdraws? blood\\b|\\bcuts? deep\\b', 'i');
 
   /* Second person about anybody. The narration is third-person by design. */
   var SECOND_PERSON = /\b(?:you|your|yours|yourself)\b/i;
